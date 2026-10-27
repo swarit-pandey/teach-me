@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLHF: reward models & PPO with KL</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="28">
+<main>
+
+<div class="kicker">Part 7 · RL on transformers</div>
+<h1>RLHF: reward models &amp; PPO with KL</h1>
+<p class="lede">A pretrained GPT can continue any text. It doesn't know which continuation a person would actually want. Reinforcement learning from human feedback (RLHF) closes that gap in three moves. Collect human comparisons of model outputs, fit a reward model to them, then fine-tune the language model with PPO to score well under that reward while staying close to where it started. Each move is something you already know: maximum likelihood (lesson 10), KL divergence (lesson 11) and PPO (lesson 27).</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Describe the pretrain → SFT → reward model → RL pipeline and what each stage contributes.</li>
+    <li>View text generation as a token-level MDP and say what the state, action, reward and policy are.</li>
+    <li>Derive the Bradley–Terry preference model and the reward-model loss as maximum likelihood.</li>
+    <li>Derive the closed-form optimum $\pi^* \propto \pi_{\text{ref}}\,e^{r/\beta}$ of the KL-regularized objective, and explain what β trades off.</li>
+    <li>Explain reward hacking, and why a <em>reverse</em> KL penalty to the reference model is the standard defence.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="pipeline">1. The pipeline</h2>
+<p>InstructGPT (Ouyang et al., 2022), the recipe behind ChatGPT, has four stages:</p>
+<table>
+  <tr><th>Stage</th><th>Data</th><th>Objective</th><th>Result</th></tr>
+  <tr><td>1. Pretrain</td><td>trillions of web tokens</td><td>next-token cross-entropy (lesson 24)</td><td>a model that can continue <em>any</em> text</td></tr>
+  <tr><td>2. SFT</td><td>~10⁴ prompts with human-written answers</td><td>same loss, on demonstrations (lesson 25)</td><td>$\pi_{\text{SFT}}$: answers in the right <em>format</em></td></tr>
+  <tr><td>3. Reward model</td><td>~10⁵ human comparisons "A is better than B"</td><td>Bradley–Terry likelihood (§3)</td><td>$r_\phi(x, y)$: a learned scalar judge</td></tr>
+  <tr><td>4. RL</td><td>prompts only; the policy writes its own answers</td><td>maximize $r_\phi$ − β·KL to $\pi_{\text{SFT}}$ (§5) with PPO</td><td>the aligned model</td></tr>
+</table>
+<p>Why not stop at SFT? Three reasons.</p>
+<ul>
+  <li><b>Judging is easier than writing.</b> A labeller who couldn't write an ideal answer can still say which of two answers is better. Comparisons also turn out to be far more consistent across people than absolute 1–10 scores.</li>
+  <li><b>SFT only imitates.</b> It learns to produce text that <em>looks like</em> the demonstrations, mistakes included, and gets no signal about what makes an answer good or bad. A reward lets the model learn from its <em>own</em> outputs, including outputs better than any demonstration.</li>
+  <li><b>Negative feedback.</b> Cross-entropy on demonstrations only says "do this". Preferences also say "not that", which matters for things like refusing harmful requests or not making facts up.</li>
+</ul>
+<p>From now on, $\pi_{\text{ref}}$ means the frozen SFT model. The RL stage starts with $\pi_\theta = \pi_{\text{ref}}$ and changes $\theta$.</p>
+
+<!-- ============================================================ -->
+<h2 id="mdp">2. Generation as a token-level MDP</h2>
+<p>Map lesson 26's vocabulary onto a chatbot answering prompt $x$:</p>
+<ul>
+  <li><b>State</b> $s_t = (x, y_1, \dots, y_{t-1})$: the prompt plus the tokens written so far. It's Markov by construction, since it contains everything.</li>
+  <li><b>Action</b> $a_t = y_t$, the next token, sampled from $\pi_\theta(\cdot\mid s_t)$, the transformer's softmax.</li>
+  <li><b>Transition</b>: deterministic. Append the token. (No environment model to learn at all.)</li>
+  <li><b>Reward</b>: zero until the end-of-sequence token, then the reward model's score $r_\phi(x, y)$. Usually $\gamma = 1$, because episodes are short and finite.</li>
+</ul>
+<p>The probability of a whole completion is the product of per-token probabilities, so its log is a sum:</p>
+$$\log\pi_\theta(y\mid x) = \sum_{t=1}^{T}\log\pi_\theta(y_t\mid x, y_{\lt t}).$$
+<p>Everything in lesson 27 now applies token by token. The "trajectory" is the completion. The policy gradient multiplies each token's score $\nabla\log\pi_\theta(y_t\mid\cdot)$ by an advantage, and the clipping happens per token. The sparse end-of-sequence reward is the credit-assignment problem in its purest form. Which of 200 tokens made the answer good? A learned critic plus GAE spreads the credit back.</p>
+
+<div class="figure">
+  <canvas id="fig-tok" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-tok"></div>
+  <div class="readout" id="out-tok"></div>
+  <div class="caption"><b>Try it:</b> build a completion one token at a time. Click a bar to choose the next token, or press <em>sample</em>. Grey bars are the reference policy $\pi_{\text{ref}}$; blue bars are an RL-tuned policy $\pi_\theta$ that has learned to like the letter <b>a</b>. The bottom strip shows the RLHF reward each token earns. Every token pays a KL penalty $-\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$ (pink if negative). Only the last token also receives the reward model's score (here: labellers like exactly three a's). Pick unlikely-under-the-reference tokens and watch the penalty grow.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bt">3. Preferences: the Bradley–Terry model</h2>
+<p>Labellers give us pairs: for prompt $x$, completion $y_w$ ("winner") was preferred over $y_l$ ("loser"). We want a scalar reward $r(x,y)$ that explains those choices. The <b>Bradley–Terry</b> model (1952, originally for ranking chess players and sports teams) says each item has a latent strength, and the probability that one beats another is a softmax over the two:</p>
+$$P(y_w \succ y_l \mid x) = \frac{e^{r(x,y_w)}}{e^{r(x,y_w)} + e^{r(x,y_l)}} = \frac{1}{1 + e^{-(r(x,y_w) - r(x,y_l))}} = \sigma\big(r(x,y_w) - r(x,y_l)\big).$$
+<p>(Divide top and bottom by $e^{r_w}$ to get the middle form.) It's logistic regression (lesson 14) on the <em>difference</em> of two scores. Two consequences follow immediately:</p>
+<ul>
+  <li>Only differences matter. Adding any constant $c(x)$ to every reward for the same prompt changes nothing, so the reward scale and offset are not identifiable from preferences. RLHF never needs them to be (§6 shows the optimal policy is also unchanged).</li>
+  <li>A gap of 1 in reward means about a 73% win rate ($\sigma(1) = 0.731$). A gap of 3 means 95%.</li>
+</ul>
+
+<h3>Maximum likelihood → the reward-model loss</h3>
+<p>Treat the comparisons as independent Bernoulli observations and maximize their likelihood (lesson 10). With a parameterized reward $r_\phi$, the negative log-likelihood of the dataset $\mathcal D$ is</p>
+$$\boxed{\;\mathcal L(\phi) = -\,\mathbb E_{(x, y_w, y_l)\sim\mathcal D}\Big[\log\sigma\big(r_\phi(x,y_w) - r_\phi(x,y_l)\big)\Big]\;}$$
+<p>Its gradient with respect to the margin $\Delta = r_w - r_l$ is</p>
+$$\frac{\partial}{\partial\Delta}\big[-\log\sigma(\Delta)\big] = -(1 - \sigma(\Delta)) = -\sigma(-\Delta).$$
+<p>Pairs the model already ranks confidently ($\Delta \gg 0$) contribute almost nothing. Pairs it gets wrong ($\Delta \lt 0$) contribute nearly the full unit push. It's the same "learn from your mistakes" weighting as cross-entropy.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-bt" width="360" height="300"></canvas></div>
+    <div><canvas id="fig-elo" width="420" height="300"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-bt"></div>
+  <div class="readout" id="out-bt"></div>
+  <div class="caption"><b>Try it:</b> left, drag the dot along the margin axis $\Delta = r_w - r_l$. You see the win probability $\sigma(\Delta)$ (blue), the loss $-\log\sigma(\Delta)$ (orange) and its gradient. Right, five responses A–E with hidden true rewards (hollow circles) generate $N$ random noisy comparisons. Press <em>fit</em> to run gradient descent on the Bradley–Terry loss (filled circles). With few comparisons the fit is rough. With many it lands on the true values, <em>up to a shift</em>: we pin the mean to zero, because preferences can't tell.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rm">4. Training the reward model</h2>
+<p>The reward model is usually the SFT transformer itself with the vocabulary head replaced by a <b>scalar head</b>, a linear layer applied to the final hidden state of the <em>last</em> token. Causal attention means only the last position has seen the whole prompt and response. Training data come from showing labellers $K$ completions per prompt and asking for a ranking. Each ranking yields $\binom K2$ pairs, all used in the loss above.</p>
+<p>Two facts keep expectations realistic:</p>
+<ul>
+  <li><b>Labels are noisy.</b> Human labellers agree with each other only about 63–77% of the time in published datasets. Even a perfect reward model can't beat the labels' own consistency. Under Bradley–Terry, a pair with true gap $\Delta$ is labelled "correctly" only $\sigma(|\Delta|)$ of the time. That sets the <em>Bayes limit</em> on held-out accuracy (problem 9). InstructGPT's 6B reward model reached about 72%.</li>
+  <li><b>The RM is only trustworthy on the distribution it was trained on.</b> It saw SFT-like answers. Once RL pushes the policy toward unusual text, the RM's scores there are extrapolations. That's the root of reward hacking (§7).</li>
+</ul>
+
+<div class="example">
+  <div class="label">Worked example: one reward-model gradient</div>
+  <p>The RM scores the chosen answer $r_w = 1.5$ and the rejected one $r_l = 0.5$. Then $P(y_w\succ y_l) = \sigma(1) = 0.731$ and the loss is $-\log 0.731 = 0.313$.</p>
+  <p>The gradient of the loss with respect to $r_w$ is $-(1-0.731) = -0.269$, and with respect to $r_l$ it is $+0.269$. Gradient descent raises $r_w$ and lowers $r_l$ by equal amounts, so the margin widens. Backprop then carries $\pm0.269$ into the transformer through each completion's last-token hidden state.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="kl">5. The objective: reward minus KL</h2>
+<p>Now fine-tune the policy to get high reward. The objective is <em>not</em> just $\mathbb E[r_\phi]$. It is</p>
+$$\boxed{\;\max_\theta\ \ \mathbb E_{x\sim\mathcal D,\ y\sim\pi_\theta(\cdot\mid x)}\big[r_\phi(x,y)\big] \;-\; \beta\,\mathbb E_x\Big[\mathrm{KL}\big(\pi_\theta(\cdot\mid x)\,\big\|\,\pi_{\text{ref}}(\cdot\mid x)\big)\Big]\;}$$
+<p>Why penalize moving away from the SFT model?</p>
+<ol>
+  <li><b>The reward model is wrong off-distribution.</b> An optimizer will find and exploit its errors (§7). Staying close to $\pi_{\text{ref}}$ keeps the policy where the RM's judgements were learned.</li>
+  <li><b>Keep what pretraining bought.</b> Fluency, knowledge and diversity live in $\pi_{\text{ref}}$. Unconstrained reward maximization collapses onto a few high-scoring strings.</li>
+  <li><b>Optimization stability.</b> It's a soft trust region over the whole run, complementing PPO's per-batch clipping.</li>
+</ol>
+<h3>Which KL, and why it's the reverse one</h3>
+<p>The penalty is $\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}}) = \mathbb E_{y\sim\pi_\theta}\big[\log\frac{\pi_\theta(y)}{\pi_{\text{ref}}(y)}\big]$, the expectation under the policy being trained. In lesson 11's terms this is the <b>reverse</b>, <b>mode-seeking</b> KL. It is infinite if $\pi_\theta$ puts mass anywhere $\pi_{\text{ref}}$ gives (nearly) zero probability, so the policy can't invent text the SFT model would never write. But it is happy for $\pi_\theta$ to <em>drop</em> some of $\pi_{\text{ref}}$'s modes and concentrate on the good ones. That's exactly the behaviour we want: become pickier, never weirder. It's also the only direction we can estimate cheaply. We sample $y$ from $\pi_\theta$ anyway, and the estimate is just $\log\pi_\theta(y) - \log\pi_{\text{ref}}(y)$, a difference of two forward passes.</p>
+<p>Because $\log\pi(y\mid x)$ is a sum over tokens, the sequence KL splits into per-token terms (the chain rule for KL, problem 7). So RLHF implementations fold the penalty into a <b>per-token reward</b>:</p>
+$$r_t = -\beta\,\Big(\log\pi_\theta(y_t\mid s_t) - \log\pi_{\text{ref}}(y_t\mid s_t)\Big) \;+\; \mathbb 1[t = T]\; r_\phi(x, y).$$
+<p>That's what the token figure in §2 displays, and it is the reward the PPO critic and GAE see.</p>
+
+<!-- ============================================================ -->
+<h2 id="optimum">6. The optimal policy, in closed form</h2>
+<p>For a single prompt, forget neural networks and ask which distribution $\pi$ over completions maximizes the objective. Write it out and pull out $-\beta$:</p>
+$$\sum_y \pi(y)\, r(y) - \beta\sum_y \pi(y)\log\frac{\pi(y)}{\pi_{\text{ref}}(y)} = -\beta\sum_y\pi(y)\Big[\log\frac{\pi(y)}{\pi_{\text{ref}}(y)} - \frac{r(y)}{\beta}\Big] = -\beta\sum_y\pi(y)\log\frac{\pi(y)}{\pi_{\text{ref}}(y)\,e^{r(y)/\beta}}.$$
+<p>The denominator isn't a distribution yet. Normalize it with $Z = \sum_y \pi_{\text{ref}}(y)e^{r(y)/\beta}$ and define $\pi^*(y) = \pi_{\text{ref}}(y)e^{r(y)/\beta}/Z$. Substituting $\pi_{\text{ref}}e^{r/\beta} = Z\pi^*$:</p>
+$$= -\beta\sum_y\pi(y)\log\frac{\pi(y)}{\pi^*(y)} + \beta\log Z = -\beta\,\mathrm{KL}(\pi\,\|\,\pi^*) + \beta\log Z.$$
+<p>$\beta\log Z$ doesn't depend on $\pi$, and KL ≥ 0 with equality only at $\pi = \pi^*$ (lesson 11). So the unique maximizer is</p>
+$$\boxed{\;\pi^*(y\mid x) = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\,\exp\!\Big(\frac{r(x,y)}{\beta}\Big)\;}$$
+<p>and the optimal value is $\beta\log Z$. This is the single most important equation for the rest of Part 7. Read it as <b>reweighting the reference model by exponentiated reward</b>. β is a temperature: as β → ∞, $\pi^* \to \pi_{\text{ref}}$ (ignore the reward); as β → 0, all mass goes to $\arg\max_y r$ (ignore the reference). Adding $c(x)$ to every reward multiplies numerator and $Z$ by $e^{c/\beta}$ and changes nothing, consistent with Bradley–Terry not identifying that constant.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-beta" width="440" height="320"></canvas></div>
+    <div><canvas id="fig-beta-frontier" width="340" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-beta"></div>
+  <div class="readout" id="out-beta"></div>
+  <div class="caption"><b>Try it:</b> next-token choice after the prompt "The capital of France is". Grey bars are $\pi_{\text{ref}}$, the number under each token is its reward, and blue bars are $\pi^* \propto \pi_{\text{ref}}e^{r/\beta}$. Slide β down from large to small and watch mass flow toward " Paris". Right, every β gives one point on the trade-off curve between expected reward and KL from the reference. No policy can sit above this curve (it's the exact optimum). Notice the diminishing returns: the last bit of reward costs a lot of KL.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: computing π*</div>
+  <p>Three completions with $\pi_{\text{ref}} = (0.5, 0.3, 0.2)$ and rewards $r = (0, 1, 2)$, at β = 1.</p>
+  <p>Unnormalized weights $\pi_{\text{ref}}e^{r}$: $0.5$, $0.3e = 0.8155$, $0.2e^2 = 1.4778$. They sum to $Z = 2.7933$. So $\pi^* = (0.179, 0.292, 0.529)$.</p>
+  <p>Expected reward rises from $0.7$ to $1.350$. $\mathrm{KL}(\pi^*\|\pi_{\text{ref}}) = 0.323$ nats. Objective: $1.350 - 0.323 = 1.027 = \log Z$ ✓ ($\beta\log Z$ with β = 1).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="hacking">7. Reward hacking</h2>
+<p><b>Goodhart's law</b>: when a measure becomes a target, it ceases to be a good measure. The reward model is a <em>proxy</em> for what humans want. It is accurate where it has data and has arbitrary errors elsewhere. Optimizing hard against a proxy finds exactly those errors. Documented examples include answers that get longer and longer (labellers mildly preferred detail, the RM learned "longer = better"), excessive flattery and hedging, confident-sounding wrong answers, and, for code models, special-casing the unit tests.</p>
+<p>In the toy below, the reward model is accurate on common answers but overrates some rare styles: flattery, all-caps enthusiasm, keyword stuffing. Those got few labels, so their RM errors are large. We compute the exact optimal policy $\pi^*_\beta$ against the <em>proxy</em> for every β and then evaluate it with the <em>true</em> reward.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-hack" width="400" height="330"></canvas></div>
+    <div><canvas id="fig-hack-bars" width="380" height="330"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-hack"></div>
+  <div class="readout" id="out-hack"></div>
+  <div class="caption"><b>Try it:</b> left, as optimization pressure increases (β decreases, KL from the reference grows to the right), the <span style="color:var(--c2)">proxy reward</span> the optimizer sees rises monotonically. The <span style="color:var(--c3)">true reward</span> first rises, then <em>falls below where it started</em>. Right, the policy at the current β (blue) versus the reference (grey), with each response's true and proxy reward. Slide β to the peak of the true curve, about 0.7–1, then keep going and watch the mass move onto "keyword-stuffed". The KL penalty is what keeps a real system near the peak.</div>
+</div>
+
+<div class="callout warning">
+<p>The KL penalty limits hacking, but it doesn't prevent it. It only limits how far the policy may travel. Practitioners also retrain the reward model on fresh comparisons of the <em>current</em> policy's outputs ("iterated RLHF"), use ensembles of reward models, early-stop on held-out human evaluations, and cap response length. Gao et al. (2023) measured this exact rise-then-fall curve on real models, with gold reward against $\sqrt{\mathrm{KL}}$.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ppo">8. PPO for RLHF, concretely</h2>
+<p>Put lesson 27's PPO on the token MDP. Four networks are involved: the <b>policy</b> $\pi_\theta$ (trained), the frozen <b>reference</b> $\pi_{\text{ref}}$, the frozen <b>reward model</b> $r_\phi$, and the <b>critic</b> $V_\psi$ (trained; usually initialized from the reward model). One iteration:</p>
+<ol>
+  <li><b>Rollout.</b> Sample a batch of prompts and generate completions with $\pi_\theta$. Store each token's $\log\pi_\theta$ (these become $\log\pi_{\text{old}}$), $\log\pi_{\text{ref}}$ and $V_\psi(s_t)$, plus the RM score of each finished completion.</li>
+  <li><b>Rewards.</b> Per-token KL penalties, plus the score on the last token (§5).</li>
+  <li><b>Advantages.</b> GAE over each completion's tokens with γ = 1 and λ ≈ 0.95, then whiten them.</li>
+  <li><b>Update.</b> A few epochs of the clipped PPO loss for $\pi_\theta$ and squared error for $V_\psi$ on the same batch.</li>
+</ol>
+<p>Typical practical additions are an <b>adaptive β</b> (raise β when the measured KL exceeds a target, lower it when below; InstructGPT used a fixed β ≈ 0.02), mixing some pretraining gradient back in ("PPO-ptx") to avoid forgetting, and normalizing the reward model's scores.</p>
+<div class="callout ml">
+<p>The workbook does all of this at toy scale. A 2-layer TinyGPT is pretrained on a synthetic "language" over the letters a–f (the SFT model). A transformer reward model is fit to 3000 Bradley–Terry-sampled preferences from labellers who like exactly three a's. Then PPO with per-token KL penalties fine-tunes the policy. The test checks that the reward rises by more than one point while the KL stays bounded. <code>train_rlhf.py</code> runs the full pipeline against the <em>learned</em> reward model at a large and a small β, and prints the RM score next to the labellers' true score. Small β is where you can catch reward hacking in the act.</p>
+<div class="callout key">
+<p><b>What the real run shows</b> (<code>train_rlhf.py</code> on a laptop CPU, about 12 s):</p>
+<ul>
+<li>The reward model reaches 70.7% held-out preference accuracy. The best achievable is 70.5%, because the labellers themselves are noisy. Yet it has a blind spot: it scores sequences with 4–8 a's at about +2.2, as high as exactly three. The labellers' true score falls to −2 at 8 a's. The reward model only ever saw pairs from the SFT model, which rarely produces many a's, so it never learned the downside.</li>
+<li><b>β = 0.3:</b> the true score rises from 1.45 to 2.38 and the KL stays around 1.</li>
+<li><b>β = 0.05:</b> the reward-model score climbs higher and the KL triples to about 3.5, but the true score ends at 2.31, <em>no better</em>. Samples start to fill up with a's (<code>caaefaaf</code>, <code>fabaabae</code>). The policy is spending its KL budget pushing into the reward model's blind spot. That is reward hacking caught early, and it's why β is the most important knob in RLHF.</li>
+</ul>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>A reward model scores two answers $r_w = 2.3$ and $r_l = 0.3$. Under Bradley–Terry, what's the probability a labeller prefers the first?</p>
+<div class="numcheck" data-answer="0.8808" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>$\sigma(2.3-0.3) = \sigma(2) = 1/(1+e^{-2}) = 0.8808$. Only the gap matters: $(102.3, 100.3)$ would give the same answer.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>A freshly initialized reward model outputs 0 for everything. What is its Bradley–Terry loss on any dataset?</p>
+<div class="numcheck" data-answer="0.6931" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>$-\log\sigma(0) = \log 2 \approx 0.693$, the loss of a coin flip. It's a useful sanity check: your RM training curve should start at 0.693 and go down.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Two next tokens with $\pi_{\text{ref}} = (0.5, 0.5)$ and rewards $(0, 1)$. With β = 0.5, what is $\pi^*$ of the second token? What is the optimal objective value $\beta\log Z$?</p>
+<div class="numcheck" data-answer="0.8808,0.7169" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>Weights $0.5e^0 = 0.5$ and $0.5e^{1/0.5} = 0.5e^2 = 3.6945$. So $\pi^*_2 = e^2/(1+e^2) = 0.8808$. $Z = 4.1945$ and $\beta\log Z = 0.5\cdot1.4338 = 0.7169$. Check: $\mathbb E[r] = 0.8808$, KL $= 0.8808\ln(1.7616) + 0.1192\ln(0.2384) = 0.4987 - 0.1709 = 0.3278$, and $0.8808 - 0.5\cdot0.3278 = 0.7169$ ✓.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>Re-derive $\pi^* \propto \pi_{\text{ref}}e^{r/\beta}$ with a Lagrange multiplier instead of "completing the KL". Maximize $\sum_y\pi(y)r(y) - \beta\sum_y\pi(y)\log\frac{\pi(y)}{\pi_{\text{ref}}(y)}$ subject to $\sum_y\pi(y) = 1$.</p>
+<details class="hint"><summary>Hint</summary><p>Differentiate with respect to a single $\pi(y)$. $\frac{d}{dp}\,p\log\frac{p}{q} = \log\frac pq + 1$.</p></details>
+<details class="solution"><summary>Solution</summary><p>Stationarity: $r(y) - \beta\big(\log\frac{\pi(y)}{\pi_{\text{ref}}(y)} + 1\big) - \lambda = 0$, so $\log\pi(y) = \log\pi_{\text{ref}}(y) + r(y)/\beta - 1 - \lambda/\beta$, i.e. $\pi(y) = \pi_{\text{ref}}(y)e^{r(y)/\beta}\cdot e^{-1-\lambda/\beta}$. The constant is fixed by normalization: $e^{-1-\lambda/\beta} = 1/Z$. The objective is strictly concave in $\pi$ (negative entropy is strictly convex), so this stationary point is the maximum.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A 3-token completion has policy log-probs $(-0.2, -1.0, -0.5)$, reference log-probs $(-0.4, -1.5, -0.5)$, RM score 2, and β = 0.1. Compute the per-token RLHF rewards and their sum.</p>
+<div class="numcheck" data-answer="1.93" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>Log-ratios: $0.2, 0.5, 0$. Rewards: $-0.02, -0.05, 0 + 2 = 2.0$. Sum $= 1.93 = 2 - 0.1\cdot0.7$, where $0.7$ is this sample's KL estimate. Note the first two tokens get <em>negative</em> reward for being more likely under the policy than under the reference.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · concept</span>
+<p>Show that adding a prompt-dependent constant $c(x)$ to the reward changes neither the Bradley–Terry likelihood nor $\pi^*$. Then explain why reward models are still often normalized (e.g. to mean 0 over SFT samples) before PPO.</p>
+<details class="solution"><summary>Solution</summary><p>BT depends on $r_w - r_l$, in which $c(x)$ cancels. $\pi^* = \pi_{\text{ref}}e^{(r+c)/\beta}/\sum\pi_{\text{ref}}e^{(r+c)/\beta}$: the factor $e^{c/\beta}$ cancels. So the <em>optimum</em> is invariant. PPO, however, learns from finite samples with a critic and advantage estimates. A large constant offset makes the critic's job harder and the early advantages badly scaled (the lesson 27 variance argument). Normalizing is about optimization, not the objective.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · proof</span>
+<p>Prove the chain rule for sequence KL: $\mathrm{KL}(\pi(y)\|\pi_{\text{ref}}(y)) = \mathbb E_{y\sim\pi}\big[\sum_t \log\frac{\pi(y_t\mid y_{\lt t})}{\pi_{\text{ref}}(y_t\mid y_{\lt t})}\big] = \sum_t\mathbb E_{y_{\lt t}\sim\pi}\big[\mathrm{KL}(\pi(\cdot\mid y_{\lt t})\,\|\,\pi_{\text{ref}}(\cdot\mid y_{\lt t}))\big]$.</p>
+<details class="solution"><summary>Solution</summary><p>$\log\frac{\pi(y)}{\pi_{\text{ref}}(y)} = \sum_t\log\frac{\pi(y_t\mid y_{\lt t})}{\pi_{\text{ref}}(y_t\mid y_{\lt t})}$ because both are products of conditionals. Take $\mathbb E_{y\sim\pi}$ and use linearity. For the $t$-th term, condition on the prefix: $\mathbb E_{y_{\lt t}}\mathbb E_{y_t\mid y_{\lt t}}[\log\frac{\pi(y_t\mid\cdot)}{\pi_{\text{ref}}(y_t\mid\cdot)}]$, and the inner expectation is the per-token KL. That's why a per-token penalty $-\beta\log\frac{\pi}{\pi_{\text{ref}}}$ summed over the completion is an unbiased sample of the sequence KL.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · concept</span>
+<p>Suppose RLHF used the <em>forward</em> KL $\mathrm{KL}(\pi_{\text{ref}}\|\pi_\theta)$ instead. What behaviour would it encourage, and why is it awkward to estimate during PPO?</p>
+<details class="solution"><summary>Solution</summary><p>Forward KL is mass-covering (lesson 11). It blows up wherever $\pi_{\text{ref}}$ has mass but $\pi_\theta$ doesn't, so the policy must keep putting probability on <em>everything</em> the SFT model might say, including the mediocre answers we wanted to drop. It's the SFT cross-entropy objective in disguise. Estimating it needs samples from $\pi_{\text{ref}}$ (an extra generation pass per batch), whereas the reverse KL uses the policy samples PPO already has.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>Labels are sampled from Bradley–Terry with the true reward. Every test pair has a true reward gap of exactly 1. What's the best held-out accuracy any reward model can achieve?</p>
+<div class="numcheck" data-answer="0.7311" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>The best you can do is always predict the truly better answer. That matches the label with probability $\sigma(1) = 0.731$. In general the Bayes accuracy is $\mathbb E[\sigma(|\Delta|)]$. That's why 70%-ish RM accuracy on human data is not a sign of a broken model. The workbook's test compares your RM to exactly this limit.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 10</div><span class="difficulty">stretch</span>
+<p>Using the hacking toy's numbers, at β = 1 the optimal policy has KL ≈ 0.26 and true reward 0.44 (from 0.20 at the reference). At β = 0.2: KL ≈ 1.97, true reward −0.35. Suppose a training run tracks only the RM score. Propose two signals you'd monitor to catch the problem, and explain why each works.</p>
+<details class="solution"><summary>Solution</summary><p>(1) KL to the reference: hacking needs the policy to move far, so a KL budget (or adaptive β targeting one) stops before the steep part of the curve. (2) A held-out "gold" evaluation: periodic human or stronger-model judgements, or a second reward model trained on different data. When proxy and gold diverge, you've crossed the peak. Other good answers: response-length statistics, sample diversity or entropy, and reading samples.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">In the token-level MDP for an LLM, what is the transition function?</div>
+  <div class="opts">
+    <button data-k="a">A learned model of how the user will respond.</button>
+    <button data-k="b">The reward model.</button>
+    <button data-k="c">Deterministic: the new state is the old state with the chosen token appended.</button>
+    <button data-k="d">The reference policy $\pi_{\text{ref}}$.</button>
+  </div>
+  <div class="explain">All the randomness is in the policy's sampling. That's why "model-free vs model-based" barely matters here, and why the reward and KL are the only interesting parts of the environment.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">Why is the reward model trained on <em>comparisons</em> rather than asking labellers for a 1–10 score?</div>
+  <div class="opts">
+    <button data-k="a">Because Bradley–Terry can only take binary inputs.</button>
+    <button data-k="b">Because relative judgements are much more consistent across labellers than absolute scores, and scale/offset don't matter for the optimal policy anyway.</button>
+    <button data-k="c">Because comparisons give the reward's absolute scale.</button>
+    <button data-k="d">Because PPO needs pairs.</button>
+  </div>
+  <div class="explain">Different people use 1–10 scales differently; "which is better?" is easier and more reliable. The lost offset is harmless: §6 showed $\pi^*$ is invariant to it.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">β → 0 in the KL-regularized objective. What does the optimal policy become?</div>
+  <div class="opts">
+    <button data-k="a">A point mass on the completion with the highest reward-model score, however unnatural.</button>
+    <button data-k="b">The reference model.</button>
+    <button data-k="c">The uniform distribution.</button>
+    <button data-k="d">The SFT model with temperature 0.</button>
+  </div>
+  <div class="explain">$\pi^* \propto \pi_{\text{ref}}e^{r/\beta}$: as β shrinks, the exponential swamps $\pi_{\text{ref}}$ and only the argmax survives. That's where reward hacking lives.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">The KL penalty uses $\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$. What does this direction forbid?</div>
+  <div class="opts">
+    <button data-k="a">Dropping any of the reference model's modes.</button>
+    <button data-k="b">Any change at all to the policy.</button>
+    <button data-k="c">Putting less probability on high-reward completions.</button>
+    <button data-k="d">Putting substantial probability on text the reference model considers very unlikely.</button>
+  </div>
+  <div class="explain">Reverse KL $\mathbb E_{\pi_\theta}[\log\pi_\theta/\pi_{\text{ref}}]$ explodes where $\pi_{\text{ref}}\approx0$ but $\pi_\theta$ isn't. It is mode-seeking: dropping modes is cheap, and inventing new ones is expensive.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Piece</th><th>Formula</th><th>Role</th></tr>
+  <tr><td>Bradley–Terry</td><td>$P(y_w\succ y_l) = \sigma(r_w - r_l)$</td><td>preference likelihood</td></tr>
+  <tr><td>RM loss</td><td>$-\mathbb E\log\sigma(r_\phi(y_w) - r_\phi(y_l))$</td><td>MLE for the reward</td></tr>
+  <tr><td>RLHF objective</td><td>$\mathbb E_{\pi}[r] - \beta\,\mathrm{KL}(\pi\|\pi_{\text{ref}})$</td><td>reward, but stay close</td></tr>
+  <tr><td>Optimal policy</td><td>$\pi^* = \pi_{\text{ref}}e^{r/\beta}/Z$</td><td>reweight the reference by reward</td></tr>
+  <tr><td>Per-token reward</td><td>$-\beta\log\frac{\pi}{\pi_{\text{ref}}} + \mathbb 1[t{=}T]\,r_\phi$</td><td>what PPO's critic sees</td></tr>
+  <tr><td>Reward hacking</td><td>proxy ↑, true ↑ then ↓ as KL grows</td><td>why β and KL budgets matter</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 28: build it</h3>
+  <p>Open <code>workbooks/28_rlhf/exercises.py</code> (PyTorch). You'll write the Bradley–Terry loss, a transformer reward model with a scalar head and train it to near the Bayes-limit accuracy on synthetic preferences, then implement the RLHF plumbing: per-token log-probs, the optimal KL policy, KL-penalized per-token rewards, batched GAE, the PPO loss, and finally the full PPO loop that fine-tunes a tiny GPT so its reward rises while its KL to the reference stays bounded.</p>
+  <pre><code>./course check 28
+python workbooks/28_rlhf/train_rlhf.py     # the whole pipeline, and reward hacking at small β</code></pre>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Ouyang et al., "Training language models to follow instructions with human feedback" (InstructGPT, 2022).</li>
+  <li>Stiennon et al., "Learning to summarize from human feedback" (2020). The KL-penalized PPO recipe, carefully ablated.</li>
+  <li>Gao, Schulman &amp; Hilton, "Scaling Laws for Reward Model Overoptimization" (2023).</li>
+  <li>Nathan Lambert, <em>Reinforcement Learning from Human Feedback</em> (online book, rlhfbook.com).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, fmt, LA } = Course;
+  const mono = "11px " + getComputedStyle(document.documentElement).getPropertyValue("--mono");
+
+  // ---------- fig: token MDP ----------
+  {
+    const L = "abcdef", T = [[.10, .35, .15, .10, .20, .10], [.25, .05, .30, .15, .10, .15], [.20, .15, .05, .35, .15, .10], [.15, .20, .15, .05, .30, .15], [.20, .10, .20, .15, .05, .30], [.30, .15, .10, .20, .20, .05]];
+    const LEN = 8, TILT = 1.3;
+    const ref = seq => seq.length ? T[seq[seq.length - 1]] : new Array(6).fill(1 / 6);
+    const pol = seq => { const r = ref(seq), w = r.map((p, i) => p * (i === 0 ? Math.exp(TILT) : 1)), s = w.reduce((a, b) => a + b, 0); return w.map(x => x / s); };
+    const score = seq => 3 - Math.abs(seq.filter(t => t === 0).length - 3);
+    let seq = [], beta = 0.3; const R = Course.rng(4);
+    const p = new Plot("#fig-tok", { xmin: 0, xmax: 10, ymin: 0, ymax: 10 });
+    const ctl = document.getElementById("ctl-tok"), out = document.getElementById("out-tok");
+    const add = t => { if (seq.length < LEN) { seq.push(t); p.render(); } };
+    const sample = () => { const q = pol(seq); let u = R.uniform(), a = 0; while (a < 5 && (u -= q[a]) > 0) a++; add(a); };
+    button(ctl, "sample next", sample);
+    button(ctl, "sample to end", () => { while (seq.length < LEN) sample(); });
+    button(ctl, "reset", () => { seq = []; p.render(); });
+    slider(ctl, { label: "β ", min: 0.05, max: 1, step: 0.05, value: 0.3 }, v => { beta = v; p.render(); });
+    // bars occupy x∈[0.6,9.6], y∈[5.2,9.2]
+    const barX = i => 0.8 + i * 1.5;
+    p.onClick = (x, y) => { if (y > 4.8 && seq.length < LEN) { const i = Math.floor((x - 0.6) / 1.5); if (i >= 0 && i < 6) add(i); } };
+    p.render(p => {
+      const done = seq.length >= LEN, r = ref(seq), q = pol(seq), H = 6;
+      p.label(0.3, 9.7, done ? "completion finished: reset to start again" : `next token after "^${seq.map(t => L[t]).join("")}"  (click a bar)`, { color: "muted", font: "12px sans-serif" });
+      p.line(0.5, 5.3, 9.6, 5.3, { color: "axis", width: 1 });
+      for (let i = 0; i < 6; i++) {
+        const x = barX(i);
+        p.rect(x, 5.3, x + .55, 5.3 + H * r[i], { fill: "muted", fillAlpha: done ? .2 : .6, color: "muted", width: 1 });
+        p.rect(x + .6, 5.3, x + 1.15, 5.3 + H * q[i], { fill: "c1", fillAlpha: done ? .2 : .8, color: "c1", width: 1 });
+        p.label(x + .58, 5.3, L[i], { align: "center", dy: 11, font: "600 14px sans-serif", color: i === 0 ? "c1" : "fg" });
+        if (!done) p.label(x + .58, 5.3 + H * Math.max(r[i], q[i]), (q[i] / r[i]).toFixed(2) + "×", { align: "center", dy: -9, font: mono, color: "muted" });
+      }
+      // bottom: per-token rewards
+      p.line(0.5, 2.2, 9.6, 2.2, { color: "axis", width: 1 });
+      p.label(0.3, 4.3, "per-token reward  r_t = −β·log(π/π_ref)  (+ RM score on the last token)", { color: "muted", font: "12px sans-serif" });
+      let tot = 0, kl = 0;
+      seq.forEach((t, k) => {
+        const pre = seq.slice(0, k), lr = Math.log(pol(pre)[t] / ref(pre)[t]); kl += lr;
+        let rt = -beta * lr; const last = k === LEN - 1; if (last) rt += score(seq);
+        tot += rt; const x = 0.7 + k * 1.12, hgt = Math.max(-1.9, Math.min(1.9, rt * (last ? 0.5 : 3)));
+        p.rect(x, 2.2, x + .8, 2.2 + hgt, { fill: rt >= 0 ? "c1" : "c4", fillAlpha: .7, color: rt >= 0 ? "c1" : "c4", width: 1 });
+        p.label(x + .4, 0.15, L[t], { align: "center", font: "600 14px sans-serif", color: t === 0 ? "c1" : "fg" });
+        p.label(x + .4, 2.2 + hgt, rt.toFixed(last ? 2 : 3), { align: "center", dy: hgt >= 0 ? -9 : 9, font: mono });
+      });
+      const na = seq.filter(t => t === 0).length;
+      out.textContent = `completion: ^${seq.map(t => L[t]).join("")}   #a = ${na}   Σ log(π/π_ref) = ${kl.toFixed(3)} (this sample's KL estimate)\n` +
+        (done ? `RM score = 3 − |#a − 3| = ${score(seq)}    return = score − β·KL = ${score(seq)} − ${beta}·${kl.toFixed(3)} = ${tot.toFixed(3)}` : `RM score arrives only at token ${LEN}; running Σ r_t = ${tot.toFixed(3)}`);
+    });
+  }
+
+  // ---------- fig: Bradley–Terry ----------
+  {
+    const sig = x => 1 / (1 + Math.exp(-x));
+    const b = new Plot("#fig-bt", { xmin: -5.5, xmax: 5.5, ymin: -1.25, ymax: 3.3 });
+    const hd = { x: 1, y: 0, color: "c5", constrain: (x) => [Math.max(-5, Math.min(5, x)), 0] };
+    const out = document.getElementById("out-bt");
+    let btText = "", eloText = "";
+    const show = () => { out.textContent = btText + "\n" + eloText; };
+    b.draggable([hd]).render(b => {
+      b.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      b.label(5.3, -1.05, "Δ = r_w − r_l", { align: "right", color: "muted", font: "12px sans-serif" });
+      b.fn(sig, { color: "c1", width: 2.5 }); b.fn(x => -Math.log(sig(x)), { color: "c2", width: 2.5 });
+      b.fn(x => -(1 - sig(x)), { color: "c4", width: 1.5, dash: [5, 4] });
+      const d = hd.x;
+      b.line(d, -1.2, d, 3.2, { color: "c5", width: 1, dash: [3, 3] });
+      b.point(d, sig(d), { color: "c1", r: 5 }); b.point(d, -Math.log(sig(d)), { color: "c2", r: 5 }); b.point(d, -(1 - sig(d)), { color: "c4", r: 4 });
+      b.label(1.3, 2.95, "σ(Δ)  win probability", { color: "c1", font: "12px sans-serif", bg: true }); b.label(1.3, 2.55, "−log σ(Δ)  loss", { color: "c2", font: "12px sans-serif", bg: true }); b.label(1.3, 2.15, "−σ(−Δ)  gradient", { color: "c4", font: "12px sans-serif", bg: true });
+      b.drawHandles();
+      btText = `Δ = ${d.toFixed(2)}:  P(y_w ≻ y_l) = σ(Δ) = ${sig(d).toFixed(3)}   loss = ${(-Math.log(sig(d))).toFixed(3)}   ∂loss/∂Δ = ${(-(1 - sig(d))).toFixed(3)}`; show();
+    });
+    // Elo-style fit
+    const TRUE = [-1.5, -0.5, 0, 0.8, 1.2], names = "ABCDE";
+    let N = 200, comps = [], fit = [0, 0, 0, 0, 0], seed = 3, it = 0;
+    const e = new Plot("#fig-elo", { xmin: -0.3, xmax: 5.3, ymin: -2.6, ymax: 2.6 });
+    const resample = () => { const R = Course.rng(seed); comps = []; for (let k = 0; k < N; k++) { const i = R.int(5); let j = R.int(4); if (j >= i) j++; const w = R.uniform() < sig(TRUE[i] - TRUE[j]); comps.push(w ? [i, j] : [j, i]); } fit = [0, 0, 0, 0, 0]; it = 0; };
+    const nll = () => comps.reduce((s, [w, l]) => s - Math.log(sig(fit[w] - fit[l])), 0) / comps.length;
+    const gdStep = () => { const g = [0, 0, 0, 0, 0]; comps.forEach(([w, l]) => { const q = 1 - sig(fit[w] - fit[l]); g[w] -= q; g[l] += q; }); fit = fit.map((f, i) => f - 2.0 * g[i] / comps.length); const m = fit.reduce((a, b) => a + b, 0) / 5; fit = fit.map(f => f - m); it++; };
+    const anim = Course.animator(() => { for (let k = 0; k < 4; k++) gdStep(); e.render(); return it < 1500; });
+    const ctl = document.getElementById("ctl-bt");
+    button(ctl, "fit", () => { anim.start(); });
+    button(ctl, "resample", () => { anim.stop(); seed++; resample(); e.render(); });
+    slider(ctl, { label: "comparisons N ", min: 10, max: 2000, step: 10, value: 200, digits: 0 }, v => { N = v; anim.stop(); resample(); e.render(); });
+    resample();
+    e.render(e => {
+      e.line(-0.2, 0, 5.2, 0, { color: "axis", width: 1 });
+      const mt = TRUE.reduce((a, b) => a + b, 0) / 5;
+      for (let i = 0; i < 5; i++) {
+        const x = i + .5, t = TRUE[i] - mt;
+        e.line(x, t, x, fit[i], { color: "muted", width: 1, dash: [3, 3] });
+        e.circle(x, t, 0.11, { color: "c3", width: 2 });
+        e.point(x, fit[i], { r: 6, color: "c1" });
+        e.label(x, -2.45, names[i], { align: "center", color: "fg", font: "600 13px sans-serif" });
+      }
+      [-2, -1, 1, 2].forEach(v => e.label(-0.2, v, String(v), { align: "left", color: "muted", font: "11px sans-serif" }));
+      e.label(5.2, 2.4, "○ true (centred)  ● fitted", { align: "right", color: "muted", font: "12px sans-serif" });
+      const acc = comps.filter(([w, l]) => fit[w] > fit[l]).length / comps.length;
+      eloText = `N = ${comps.length} comparisons, ${it} GD steps:  NLL = ${nll().toFixed(3)}   fitted ranks winner higher on ${(acc * 100).toFixed(1)}% of them   max |fit − true| = ${Math.max(...fit.map((f, i) => Math.abs(f - (TRUE[i] - mt)))).toFixed(2)}`; show();
+    });
+  }
+
+  // ---------- fig: β slider, optimal policy ----------
+  {
+    const toks = [" Paris", " the", " a", " located", " not", " Lyon", " Berlin", " beautiful"];
+    const pref = [0.30, 0.18, 0.12, 0.12, 0.05, 0.08, 0.05, 0.10], r = [2, 0.5, 0.3, 0.8, -0.5, -1.5, -2, 0.2];
+    let lb = 0; // log10 beta
+    const pstar = beta => { const w = pref.map((p, i) => Math.log(p) + r[i] / beta), m = Math.max(...w), e = w.map(x => Math.exp(x - m)), s = e.reduce((a, b) => a + b, 0); return e.map(x => x / s); };
+    const stats = beta => { const q = pstar(beta); return { q, er: LA.dot(q, r), kl: q.reduce((s, x, i) => s + (x > 0 ? x * Math.log(x / pref[i]) : 0), 0) }; };
+    const p = new Plot("#fig-beta", { xmin: -0.3, xmax: 8.1, ymin: -0.2, ymax: 1.08 });
+    const f = new Plot("#fig-beta-frontier", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const out = document.getElementById("out-beta");
+    const sl = slider("#ctl-beta", { label: "log₁₀ β ", min: -1.5, max: 1.5, step: 0.01, value: 0 }, v => { lb = v; p.render(); f.render(); });
+    p.render(p => {
+      const beta = Math.pow(10, lb), { q, er, kl } = stats(beta);
+      p.line(0, 0, 8, 0, { color: "axis", width: 1 });
+      for (let i = 0; i < 8; i++) {
+        p.rect(i + .1, 0, i + .48, pref[i], { fill: "muted", fillAlpha: .6, color: "muted", width: 1 });
+        p.rect(i + .52, 0, i + .9, q[i], { fill: "c1", fillAlpha: .8, color: "c1", width: 1 });
+        p.label(i + .5, 0, toks[i], { align: "center", dy: 10, font: "11px sans-serif" });
+        p.label(i + .5, 0, "r=" + r[i], { align: "center", dy: 24, font: mono, color: r[i] >= 0 ? "ok" : "bad" });
+        if (q[i] > .02) p.label(i + .71, q[i], q[i].toFixed(2), { align: "center", dy: -8, font: mono, color: "c1" });
+      }
+      p.label(0, 1.02, `prompt: "The capital of France is"     β = ${beta.toFixed(3)}`, { color: "muted", font: "12px sans-serif" });
+      out.textContent = `β = ${beta.toFixed(3)}:  E_π*[r] = ${er.toFixed(3)} (π_ref: ${LA.dot(pref, r).toFixed(3)})   KL(π*‖π_ref) = ${kl.toFixed(3)} nats   objective = E[r] − β·KL = ${(er - beta * kl).toFixed(3)} = β·log Z`;
+    });
+    f.render(f => {
+      const pts = []; for (let v = -1.5; v <= 1.5001; v += 0.02) { const s = stats(Math.pow(10, v)); pts.push([s.kl, s.er]); }
+      const kmax = Math.max(...pts.map(x => x[0])) * 1.08;
+      f.setView(-kmax * 0.14, kmax, -0.25, 2.2);
+      f.line(0, 0, kmax, 0, { color: "axis", width: 1 }); f.line(0, -0.25, 0, 2.2, { color: "axis", width: 1 });
+      f.path(pts, { color: "c2", width: 2.5 });
+      const s = stats(Math.pow(10, lb)); f.point(s.kl, s.er, { r: 6, color: "c1", stroke: "bg" });
+      f.point(0, LA.dot(pref, r), { r: 4, color: "muted", label: "π_ref" });
+      [0.5, 1, 1.5, 2].forEach(v => f.label(0, v, String(v), { align: "right", dx: -3, color: "muted", font: "11px sans-serif" }));
+      [0.5, 1, 1.5].forEach(v => v < kmax && f.label(v, 0, String(v), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      f.label(kmax, 0.12, "KL(π*‖π_ref) →", { align: "right", color: "muted", font: "11px sans-serif" });
+      f.label(kmax * 0.02, 2.1, "E[r] under π*", { color: "muted", font: "12px sans-serif" });
+    });
+  }
+
+  // ---------- fig: reward hacking ----------
+  {
+    const names = ["correct, clear", "correct, terse", "correct, rambling", "partly wrong", "off-topic", "refusal", "correct + flattery", "confident but wrong", "ALL-CAPS!!!", "keyword-stuffed"];
+    const P = [.20, .18, .15, .14, .10, .08, .06, .04, .03, .02], TR = [1, .8, .4, -.3, -.8, -.5, .7, -1, -.6, -1.2], PX = [1.6, 1.1, .6, -.3, -.8, -.6, 1.6, 1.3, 1.5, 2.2];
+    const pol = beta => { const w = P.map((p, i) => Math.log(p) + PX[i] / beta), m = Math.max(...w), e = w.map(x => Math.exp(x - m)), s = e.reduce((a, b) => a + b, 0); return e.map(x => x / s); };
+    const st = beta => { const q = pol(beta); return { q, kl: q.reduce((s, x, i) => s + (x > 1e-15 ? x * Math.log(x / P[i]) : 0), 0), px: LA.dot(q, PX), tr: LA.dot(q, TR) }; };
+    const curve = []; for (let v = 1.3; v >= -1.6; v -= 0.01) curve.push(st(Math.pow(10, v)));
+    let lb = 0;
+    const a = new Plot("#fig-hack", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const bb = new Plot("#fig-hack-bars", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const out = document.getElementById("out-hack");
+    slider("#ctl-hack", { label: "log₁₀ β ", min: -1.6, max: 1.3, step: 0.01, value: 0 }, v => { lb = v; a.render(); bb.render(); });
+    a.render(a => {
+      const kmax = 4.1; a.setView(-0.55, kmax, -1.55, 2.6);
+      a.line(0, 0, kmax, 0, { color: "axis", width: 1 }); a.line(0, -1.5, 0, 2.5, { color: "axis", width: 1 });
+      a.path(curve.map(s => [s.kl, s.px]), { color: "c2", width: 2.5 });
+      a.path(curve.map(s => [s.kl, s.tr]), { color: "c3", width: 2.5 });
+      const s = st(Math.pow(10, lb));
+      a.line(s.kl, -1.5, s.kl, 2.5, { color: "muted", dash: [4, 4], width: 1 });
+      a.point(s.kl, s.px, { r: 6, color: "c2", stroke: "bg" }); a.point(s.kl, s.tr, { r: 6, color: "c3", stroke: "bg" });
+      [-1, 1, 2].forEach(v => a.label(0, v, String(v), { align: "right", dx: -3, color: "muted", font: "11px sans-serif" }));
+      [1, 2, 3, 4].forEach(v => a.label(v, 0, String(v), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      a.label(kmax, -0.5, "KL(π*‖π_ref) →", { align: "right", color: "muted", font: "11px sans-serif" });
+      a.label(0.1, 2.45, "proxy (RM) reward", { color: "c2", font: "600 12px sans-serif" });
+      a.label(0.1, 2.15, "true reward", { color: "c3", font: "600 12px sans-serif" });
+      const best = curve.reduce((m, c) => c.tr > m.tr ? c : m, curve[0]);
+      a.label(best.kl, best.tr, "peak", { align: "center", dy: -12, color: "c3", font: "11px sans-serif" });
+      out.textContent = `β = ${Math.pow(10, lb).toFixed(3)}:  KL = ${s.kl.toFixed(3)}   proxy reward = ${s.px.toFixed(3)}   TRUE reward = ${s.tr.toFixed(3)}    (reference: proxy ${LA.dot(P, PX).toFixed(3)}, true ${LA.dot(P, TR).toFixed(3)}; best true ${best.tr.toFixed(3)} at KL ${best.kl.toFixed(2)})`;
+    });
+    bb.render(b => {
+      const { q } = st(Math.pow(10, lb)); b.setView(-1.75, 1.05, -0.6, 10.2);
+      for (let i = 0; i < 10; i++) {
+        const y = 9.5 - i;
+        b.rect(0, y - .38, P[i], y - .05, { fill: "muted", fillAlpha: .6, color: "muted", width: 1 });
+        b.rect(0, y - .02, q[i], y + .35, { fill: "c1", fillAlpha: .8, color: "c1", width: 1 });
+        b.label(-0.03, y + .12, names[i], { align: "right", font: "11px sans-serif", color: i >= 6 ? "c4" : "fg" });
+        b.label(-0.03, y - .3, `true ${TR[i] >= 0 ? "+" : ""}${TR[i]}  RM ${PX[i] >= 0 ? "+" : ""}${PX[i]}`, { align: "right", font: "10px " + getComputedStyle(document.documentElement).getPropertyValue("--mono"), color: "muted" });
+      }
+      b.label(1.0, -0.35, "grey π_ref   blue π*", { align: "right", color: "muted", font: "11px sans-serif" });
+    });
+  }
+});
+</script>
+</body>
+</html>

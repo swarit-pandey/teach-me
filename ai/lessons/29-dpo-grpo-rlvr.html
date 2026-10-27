@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DPO, GRPO & RL with verifiable rewards</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="29">
+<main>
+
+<div class="kicker">Part 7 · RL on transformers</div>
+<h1>DPO, GRPO &amp; RL with verifiable rewards</h1>
+<p class="lede">PPO-based RLHF works, but it keeps four transformers in memory and samples inside the training loop, and it is notoriously finicky. Two simplifications now dominate practice. DPO notices that lesson 28's closed-form optimum lets you skip the reward model and the RL loop entirely, leaving one supervised loss on preference pairs. GRPO keeps RL but throws away the critic, using a group of sampled answers to the same prompt as its own baseline. Paired with rewards a program can verify, GRPO is how today's reasoning models are trained.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Derive the DPO loss from $\pi^*\propto\pi_{\text{ref}}e^{r/\beta}$ and Bradley–Terry, showing every algebra step and why the partition function cancels.</li>
+    <li>Explain DPO's implicit reward and read its gradient as "push up the winner, push down the loser, weighted by how wrong we are".</li>
+    <li>Compute GRPO's group-normalized advantages, and explain why they make a value network unnecessary.</li>
+    <li>Design a verifiable reward and explain when RLVR gives a learning signal, and when it gives none.</li>
+    <li>Compare PPO-RLHF, DPO and GRPO by data, compute and failure modes.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="recap">1. Where we left off</h2>
+<p>Lesson 28's RLHF objective, for each prompt $x$:</p>
+$$\max_\pi\ \mathbb E_{y\sim\pi(\cdot\mid x)}[r(x,y)] - \beta\,\mathrm{KL}\big(\pi(\cdot\mid x)\,\|\,\pi_{\text{ref}}(\cdot\mid x)\big),$$
+<p>whose exact maximizer we derived:</p>
+$$\pi^*(y\mid x) = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\,e^{r(x,y)/\beta},\qquad Z(x) = \sum_y \pi_{\text{ref}}(y\mid x)\,e^{r(x,y)/\beta}.$$
+<p>We can't just <em>compute</em> $\pi^*$, because $Z(x)$ sums over every possible completion (astronomically many). So PPO approximates it by sampling, which takes a reward model, a critic, a frozen reference, the policy, and rollouts every step. DPO's insight is to run the formula <b>backwards</b>.</p>
+
+<!-- ============================================================ -->
+<h2 id="dpo">2. Deriving DPO, step by step</h2>
+<p><b>Step 1: take logs of the optimum.</b> Everything is positive, so</p>
+$$\log\pi^*(y\mid x) = \log\pi_{\text{ref}}(y\mid x) + \frac{r(x,y)}{\beta} - \log Z(x).$$
+<p><b>Step 2: solve for the reward.</b> Move terms across and multiply by β:</p>
+$$r(x,y) = \beta\log\frac{\pi^*(y\mid x)}{\pi_{\text{ref}}(y\mid x)} + \beta\log Z(x).$$
+<p>Every reward function corresponds to an optimal policy, and this line says you can read the reward back off that policy, up to the prompt-only term $\beta\log Z(x)$.</p>
+<p><b>Step 3: plug into Bradley–Terry.</b> Preferences depend only on reward <em>differences</em> for the same prompt (lesson 28 §3):</p>
+$$P(y_w\succ y_l\mid x) = \sigma\big(r(x,y_w) - r(x,y_l)\big) = \sigma\Big(\beta\log\frac{\pi^*(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} + \beta\log Z(x) - \beta\log\frac{\pi^*(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)} - \beta\log Z(x)\Big).$$
+<p><b>Step 4: the intractable term cancels.</b> Both completions answer the same prompt, so $\beta\log Z(x)$ appears once with each sign:</p>
+$$P(y_w\succ y_l\mid x) = \sigma\Big(\beta\log\frac{\pi^*(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi^*(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big).$$
+<p>The human preference probability is now written entirely in terms of the optimal <em>policy</em>. No reward function and no $Z$ remain.</p>
+<p><b>Step 5: fit the policy by maximum likelihood.</b> We don't know $\pi^*$, so parameterize it as our language model $\pi_\theta$ and maximize the likelihood of the observed preferences (lesson 10), exactly as we did for the reward model:</p>
+$$\boxed{\;\mathcal L_{\text{DPO}}(\theta) = -\,\mathbb E_{(x,y_w,y_l)\sim\mathcal D}\Big[\log\sigma\Big(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big]\;}$$
+<p>This is <b>Direct Preference Optimization</b> (Rafailov et al., 2023), subtitled "your language model is secretly a reward model". It is the reward-model loss with the reward replaced by $\hat r_\theta(x,y) = \beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$, the <b>implicit reward</b>. Training needs only four sequence log-probabilities per pair: the policy and reference on chosen and rejected. Each is a sum of per-token log-probs (lesson 28 §2), computed with one forward pass. There is no sampling, no reward model and no critic: it's a supervised loss.</p>
+
+<div class="figure">
+  <canvas id="fig-dpo" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-dpo"></div>
+  <div class="readout" id="out-dpo"></div>
+  <div class="caption"><b>Try it:</b> the DPO loss for one pair as a function of how much the policy has changed each completion's log-probability relative to the reference: $u_w = \log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}$ across, $u_l$ up. The more intense the blue, the lower the loss. Drag the point. The arrow is the negative gradient, the direction DPO moves. Notice: (1) the contours are diagonal lines, so only $u_w - u_l$ matters. (2) The gradient is always the same direction, $(+1, -1)$, and only its length changes (the weight $\sigma(-\text{margin})$). (3) Nothing stops both log-probs from <em>falling</em> (move down-left along a contour), as long as the loser falls faster. Real DPO runs often show exactly that.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="grad">3. What the DPO gradient does</h2>
+<p>Write $\hat r_w = \beta\log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}$ and $\hat r_l$ likewise. Then $\mathcal L = -\log\sigma(\hat r_w - \hat r_l)$, and with $\frac{d}{dz}[-\log\sigma(z)] = -\sigma(-z)$:</p>
+$$\nabla_\theta\mathcal L_{\text{DPO}} = -\beta\,\mathbb E\Big[\underbrace{\sigma(\hat r_l - \hat r_w)}_{\text{how wrong}}\,\big(\underbrace{\nabla_\theta\log\pi_\theta(y_w\mid x)}_{\text{push winner up}} - \underbrace{\nabla_\theta\log\pi_\theta(y_l\mid x)}_{\text{push loser down}}\big)\Big].$$
+<p>(The reference terms are constants and vanish.) Compare with plain SFT on the chosen answers, whose gradient is $-\mathbb E[\nabla\log\pi_\theta(y_w)]$. DPO adds a <em>negative</em> term for the loser and weights each pair by how badly the implicit reward currently ranks it. Pairs already ranked correctly by a wide margin stop contributing. β plays the role it had in RLHF: small β lets $\hat r$ change a lot for a small change in log-probs, so the policy may drift far from the reference. Large β keeps it close.</p>
+
+<div class="example">
+  <div class="label">Worked example: one DPO pair</div>
+  <p>β = 0.1. During training the policy has <em>raised</em> both completions relative to the reference: $u_w = \log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)} = +0.5$, $u_l = +1.5$. Implicit rewards: $\hat r_w = 0.05$, $\hat r_l = 0.15$. The margin is $-0.1$, so the implicit reward ranks this pair <em>wrongly</em>.</p>
+  <p>Loss: $-\log\sigma(-0.1) = 0.744$ (above $\log 2 = 0.693$, the loss at $\pi_\theta = \pi_{\text{ref}}$). Weight: $\sigma(0.1) = 0.525$. The update is $0.1\cdot0.525 = 0.0525$ times $(\nabla\log\pi_\theta(y_w) - \nabla\log\pi_\theta(y_l))$, pushing $y_l$'s probability down harder than anything else in the batch.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="target">4. What DPO converges to</h2>
+<p>If the preferences really follow Bradley–Terry with some reward $r$, and the data cover every pair, the DPO loss is minimized when the implicit reward matches the true one up to a prompt constant: $\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}} = r + c(x)$. Rearranging, that is $\pi_\theta \propto \pi_{\text{ref}}e^{r/\beta} = \pi^*$ (problem 9). So DPO and PPO-RLHF aim at <b>the same target policy</b>. They differ in how they get there and in what happens with finite, off-policy data.</p>
+
+<div class="figure">
+  <canvas id="fig-dpo-train" width="680" height="360"></canvas>
+  <div class="controls" id="ctl-dpo-train"></div>
+  <div class="readout" id="out-dpo-train"></div>
+  <div class="caption"><b>Try it:</b> six possible responses with reference probabilities (grey) and true rewards (below each). Preference pairs are drawn from $\pi_{\text{ref}}\times\pi_{\text{ref}}$ and labelled by Bradley–Terry. Press <em>train</em> to run gradient descent on the expected DPO loss. The policy (blue) moves onto the RLHF optimum $\pi^*\propto\pi_{\text{ref}}e^{r/\beta}$ (outlined), even though no reward was ever given to it. Only pairwise preferences were. Change β and retrain: small β, sharp policy; large β, close to the reference.</div>
+</div>
+
+<div class="callout warning">
+<p>In practice the data are finite and <b>offline</b>: the pairs were sampled from some earlier model, not from $\pi_\theta$. DPO only constrains log-ratio <em>differences</em> on completions that appear in the data. It says nothing directly about the rest of the space, where probability mass can drift. Common remedies: <b>online/iterative DPO</b> (regularly sample new pairs from the current policy and get them labelled), adding a small SFT term on the chosen answers, and choosing β with care.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="grpo">5. GRPO: RL without a critic</h2>
+<p>Sometimes you <em>want</em> on-policy RL, for example when the reward is a program that can grade anything the model writes. PPO's most expensive and fragile part there is the critic $V_\psi$: a second transformer that must predict the final reward from every prefix.</p>
+<p><b>Group Relative Policy Optimization</b> (Shao et al., DeepSeekMath, 2024) replaces it with statistics. For each prompt $x$, sample a <b>group</b> of $G$ completions $y_1,\dots,y_G$ from $\pi_{\text{old}}$, score them $r_1,\dots,r_G$, and set every token of completion $i$ to the same advantage:</p>
+$$\boxed{\;\hat A_i = \frac{r_i - \operatorname{mean}(r_1,\dots,r_G)}{\operatorname{std}(r_1,\dots,r_G) + \epsilon}\;}$$
+<p>Why is that legitimate? Lesson 27 §4: any baseline that doesn't depend on the action leaves the policy gradient unbiased, and the best ones are close to the expected return from the state, $V(x)$. The group mean is a Monte-Carlo estimate of exactly $V(x) = \mathbb E_{y\sim\pi}[r(x,y)]$, computed from samples you had to draw anyway. (Strictly, including $y_i$'s own reward in its baseline adds a small bias. RLOO's "leave-one-out" mean of the other $G-1$ fixes that.) Dividing by the std normalizes the scale per prompt.</p>
+<p>The objective is PPO's clipped surrogate (lesson 27 §7) with the KL to the reference added to the <em>loss</em> rather than folded into the reward:</p>
+$$\mathcal J_{\text{GRPO}}(\theta) = \mathbb E\Big[\frac1G\sum_{i=1}^G\frac{1}{|y_i|}\sum_t\Big(\min\big(\rho_{i,t}\hat A_i,\ \operatorname{clip}(\rho_{i,t},1-\varepsilon,1+\varepsilon)\hat A_i\big) - \beta\,\hat{\mathbb D}_{\text{KL}}\big[\pi_\theta\|\pi_{\text{ref}}\big]_{i,t}\Big)\Big].$$
+<p>Here $\rho_{i,t} = \pi_\theta(y_{i,t}\mid\cdot)/\pi_{\text{old}}(y_{i,t}\mid\cdot)$, and the per-token KL uses the low-variance, always-non-negative estimator</p>
+$$\hat{\mathbb D}_{\text{KL}} = \frac{\pi_{\text{ref}}}{\pi_\theta} - \log\frac{\pi_{\text{ref}}}{\pi_\theta} - 1 \;\ge 0,\qquad \mathbb E_{\pi_\theta}\big[\hat{\mathbb D}_{\text{KL}}\big] = 1 - \mathbb E_{\pi_\theta}\Big[\log\frac{\pi_{\text{ref}}}{\pi_\theta}\Big] - 1 = \mathrm{KL}(\pi_\theta\|\pi_{\text{ref}}).$$
+<p>(It's $e^x - x - 1 \ge 0$ with $x = \log\frac{\pi_{\text{ref}}}{\pi_\theta}$, and $\mathbb E_{\pi_\theta}[\pi_{\text{ref}}/\pi_\theta] = \sum\pi_{\text{ref}} = 1$.) What disappears compared to PPO-RLHF: the value network, GAE, and per-token reward shaping. What it costs: $G$ samples per prompt, typically 8–64.</p>
+
+<div class="figure">
+  <canvas id="fig-group" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-group"></div>
+  <div class="readout" id="out-group"></div>
+  <div class="caption"><b>Try it:</b> one prompt, a group of $G$ sampled answers. Each answer is correct (green, reward 1) or not (reward 0) with the policy's current success probability $p$. Top row: rewards. Bottom row: normalized advantages, the weight every token of that answer gets. Press <em>resample</em> a few times at $p = 0.1$: often <em>every</em> answer is wrong, the std is 0, and all advantages are 0. The prompt teaches nothing. When one answer is right, it gets a big positive advantage. Switch on partial credit (e.g. a format reward) and see that groups almost never tie.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: one group</div>
+  <p>$G = 4$ answers to a math problem, rewards $(0, 0, 0, 1)$. Mean $= 0.25$, std $= \sqrt{0.25\cdot0.75} = 0.433$.</p>
+  <p>Advantages: wrong answers $(0-0.25)/0.433 = -0.577$; the right one $(1-0.25)/0.433 = +1.732$. They sum to zero. The single success gets three times the (opposite-signed) weight of each failure, so the update says "do much more of that one, a bit less of the others". With rewards $(1,1,1,1)$ or $(0,0,0,0)$, every advantage is 0 and the prompt contributes no gradient. Only the KL term acts.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rlvr">6. RL with verifiable rewards</h2>
+<p>A learned reward model is a proxy, and lesson 28 showed what optimizers do to proxies. For many valuable tasks a program can check the answer directly:</p>
+<ul>
+  <li><b>Math</b>: extract the final answer (e.g. from <code>\boxed{…}</code>), normalize it, compare with the reference. Reward 1 or 0.</li>
+  <li><b>Code</b>: run hidden unit tests in a sandbox. Reward = all pass, or the fraction passed.</li>
+  <li><b>Format / instruction following</b>: "answer in JSON", "think inside &lt;think&gt; tags" are checkable with a parser or regex. These are often added as a small extra reward.</li>
+</ul>
+<p>This is <b>RLVR</b>: RL with verifiable rewards. It pairs naturally with GRPO, since rewards are cheap, so you can afford many samples per prompt. DeepSeek-R1-Zero (2025) applied GRPO with only accuracy and format rewards to a base model. Long chains of thought, self-checking and backtracking emerged on their own, because they raised the probability of a verified-correct final answer.</p>
+<p>Verifiable doesn't mean unhackable. A checker that only compares the last number can be satisfied by guessing. Weak unit tests reward special-casing. Format rewards can be farmed. But the attack surface is a few lines of code you can read and fix, not a 70-billion-parameter reward model.</p>
+
+<div class="figure">
+  <canvas id="fig-signal" width="680" height="320"></canvas>
+  <div class="controls" id="ctl-signal"></div>
+  <div class="readout" id="out-signal"></div>
+  <div class="caption"><b>Try it:</b> with 0/1 rewards and group size $G$, a prompt produces a learning signal only if its group contains both a success and a failure. The probability of that is $1 - p^G - (1-p)^G$ (blue), where $p$ is the policy's pass rate on the prompt. The orange curve is the expected mean |advantage| per answer. Slide $G$ and drag the marker. Prompts the model always fails ($p\approx0$) or always solves ($p\approx1$) are wasted compute. That's why RLVR pipelines filter or <b>curriculum</b> their prompts toward the middle, and why a model must already be able to solve a problem <em>sometimes</em> before RL can teach it.</div>
+</div>
+
+<div class="callout ml">
+<p>The workbook makes this concrete. A tiny transformer is fine-tuned on single-digit addition from a <b>sloppy teacher</b> who is right only 40% of the time and otherwise off by one or two. Sampling from the resulting model is right only about as often as the teacher was, even though the correct answer is its single most likely one. GRPO with a 5-line checker (<code>check_answer</code>) and no reward model, no critic and no human labels must raise sampled accuracy by at least 20 points in 60 iterations of 64 prompts × 8 samples to pass the test. That is RL <em>sharpening</em> a distribution that already contained the answer. <code>train_grpo.py</code> also reports pass@8 before and after, the standard way to see that difference.</p>
+<div class="callout key">
+<p><b>What the real runs show</b> (<code>train_grpo.py</code> on a laptop CPU, about 13 s):</p>
+<ul>
+<li><b>GRPO:</b> sampled accuracy (pass@1) rises from 30.6% to 74.8%, and pass@8 from 93.0% to 99.2%. The SFT model nearly always had a correct answer somewhere in its 8 samples. GRPO taught it to put that answer first, which is the "sharpening" described above.</li>
+<li><b>DPO at β = 0.1 collapses.</b> Its training metrics look healthy: loss 0.693 → 0.573, and the implicit reward ranks 71% of pairs correctly. But sampled sequences jump from 1.5 a's to <b>7.4</b> (the labellers want 3), the true score <em>falls</em> from 1.47 to −1.40, and the KL reaches 13.5. Both the chosen and the rejected log-probabilities were pushed down (chosen −13.4 → −28.0 in a similar run). The policy learned "more a's beats fewer" from the pairs and extrapolated far past anything in the data.</li>
+<li><b>DPO at β = 0.5</b> stays near the reference: 2.86 a's, true score 1.47 → 2.35, KL 1.05.</li>
+</ul>
+<p>Lesson: falling DPO loss does not mean a better policy. Always evaluate by <em>sampling</em>, and treat β as a leash. The workbook test uses β = 0.5 for exactly this reason. (This failure was found while building this course: the first version of the test used β = 0.1 and failed.)</p>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="compare">7. PPO-RLHF vs DPO vs GRPO</h2>
+<table>
+  <tr><th></th><th>PPO-RLHF (lesson 28)</th><th>DPO</th><th>GRPO (+ RLVR)</th></tr>
+  <tr><td>Training signal</td><td>reward model score</td><td>preference pairs directly</td><td>any scalar reward; often a verifier</td></tr>
+  <tr><td>Sampling during training</td><td>yes (on-policy)</td><td>no (offline pairs)</td><td>yes, $G$ samples per prompt</td></tr>
+  <tr><td>Networks in memory</td><td>policy, reference, reward model, critic</td><td>policy, reference (ref log-probs can be precomputed)</td><td>policy, reference (+ RM if not verifiable)</td></tr>
+  <tr><td>Baseline / advantage</td><td>learned critic + GAE</td><td>none needed (supervised)</td><td>group mean / std</td></tr>
+  <tr><td>KL to reference</td><td>per-token penalty in the reward</td><td>implicit, through β in the loss</td><td>explicit k3 term in the loss</td></tr>
+  <tr><td>Target policy</td><td>$\pi_{\text{ref}}e^{r/\beta}/Z$</td><td>same, in the ideal limit</td><td>same objective, sampled</td></tr>
+  <tr><td>Main failure modes</td><td>reward hacking, instability, many hyperparameters</td><td>off-policy drift, likelihood of both answers falling, overfitting the pairs</td><td>no signal on too-easy or too-hard prompts, checker gaming, length biases</td></tr>
+  <tr><td>Typical use</td><td>general chat alignment (original ChatGPT recipe)</td><td>cheap preference tuning, open models</td><td>reasoning: math, code, agents</td></tr>
+</table>
+<p>They aren't rivals so much as tools for different signals. Preferences with no checker point to DPO, or a reward model plus PPO or GRPO. A checker points to GRPO-style RLVR. Many production pipelines use several in sequence.</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>β = 0.1. Sequence log-probs: policy chosen −12, reference chosen −14, policy rejected −15, reference rejected −14. Compute the DPO loss for this pair.</p>
+<div class="numcheck" data-answer="0.5544" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>$u_w = -12-(-14) = 2$ and $u_l = -15-(-14) = -1$. Margin $= 0.1\,(2-(-1)) = 0.3$. Loss $= -\log\sigma(0.3) = 0.5544$, below $\log2$ because the pair is already ranked correctly.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>In problem 1, by what factor does each completion's gradient get scaled, i.e. what is $\sigma(\hat r_l - \hat r_w)$?</p>
+<div class="numcheck" data-answer="0.4256" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>$\sigma(-0.3) = 0.4256$. Compare 0.5 at the start of training. As the margin grows, this weight decays toward 0 and the pair stops mattering.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core · proof</span>
+<p>In step 4 of the derivation, $\beta\log Z(x)$ cancels. What property of the data makes that work? Would DPO still work if a "pair" compared answers to two <em>different</em> prompts?</p>
+<details class="solution"><summary>Solution</summary><p>It cancels because both completions share the same prompt $x$, hence the same $Z(x)$. For different prompts $x_1, x_2$ the difference keeps $\beta(\log Z(x_1) - \log Z(x_2))$, which depends on $\theta$-independent but unknown and intractable quantities, and the loss is no longer a function of the policy alone. (Bradley–Terry across prompts would also be strange: "is this answer to question 1 better than that answer to question 2?")</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>GRPO group of $G = 8$ with rewards $(1,1,0,0,0,0,0,0)$. What advantage does each correct answer get (population std, ε → 0)?</p>
+<div class="numcheck" data-answer="1.732" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>Mean $0.25$, std $\sqrt{0.25\cdot0.75} = 0.433$. Correct: $0.75/0.433 = 1.732$. Wrong: $-0.25/0.433 = -0.577$. It's the same as the worked example: only the success fraction matters for 0/1 rewards.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A prompt has pass rate $p = 0.1$ and you sample groups of $G = 8$. What fraction of groups give <em>zero</em> learning signal?</p>
+<div class="numcheck" data-answer="0.4305" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>Zero signal means all fail or all succeed: $0.9^8 + 0.1^8 = 0.4305$. 43% of the compute on this prompt is wasted. With $G = 16$ it's $0.9^{16} = 0.185$, which is one reason hard problems need bigger groups.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · proof</span>
+<p>Prove the k3 estimator $\frac{\pi_{\text{ref}}}{\pi} - \log\frac{\pi_{\text{ref}}}{\pi} - 1$ is (a) non-negative for every sample and (b) unbiased for $\mathrm{KL}(\pi\|\pi_{\text{ref}})$ when the token is sampled from $\pi$. Why prefer it over the simpler estimator $\log\frac{\pi}{\pi_{\text{ref}}}$, which is also unbiased?</p>
+<details class="solution"><summary>Solution</summary><p>(a) With $x = \log\frac{\pi_{\text{ref}}}{\pi}$ it's $e^x - x - 1$, which is convex with minimum 0 at $x=0$. (b) $\mathbb E_\pi[\pi_{\text{ref}}/\pi] = \sum_y\pi_{\text{ref}}(y) = 1$, so $\mathbb E = 1 + \mathbb E_\pi[\log\frac{\pi}{\pi_{\text{ref}}}] - 1 = \mathrm{KL}$. The plain log-ratio is negative on many samples, so its per-sample values are noisy and can make a penalty <em>reward</em> divergence on a batch. k3 is never negative and has lower variance when $\pi\approx\pi_{\text{ref}}$ (it is second order in $x$).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · concept</span>
+<p>DPO's loss only depends on $u_w - u_l$. Describe a training trajectory where the loss goes down but the chosen answers become <em>less</em> likely than under the reference. Why might that be harmful, and name one fix.</p>
+<details class="solution"><summary>Solution</summary><p>Both $u_w$ and $u_l$ decrease, with $u_l$ falling faster: the margin grows and the loss falls, yet $\pi_\theta(y_w) \lt \pi_{\text{ref}}(y_w)$. The mass removed from both has to go somewhere, possibly to completions in no pair, including bad ones. Fixes: add an SFT (negative log-likelihood) term on chosen answers, constrain $u_w \ge 0$ (as in DPOP), use larger β, or collect pairs online from the current policy.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · concept</span>
+<p>Your SFT model's pass rate on a set of competition problems is 0% at temperature 1, even with 64 samples per problem. Will GRPO with a correctness checker help on these problems? What would you do instead?</p>
+<details class="solution"><summary>Solution</summary><p>No. Every group is all-zero, every advantage is 0, and the only gradient is the KL term pulling toward the reference. RL can only reinforce behaviour it samples. Options: easier prompts first (curriculum), partial-credit rewards (intermediate steps, partially passing tests), more SFT on worked solutions or distillation from a stronger model, hints in the prompt, or larger groups and higher temperature for problems that are merely rare rather than impossible.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch · proof</span>
+<p>Assume preferences follow Bradley–Terry with reward $r$ and pairs $(y,y')$ are drawn from a distribution with full support. Show that the population DPO loss is minimized by any $\pi_\theta$ with $\beta\log\frac{\pi_\theta(y)}{\pi_{\text{ref}}(y)} = r(y) + c$, and conclude $\pi_\theta = \pi^*$.</p>
+<details class="hint"><summary>Hint</summary><p>For a fixed pair, the expected loss over the random label is a cross-entropy between Bernoulli($\sigma(r_y - r_{y'})$) and Bernoulli($\sigma(\hat r_y - \hat r_{y'})$).</p></details>
+<details class="solution"><summary>Solution</summary><p>For each unordered pair, the label says "$y$ wins" with probability $q = \sigma(r_y - r_{y'})$. The expected loss is $-q\log\sigma(\hat\Delta) - (1-q)\log\sigma(-\hat\Delta)$, a cross-entropy minimized (Gibbs' inequality, lesson 11) when $\sigma(\hat\Delta) = q$, i.e. $\hat r_y - \hat r_{y'} = r_y - r_{y'}$. Holding for every pair forces $\hat r = r + c$. Then $\log\pi_\theta = \log\pi_{\text{ref}} + (r + c)/\beta$, so $\pi_\theta \propto \pi_{\text{ref}}e^{r/\beta}$. Normalization fixes $c = -\beta\log Z$, so $\pi_\theta = \pi^*$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 10</div><span class="difficulty">stretch</span>
+<p>With 0/1 rewards and a very large group, a prompt with pass rate $p$ gives correct answers advantage $\sqrt{(1-p)/p}$ and wrong ones $-\sqrt{p/(1-p)}$. Show the mean absolute advantage per answer is $2\sqrt{p(1-p)}$, and evaluate it at $p = 0.1$. What does std normalization do to how much easy and hard prompts count?</p>
+<div class="numcheck" data-answer="0.6" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary><p>Mean $p$, std $\sqrt{p(1-p)}$, so correct gets $(1-p)/\sqrt{p(1-p)} = \sqrt{(1-p)/p}$. Mean |A| $= p\sqrt{(1-p)/p} + (1-p)\sqrt{p/(1-p)} = 2\sqrt{p(1-p)} = 0.6$ at $p=0.1$ (and 1 at $p = 0.5$). Without the std division, a 0/1 reward's mean |A| would be $2p(1-p) = 0.18$ at $p = 0.1$, versus 0.5 at $p=0.5$. Dividing by the std boosts the weight of near-solved and near-impossible prompts relative to that. Some recent work ("Dr. GRPO") argues this re-weighting, and the per-sequence length normalization, introduce biases, and drops them.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">Why doesn't DPO need to compute the partition function $Z(x)$?</div>
+  <div class="opts">
+    <button data-k="a">Because it approximates $Z$ with samples.</button>
+    <button data-k="b">Because preferences compare two completions of the same prompt, and the $\beta\log Z(x)$ terms cancel in the reward difference.</button>
+    <button data-k="c">Because $Z(x) = 1$ for normalized language models.</button>
+    <button data-k="d">Because the reference model computes it.</button>
+  </div>
+  <div class="explain">Bradley–Terry only ever sees $r_w - r_l$, and the prompt-only term $\beta\log Z(x)$ is identical in both. That single cancellation is the whole trick.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">What plays the role of PPO's value function $V(s)$ in GRPO?</div>
+  <div class="opts">
+    <button data-k="a">The reward model.</button>
+    <button data-k="b">The reference model's log-probability.</button>
+    <button data-k="c">Nothing. GRPO uses raw rewards with no baseline.</button>
+    <button data-k="d">The mean reward of the other completions sampled for the same prompt.</button>
+  </div>
+  <div class="explain">The group mean is a Monte-Carlo estimate of $\mathbb E_{y\sim\pi}[r(x,y)] = V(x)$. It's a baseline (lesson 27 §4), so the gradient stays (nearly) unbiased, and no second network has to be trained.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">A GRPO group's rewards are all exactly 1. What does this prompt contribute to the policy-gradient part of the update?</div>
+  <div class="opts">
+    <button data-k="a">Nothing: all advantages are zero (only the KL term acts).</button>
+    <button data-k="b">A strong push toward all eight answers.</button>
+    <button data-k="c">A division by zero that crashes training.</button>
+    <button data-k="d">A push away from the reference.</button>
+  </div>
+  <div class="explain">$r_i - \bar r = 0$ for all $i$, and the ε in the denominator prevents 0/0. Already-solved prompts teach nothing, as do never-solved ones.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Which is the best reason to prefer a verifiable reward over a learned reward model when one is available?</div>
+  <div class="opts">
+    <button data-k="a">It is differentiable, so you can backprop into it.</button>
+    <button data-k="b">It gives denser, per-token rewards.</button>
+    <button data-k="c">It measures the actual goal, so there is far less proxy error for the optimizer to exploit, and any loopholes are visible in a few lines of code.</button>
+    <button data-k="d">It removes the need for a KL penalty in all cases.</button>
+  </div>
+  <div class="explain">Reward hacking (lesson 28) exploits the gap between proxy and goal. A checker that tests the goal directly shrinks that gap. It isn't zero, so keep reading samples.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Idea</th><th>Formula</th><th>Takeaway</th></tr>
+  <tr><td>Reward from policy</td><td>$r = \beta\log\frac{\pi^*}{\pi_{\text{ref}}} + \beta\log Z(x)$</td><td>invert the RLHF optimum</td></tr>
+  <tr><td>DPO loss</td><td>$-\log\sigma\big(\beta\log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)} - \beta\log\frac{\pi_\theta(y_l)}{\pi_{\text{ref}}(y_l)}\big)$</td><td>RLHF as a supervised loss</td></tr>
+  <tr><td>Implicit reward</td><td>$\hat r_\theta = \beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$</td><td>the policy is the reward model</td></tr>
+  <tr><td>GRPO advantage</td><td>$\hat A_i = (r_i - \bar r)/\operatorname{std}(r)$</td><td>group mean = baseline, no critic</td></tr>
+  <tr><td>k3 KL estimator</td><td>$\frac{\pi_{\text{ref}}}{\pi} - \log\frac{\pi_{\text{ref}}}{\pi} - 1$</td><td>≥ 0, unbiased</td></tr>
+  <tr><td>Signal condition</td><td>$1 - p^G - (1-p)^G$</td><td>train where the model sometimes succeeds</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 29: build it</h3>
+  <p>Open <code>workbooks/29_dpo_grpo_rlvr/exercises.py</code> (PyTorch). Part A: sequence log-probs, implicit rewards, the DPO loss with its exact gradient checked, and DPO training of a tiny GPT on synthetic preference pairs (the preferred completions' probability, and the true score of samples, go up). Part B: an answer checker, group-normalized advantages, the k3 KL estimator, the GRPO loss, and a GRPO loop that lifts a sloppy arithmetic model's accuracy with nothing but a verifier.</p>
+  <pre><code>./course check 29
+python workbooks/29_dpo_grpo_rlvr/train_grpo.py    # longer runs: DPO at two β, GRPO with pass@k</code></pre>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Rafailov et al., "Direct Preference Optimization: Your Language Model is Secretly a Reward Model" (2023).</li>
+  <li>Shao et al., "DeepSeekMath" (2024), which introduces GRPO, and DeepSeek-AI, "DeepSeek-R1" (2025).</li>
+  <li>Ahmadian et al., "Back to Basics: Revisiting REINFORCE-Style Optimization for Learning from Human Feedback" (2024; RLOO).</li>
+  <li>Liu et al., "Understanding R1-Zero-Like Training: A Critical Perspective" (2025; Dr. GRPO).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt, LA } = Course;
+  const sig = x => 1 / (1 + Math.exp(-x));
+  const mono = "11px " + getComputedStyle(document.documentElement).getPropertyValue("--mono");
+
+  // ---------- fig: DPO loss landscape ----------
+  {
+    let beta = 0.5;
+    const p = new Plot("#fig-dpo", { xmin: -4.6, xmax: 4.6, ymin: -4, ymax: 4, equal: true });
+    const hd = { x: 0.5, y: 1.5, color: "c2", constrain: (x, y) => [Math.max(-4, Math.min(4, x)), Math.max(-3.8, Math.min(3.8, y))] };
+    const out = document.getElementById("out-dpo");
+    slider("#ctl-dpo", { label: "β ", min: 0.1, max: 2, step: 0.05, value: 0.5 }, v => { beta = v; p.render(); });
+    const loss = (uw, ul) => -Math.log(sig(beta * (uw - ul)));
+    p.draggable([hd]).render(p => {
+      p.field((x, y) => -loss(x, y), { cmap: "seq", res: 5, alpha: .85 });
+      p.contour(loss, [0.05, 0.2, 0.4, 0.693, 1.2, 2, 3], { color: "muted", width: 1 });
+      p.axes({ step: 1, xlabel: "u_w = log π/π_ref (chosen)", ylabel: "u_l (rejected)" });
+      p.line(-4, -4, 4, 4, { color: "c4", dash: [6, 4], width: 1.5 });
+      p.label(-1.2, -3.6, "dashed: margin 0, loss = log 2", { color: "c4", align: "left", font: "11px sans-serif", bg: true });
+      const m = beta * (hd.x - hd.y), w = sig(-m), L = 1.6 * w;
+      p.arrow(hd.x, hd.y, hd.x + L, hd.y - L, { color: "c2", width: 2.5 });
+      p.drawHandles();
+      out.textContent = `u_w = ${hd.x.toFixed(2)}, u_l = ${hd.y.toFixed(2)}, β = ${beta}:  implicit rewards r̂_w = ${(beta * hd.x).toFixed(3)}, r̂_l = ${(beta * hd.y).toFixed(3)}, margin = ${m.toFixed(3)}\n` +
+        `loss = −log σ(margin) = ${loss(hd.x, hd.y).toFixed(3)}    gradient weight σ(−margin) = ${w.toFixed(3)}  →  −∇loss = ${(beta * w).toFixed(3)}·(+1, −1)`;
+    });
+  }
+
+  // ---------- fig: DPO converges to π* ----------
+  {
+    const K = 6, names = ["great", "good", "ok", "meh", "bad", "awful"];
+    const pref = [0.10, 0.20, 0.30, 0.20, 0.12, 0.08], r = [2.0, 1.2, 0.5, 0, -0.8, -1.5];
+    let beta = 0.5, z, it = 0;
+    const reset = () => { z = pref.map(Math.log); it = 0; };
+    reset();
+    const pol = () => LA.softmax(z);
+    const target = () => LA.softmax(pref.map((q, i) => Math.log(q) + r[i] / beta));
+    const lossAndGrad = () => {
+      const q = pol(), u = q.map((x, i) => Math.log(x / pref[i])), gu = new Array(K).fill(0); let L = 0;
+      for (let i = 0; i < K; i++) for (let j = 0; j < K; j++) { if (i === j) continue;
+        const w = pref[i] * pref[j] * sig(r[i] - r[j]), m = beta * (u[i] - u[j]); // pair (i preferred over j) with BT prob
+        L += -w * Math.log(sig(m)); const g = -w * beta * sig(-m); gu[i] += g; gu[j] -= g; }
+      const s = gu.reduce((a, b) => a + b, 0), gz = gu.map((g, i) => g - q[i] * s); // through log-softmax
+      return [L, gz];
+    };
+    const p = new Plot("#fig-dpo-train", { xmin: -0.3, xmax: K + 0.1, ymin: -0.16, ymax: 1 });
+    const ctl = document.getElementById("ctl-dpo-train"), out = document.getElementById("out-dpo-train");
+    const anim = Course.animator(() => { for (let k = 0; k < 20; k++) { const [, g] = lossAndGrad(); z = z.map((v, i) => v - 4 * g[i]); it++; } p.render(); return it < 6000; });
+    const tb = button(ctl, "train", () => { anim.running ? anim.stop() : anim.start(); p.render(); });
+    button(ctl, "reset to π_ref", () => { anim.stop(); reset(); p.render(); });
+    slider(ctl, { label: "β ", min: 0.2, max: 3, step: 0.1, value: 0.5 }, v => { beta = v; anim.stop(); reset(); p.render(); });
+    p.render(p => {
+      const q = pol(), t = target(), top = Math.max(...q, ...t, ...pref) * 1.25;
+      p.setView(-0.3, K + 0.1, -top * 0.16, top);
+      p.line(0, 0, K, 0, { color: "axis", width: 1 });
+      for (let i = 0; i < K; i++) {
+        p.rect(i + .12, 0, i + .45, pref[i], { fill: "muted", fillAlpha: .6, color: "muted", width: 1 });
+        p.rect(i + .5, 0, i + .85, q[i], { fill: "c1", fillAlpha: .8, color: "c1", width: 1 });
+        p.rect(i + .5, 0, i + .85, t[i], { fill: "c1", fillAlpha: 0, color: "c5", width: 2, dash: [4, 3] });
+        p.label(i + .5, 0, names[i], { align: "center", dy: 11, font: "12px sans-serif" });
+        p.label(i + .5, 0, "r=" + r[i], { align: "center", dy: 26, font: mono, color: r[i] >= 0 ? "ok" : "bad" });
+      }
+      p.label(0, top * .93, "grey π_ref    blue π_θ (DPO)    dashed outline π* ∝ π_ref·e^(r/β)", { color: "muted", font: "12px sans-serif" });
+      tb.textContent = anim.running ? "pause" : "train";
+      const [L] = lossAndGrad(), tv = q.reduce((s, x, i) => s + Math.abs(x - t[i]), 0) / 2;
+      const rhat = q.map((x, i) => beta * Math.log(x / pref[i])), off = rhat[0] - r[0];
+      out.textContent = `step ${it}:  expected DPO loss ${L.toFixed(4)}   distance to π* (total variation) ${tv.toFixed(4)}\n` +
+        `implicit rewards β·log(π_θ/π_ref), shifted so 'great' matches: ${rhat.map(x => (x - off).toFixed(2)).join(", ")}   (true r: ${r.join(", ")})`;
+    });
+  }
+
+  // ---------- fig: GRPO group ----------
+  {
+    let G = 8, pr = 0.3, partial = "binary", seed = 1, rewards = [], correct = [];
+    const p = new Plot("#fig-group", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const ctl = document.getElementById("ctl-group"), out = document.getElementById("out-group");
+    const sample = () => { const R = Course.rng(seed); correct = []; rewards = []; for (let i = 0; i < G; i++) { const c = R.uniform() < pr; correct.push(c); rewards.push(partial === "binary" ? (c ? 1 : 0) : (c ? 1 : 0) + (R.uniform() < 0.6 ? 0.2 : 0)); } };
+    slider(ctl, { label: "group size G ", min: 2, max: 16, step: 1, value: 8, digits: 0 }, v => { G = v; sample(); p.render(); });
+    slider(ctl, { label: "pass rate p ", min: 0, max: 1, step: 0.05, value: 0.3 }, v => { pr = v; sample(); p.render(); });
+    button(ctl, "resample", () => { seed++; sample(); p.render(); });
+    select(ctl, "reward: ", [["binary", "correct = 1 else 0"], ["partial", "+0.2 for good format"]], v => { partial = v; sample(); p.render(); });
+    sample();
+    p.render(p => {
+      const mean = rewards.reduce((a, b) => a + b, 0) / G, std = Math.sqrt(rewards.reduce((a, b) => a + (b - mean) ** 2, 0) / G), A = rewards.map(x => (x - mean) / (std + 1e-6));
+      p.setView(-1.2, G + 0.2, -3.6, 2.4);
+      p.line(0, 1.0, G, 1.0, { color: "axis", width: 1 }); p.line(0, -1.6, G, -1.6, { color: "axis", width: 1 });
+      p.label(-0.1, 2.1, "rewards", { align: "right", color: "muted", font: "12px sans-serif" });
+      p.label(-0.1, -0.35, "advantages", { align: "right", color: "muted", font: "12px sans-serif" });
+      for (let i = 0; i < G; i++) {
+        const x0 = i + .15, x1 = i + .85, col = correct[i] ? "ok" : "bad";
+        p.rect(x0, 1.0, x1, 1.0 + rewards[i] * 0.9, { fill: col, fillAlpha: .7, color: col, width: 1 });
+        if (!rewards[i]) p.rect(x0, 0.98, x1, 1.02, { fill: col, fillAlpha: .9, color: col, width: 1 });
+        p.label(i + .5, 1.0, rewards[i].toFixed(1), { align: "center", dy: 10, font: mono });
+        const h = Math.max(-1.9, Math.min(1.9, A[i] * 0.55));
+        p.rect(x0, -1.6, x1, -1.6 + h, { fill: A[i] >= 0 ? "c1" : "c4", fillAlpha: .75, color: A[i] >= 0 ? "c1" : "c4", width: 1 });
+        p.label(i + .5, -1.6 + h, A[i].toFixed(2), { align: "center", dy: h >= 0 ? -9 : 9, font: mono });
+        p.label(i + .5, -3.45, "y" + (i + 1), { align: "center", color: "muted", font: "11px sans-serif" });
+      }
+      p.line(-1.2, 1.0 + mean * 0.9, G, 1.0 + mean * 0.9, { color: "c5", dash: [5, 4], width: 1.5 });
+      p.label(G, 1.0 + mean * 0.9, "mean " + mean.toFixed(2), { align: "right", dy: -9, color: "c5", font: "11px sans-serif" });
+      const zero = std < 1e-9;
+      out.textContent = `G = ${G}, rewards mean ${mean.toFixed(3)}, std ${std.toFixed(3)}` + (zero ? "   →  all rewards equal: every advantage is 0, this prompt gives NO learning signal" : `   →  advantages sum to ${A.reduce((a, b) => a + b, 0).toFixed(2)}`) +
+        `\nP(group has no signal) = p^G + (1−p)^G = ${partial === "binary" ? (Math.pow(pr, G) + Math.pow(1 - pr, G)).toFixed(3) : "(lower with partial credit)"}`;
+    });
+  }
+
+  // ---------- fig: learning signal vs pass rate ----------
+  {
+    let G = 8; const hd = { x: 0.1, y: 0, color: "c2", constrain: x => [Math.max(0.001, Math.min(0.999, x)), 0] };
+    const p = new Plot("#fig-signal", { xmin: -0.08, xmax: 1.04, ymin: -0.14, ymax: 1.12 });
+    const out = document.getElementById("out-signal");
+    slider("#ctl-signal", { label: "group size G ", min: 2, max: 64, step: 1, value: 8, digits: 0 }, v => { G = v; p.render(); });
+    const sigP = q => 1 - Math.pow(q, G) - Math.pow(1 - q, G);
+    // expected mean |advantage| per answer for a finite group (exact sum over number of successes k)
+    const binom = (n, k) => { let c = 1; for (let i = 1; i <= k; i++) c = c * (n - k + i) / i; return c; };
+    const meanAbsA = q => { let s = 0; for (let k = 1; k < G; k++) { const f = k / G, sd = Math.sqrt(f * (1 - f)); s += binom(G, k) * Math.pow(q, k) * Math.pow(1 - q, G - k) * 2 * f * (1 - f) / sd; } return s; };
+    p.draggable([hd]).render(p => {
+      p.line(0, 0, 1, 0, { color: "axis", width: 1 }); p.line(0, 0, 0, 1.05, { color: "axis", width: 1 });
+      [0.25, 0.5, 0.75, 1].forEach(v => { p.label(v, 0, String(v), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }); p.label(0, v, String(v), { align: "right", dx: -4, color: "muted", font: "11px sans-serif" }); p.line(0, v, 1, v, { color: "grid", width: 1 }); });
+      p.fn(sigP, { xmin: 0, xmax: 1, color: "c1", width: 2.5 });
+      p.fn(meanAbsA, { xmin: 0, xmax: 1, color: "c2", width: 2, dash: [6, 3] });
+      p.fn(q => 2 * Math.sqrt(q * (1 - q)), { xmin: 0, xmax: 1, color: "muted", width: 1, dash: [2, 4] });
+      p.line(hd.x, 0, hd.x, sigP(hd.x), { color: "c1", width: 1, dash: [3, 3] });
+      p.point(hd.x, sigP(hd.x), { r: 5, color: "c1" }); p.point(hd.x, meanAbsA(hd.x), { r: 4, color: "c2" });
+      p.label(1.0, -0.1, "pass rate p of the prompt", { align: "right", color: "muted", font: "11px sans-serif" });
+      p.label(0.02, 1.08, "P(group has signal)", { color: "c1", font: "600 12px sans-serif" });
+      p.label(0.35, 1.08, "E[mean |advantage|]", { color: "c2", font: "600 12px sans-serif" });
+      p.label(0.68, 1.08, "large-G limit 2√(p(1−p))", { color: "muted", font: "12px sans-serif" });
+      p.drawHandles();
+      out.textContent = `p = ${hd.x.toFixed(3)}, G = ${G}:  P(signal) = ${sigP(hd.x).toFixed(3)}   E[mean |A|] = ${meanAbsA(hd.x).toFixed(3)}   → ${((1 - sigP(hd.x)) * 100).toFixed(1)}% of groups on this prompt are wasted`;
+    });
+  }
+});
+</script>
+</body>
+</html>

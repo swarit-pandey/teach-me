@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RL basics: MDPs, returns & bandits</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="26">
+<main>
+
+<div class="kicker">Part 7 · RL on transformers</div>
+<h1>RL basics: MDPs, returns &amp; bandits</h1>
+<p class="lede">Up to now every model learned from labelled answers. Reinforcement learning drops the labels. An agent acts, the world hands back a number called a reward, and the agent has to work out which of its earlier choices earned it. This lesson builds the vocabulary that RLHF, DPO and GRPO are written in: states, actions, returns, values, the Bellman equation, and the explore-or-exploit dilemma.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Describe a problem as a Markov decision process and say what the policy, reward and transition model are.</li>
+    <li>Compute discounted returns and explain $\gamma$ as an "effective horizon" of about $1/(1-\gamma)$ steps.</li>
+    <li>Derive the Bellman equations for $V^\pi$, $Q^\pi$ and $V^*$, and solve small ones by hand or as a linear system.</li>
+    <li>Run value iteration and Q-learning on a gridworld and read off the greedy policy.</li>
+    <li>Compare greedy, ε-greedy and UCB on a multi-armed bandit using regret.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="loop">1. The agent–environment loop</h2>
+<p>Reinforcement learning is about one repeated exchange. At each time step $t$:</p>
+<ol>
+  <li>the agent observes the current <b>state</b> $s_t$;</li>
+  <li>it picks an <b>action</b> $a_t$ by sampling from its <b>policy</b>, $a_t \sim \pi(\cdot \mid s_t)$;</li>
+  <li>the environment answers with a scalar <b>reward</b> $r_t$ and the next state $s_{t+1}$.</li>
+</ol>
+<p>Repeat until the episode ends. The record of one episode is a <b>trajectory</b> $\tau = (s_0, a_0, r_0, s_1, a_1, r_1, \dots)$. The agent's goal is to choose a policy that makes the total reward large <em>on average</em> over the trajectories it produces.</p>
+<p>Three things make this harder than the supervised learning you did in Parts 4–6:</p>
+<ul>
+  <li><b>No answer key.</b> Nobody tells the agent which action was right. It only hears how good the outcome was.</li>
+  <li><b>Delayed credit.</b> The reward for a good move may arrive many steps later. Which earlier action deserves it? This is the <em>credit-assignment problem</em>.</li>
+  <li><b>You choose your own data.</b> The trajectories depend on the policy. An agent that never tries something never learns what it is worth. That is the <em>exploration</em> problem (section 7).</li>
+</ul>
+<table>
+  <tr><th>Concept</th><th>Chess</th><th>A language model (lessons 28–29)</th></tr>
+  <tr><td>state $s_t$</td><td>the board</td><td>the prompt plus the tokens generated so far</td></tr>
+  <tr><td>action $a_t$</td><td>a legal move</td><td>the next token (about 50 000 choices)</td></tr>
+  <tr><td>policy $\pi(a\mid s)$</td><td>the player</td><td>the softmax over the vocabulary, which is the transformer itself</td></tr>
+  <tr><td>reward $r_t$</td><td>+1 win, −1 loss, at the very end</td><td>a reward-model score or a "the answer checks out" bit, at the very end</td></tr>
+</table>
+<div class="callout ml">
+<p>Look at the last column. A trained GPT (lesson 24) already <em>is</em> a policy: a probability distribution over the next action given everything so far. RLHF doesn't add a new model. It changes which completions that policy prefers, using rewards instead of next-token labels. Everything in Part 7 builds toward that.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mdp">2. Markov decision processes</h2>
+<p>A <b>Markov decision process</b> (MDP) is the formal version of the loop. It is a tuple $(\mathcal S, \mathcal A, P, R, \gamma)$:</p>
+<ul>
+  <li>$\mathcal S$: the set of states. $\mathcal A$: the set of actions.</li>
+  <li>$P(s' \mid s, a)$: the <b>transition model</b>, the probability of landing in $s'$ after taking $a$ in $s$.</li>
+  <li>$R(s, a, s')$: the reward for that transition. We write $r(s,a) = \sum_{s'} P(s'\mid s,a)\,R(s,a,s')$ for its expected value.</li>
+  <li>$\gamma \in [0, 1]$: the <b>discount factor</b> (section 3).</li>
+</ul>
+<p>The word <b>Markov</b> is the key assumption: the next state and reward depend only on the current state and action, not on how you got there,</p>
+$$P(s_{t+1} \mid s_t, a_t, s_{t-1}, a_{t-1}, \dots, s_0) = P(s_{t+1} \mid s_t, a_t).$$
+<p>That sounds restrictive, but you can always make it true by putting enough history into the state. For a language model the state is the <em>entire</em> prefix, so the Markov property holds by construction.</p>
+<p>A <b>policy</b> $\pi(a \mid s)$ is a probability distribution over actions for every state. A deterministic policy is the special case that puts all its mass on one action.</p>
+
+<div class="example">
+  <div class="label">Running example: fresh or tired</div>
+  <p>You are a worker with two states, <b>fresh</b> and <b>tired</b>, and two actions, <b>work</b> and <b>rest</b>.</p>
+  <ul>
+    <li>fresh + work: reward $+2$. Half the time you stay fresh and half the time you become tired.</li>
+    <li>fresh + rest: reward $0$, you stay fresh.</li>
+    <li>tired + work: reward $+0.5$ (sloppy work), and you stay tired.</li>
+    <li>tired + rest: reward $0$, and you become fresh again.</li>
+  </ul>
+  <p>Should a tired worker push on for the $+0.5$ now, or rest to earn $+2$ later? The answer depends on how much you value the future. Section 4 settles it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="returns">3. Returns and discounting</h2>
+<p>The quantity the agent maximizes is the <b>return</b>, the discounted sum of future rewards:</p>
+$$G_t = r_t + \gamma\, r_{t+1} + \gamma^2 r_{t+2} + \cdots = \sum_{k=0}^{\infty} \gamma^k\, r_{t+k}.$$
+<p>A reward $k$ steps in the future is worth $\gamma^k$ of the same reward now. There are three reasons to discount. It keeps infinite sums finite: if $|r| \le r_{\max}$ then $|G_t| \le r_{\max}/(1-\gamma)$ by the geometric series. It encodes "sooner is better". And it reduces variance, because far-future rewards are the noisiest to predict.</p>
+<p>The single most useful identity in RL is the <b>recursive form</b> of the return. Pull the first term out and factor out one $\gamma$:</p>
+$$G_t = r_t + \gamma\,\big(r_{t+1} + \gamma r_{t+2} + \cdots\big) = r_t + \gamma\, G_{t+1}.$$
+<p>"Return now = reward now + discounted return from the next step." Every Bellman equation below is this line with an expectation wrapped around it.</p>
+
+<h3>The effective horizon</h3>
+<p>How far ahead does a $\gamma$-discounted agent actually look? The weights $1, \gamma, \gamma^2, \dots$ sum to $\sum_k \gamma^k = \frac{1}{1-\gamma}$. A constant reward of 1 per step is therefore worth exactly as much as $\frac{1}{1-\gamma}$ undiscounted steps. That number is the <b>effective horizon</b> $H$. It also marks where the weights have faded: $\gamma^{H} = \gamma^{1/(1-\gamma)} \approx e^{-1}$ for $\gamma$ near 1, since $\ln\gamma \approx -(1-\gamma)$. So $\gamma = 0.9$ looks about 10 steps ahead, $\gamma = 0.99$ about 100 and $\gamma = 0.999$ about 1000.</p>
+
+<div class="figure">
+  <canvas id="fig-disc" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-disc"></div>
+  <div class="readout" id="out-disc"></div>
+  <div class="caption"><b>Try it:</b> slide $\gamma$. The bars are the weights $\gamma^k$ given to the reward $k$ steps ahead. The dashed line marks the effective horizon $1/(1-\gamma)$. The bars to its left carry about two thirds of the total weight, approaching $1 - 1/e \approx 63\%$ as $\gamma \to 1$. The readout compares "+1 now" with "+10 in 20 steps". Find the $\gamma$ where the agent changes its mind (problem 4).</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Rewards $(r_0, \dots, r_4) = (0, 0, 1, 0, 5)$ with $\gamma = 0.9$. Directly: $G_0 = 0.9^2\cdot 1 + 0.9^4 \cdot 5 = 0.81 + 3.2805 = 4.0905$.</p>
+  <p>Backwards with the recursion, starting from $G_5 = 0$: $G_4 = 5$, $G_3 = 0 + 0.9\cdot5 = 4.5$, $G_2 = 1 + 0.9\cdot4.5 = 5.05$, $G_1 = 0.9\cdot5.05 = 4.545$, $G_0 = 0.9 \cdot 4.545 = 4.0905$. ✓ The backward pass gives the return from <em>every</em> step in one $O(T)$ sweep. In lesson 27 you'll need exactly these "returns-to-go" for REINFORCE.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="values">4. Value functions and the Bellman equation</h2>
+<p>The return is random: it depends on which actions get sampled and where the environment sends you. A <b>value function</b> averages it out.</p>
+$$V^\pi(s) = \mathbb E_\pi\big[\,G_t \mid s_t = s\,\big], \qquad Q^\pi(s, a) = \mathbb E_\pi\big[\,G_t \mid s_t = s,\ a_t = a\,\big].$$
+<p>$V^\pi(s)$ answers "how good is it to be in $s$ if I follow $\pi$ from here?" $Q^\pi(s,a)$ answers "how good is it to take $a$ in $s$ <em>first</em>, and only then follow $\pi$?" Averaging $Q$ over the policy's own choice of action gives back $V$:</p>
+$$V^\pi(s) = \sum_a \pi(a\mid s)\, Q^\pi(s,a).$$
+
+<h3>Deriving the Bellman expectation equation</h3>
+<p>Start from the recursion $G_t = r_t + \gamma G_{t+1}$ and take the conditional expectation given $s_t = s$. The randomness comes in three layers: the action $a \sim \pi(\cdot\mid s)$, then the next state $s' \sim P(\cdot\mid s,a)$, then everything after. Write those layers out explicitly:</p>
+$$V^\pi(s) = \sum_a \pi(a\mid s) \sum_{s'} P(s'\mid s,a)\,\Big[R(s,a,s') + \gamma\, \mathbb E_\pi\big[G_{t+1}\mid s_t{=}s, a_t{=}a, s_{t+1}{=}s'\big]\Big].$$
+<p>By the Markov property, once you know $s_{t+1} = s'$ the earlier $s, a$ tell you nothing more about the future. So the inner expectation is just $V^\pi(s')$:</p>
+$$\boxed{\;V^\pi(s) = \sum_a \pi(a\mid s) \sum_{s'} P(s'\mid s,a)\,\big[R(s,a,s') + \gamma\, V^\pi(s')\big]\;}$$
+<p>The same argument with the first action fixed gives $Q^\pi(s,a) = \sum_{s'} P(s'\mid s,a)\,[R(s,a,s') + \gamma V^\pi(s')]$.</p>
+<p>The value of a state is the expected immediate reward plus the discounted value of where you land. That is a <b>consistency condition</b>: one equation per state, with the unknown $V^\pi$ on both sides.</p>
+
+<h3>It's a linear system</h3>
+<p>For a fixed policy, collapse the actions. Let $P_\pi[s,s'] = \sum_a \pi(a\mid s) P(s'\mid s,a)$ be the state-to-state transition matrix and $r_\pi[s] = \sum_a \pi(a\mid s) r(s,a)$ the expected reward per state. In vector form the Bellman equation reads</p>
+$$\mathbf V = \mathbf r_\pi + \gamma P_\pi \mathbf V \quad\Longleftrightarrow\quad (I - \gamma P_\pi)\,\mathbf V = \mathbf r_\pi.$$
+<p>That is lesson 03's $A\mathbf x = \mathbf b$. For $\gamma \lt 1$ the matrix $I - \gamma P_\pi$ is always invertible: every eigenvalue of a stochastic matrix has $|\lambda| \le 1$, so every eigenvalue of $\gamma P_\pi$ stays strictly inside the unit circle. Solving the system is called <b>policy evaluation</b>.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-mdp" width="420" height="320"></canvas></div>
+    <div><canvas id="fig-mdp-heat" width="360" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-mdp"></div>
+  <div class="readout" id="out-mdp"></div>
+  <div class="caption"><b>Try it:</b> drag the dot on the right. Its position sets the policy: $p = \pi(\text{work}\mid\text{fresh})$ across and $q = \pi(\text{work}\mid\text{tired})$ up. On the left, arrow thickness shows the transition probabilities under that policy. The heatmap colours each policy by $V(\text{fresh})$, solved exactly from the $2\times2$ system. Notice the best policy sits at a <em>corner</em>: it's deterministic. Now lower $\gamma$ below about 0.29 and watch the best corner jump. A short-sighted worker keeps working when tired.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: evaluating "work when fresh, rest when tired" ($\gamma = 0.9$)</div>
+  <p>Write one Bellman equation per state. Fresh: reward 2, then fresh or tired with probability ½ each. Tired: reward 0, then fresh for sure.</p>
+  $$V_f = 2 + 0.9\,(0.5\,V_f + 0.5\,V_t), \qquad V_t = 0 + 0.9\,V_f.$$
+  <p>Substitute the second into the first: $V_f = 2 + 0.45\,V_f + 0.45\cdot0.9\,V_f = 2 + 0.855\,V_f$, so $V_f = 2/0.145 \approx 13.79$ and $V_t = 0.9\,V_f \approx 12.41$.</p>
+  <p>Now "always work". In the tired state, $V_t = 0.5 + 0.9\,V_t$ gives $V_t = 5$. Then $V_f = 2 + 0.45\,V_f + 0.45\cdot 5$, so $0.55\,V_f = 4.25$ and $V_f \approx 7.73$. Resting when tired is worth almost twice as much. You give up $+0.5$ now to get back to the $+2$ state.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="optimal">5. Optimal values and value iteration</h2>
+<p>We want the best policy, not just to evaluate one. Define the <b>optimal value</b> $V^*(s) = \max_\pi V^\pi(s)$. The optimal agent picks the action with the best one-step lookahead and then keeps behaving optimally. Replacing "average over $\pi$" by "max over $a$" in the Bellman equation gives the <b>Bellman optimality equation</b>:</p>
+$$\boxed{\;V^*(s) = \max_a \sum_{s'} P(s'\mid s,a)\,\big[R(s,a,s') + \gamma\, V^*(s')\big]\;}\qquad Q^*(s,a) = \sum_{s'} P(s'\mid s,a)\big[R + \gamma \max_{a'} Q^*(s',a')\big].$$
+<p>Once you have $V^*$ (or $Q^*$), the optimal policy is <b>greedy</b>: $\pi^*(s) = \arg\max_a Q^*(s,a)$. The max makes the equation non-linear, so we can't just solve it. Instead we iterate it.</p>
+<p><b>Value iteration</b>: start from $V_0 = 0$ and apply the right-hand side as an update, $V_{k+1}(s) = \max_a \sum_{s'} P\,[R + \gamma V_k(s')]$, for every state, again and again. Why does this converge? Call the update $T$. For any two value tables $V, U$, the max over actions and the average over $s'$ can't increase the largest gap, and the $\gamma$ shrinks it:</p>
+$$\|TV - TU\|_\infty \le \gamma\, \|V - U\|_\infty.$$
+<p>$T$ is a <b>contraction</b>. Each sweep multiplies the distance to the fixed point $V^*$ by at most $\gamma$, so after $k$ sweeps the error is at most $\gamma^k \|V_0 - V^*\|_\infty$ (you prove the analogous fact for policy evaluation in problem 9). Small $\gamma$ converges fast; $\gamma = 0.99$ needs hundreds of sweeps.</p>
+
+<div class="figure">
+  <canvas id="fig-grid" width="680" height="500"></canvas>
+  <div class="controls" id="ctl-grid"></div>
+  <div class="readout" id="out-grid"></div>
+  <div class="caption"><b>Try it:</b> press <em>sweep</em> a few times and watch value spread outward from the goal, one cell per sweep. Blue is positive, pink negative. Arrows show the greedy policy for the current values. Click any cell to see its Bellman backup: the four $Q$ values that the max picks from. Press <em>play</em> to run to convergence, and notice that the arrows usually settle long before the numbers stop changing. Then raise <em>slip</em>: the path near the pit starts to hug the walls. Set <em>step reward</em> to +0.05 and the agent stops wanting to finish at all (problem 10). Switch the click mode to edit walls.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: two sweeps by hand</div>
+  <p>Grid above, $\gamma=0.9$, slip $0.2$ (so 0.8 intended, 0.1 to each side), step reward $-0.04$, $V_0 = 0$. Take the cell just left of the goal, at row 0, column 5. Action <em>right</em>: with probability 0.8 it enters the goal ($+1$); it slips up with probability 0.1, bumps the edge and stays ($-0.04$); it slips down with probability 0.1 ($-0.04$). All next-state values are 0, so</p>
+  $$Q_1(\text{right}) = 0.8(1) + 0.1(-0.04) + 0.1(-0.04) = 0.792.$$
+  <p>The other actions only reach the goal by slipping, e.g. $Q_1(\text{up}) = 0.8(-0.04)+0.1(1)+0.1(-0.04) = 0.064$. So $V_1 = 0.792$ there. Every cell not next to a terminal gets $V_1 = -0.04$.</p>
+  <p>Sweep 2, one cell further left, at row 0, column 4. Action right lands next to the goal: $0.8\,(-0.04 + 0.9\cdot0.792) + 0.1\,(-0.04 + 0.9\cdot(-0.04)) + 0.1\,(-0.04 + 0.9\cdot(-0.04)) = 0.5382 - 0.0152 = 0.523$. The good news travelled exactly one cell. That's why the number of sweeps you need grows with the length of the shortest path to reward.</p>
+</div>
+
+<div class="callout key">
+<p><b>Policy evaluation</b> solves $V = r_\pi + \gamma P_\pi V$ for a fixed $\pi$. <b>Value iteration</b> iterates $V \leftarrow \max_a(\dots)$ to reach $V^*$. Both need the model $P, R$. That's fine for a gridworld but impossible for a language model: nobody can enumerate the states, and "transition probabilities" aren't the hard part anyway. The next section learns from sampled experience instead.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="qlearning">6. Learning from experience: Q-learning</h2>
+<p>Suppose you can't see $P$ or $R$, only $s, a, r, s'$ samples from actually acting. Look again at the optimality equation for $Q^*$: it is an <em>expectation</em> over $s'$. A single observed transition gives an unbiased one-sample guess of the right-hand side, the <b>TD target</b>:</p>
+$$y = r + \gamma \max_{a'} Q(s', a') \quad (\text{and } y = r \text{ if } s' \text{ is terminal}).$$
+<p>Move the table entry a little toward that target:</p>
+$$Q(s,a) \leftarrow Q(s,a) + \alpha\,\big(y - Q(s,a)\big).$$
+<p>That is <b>Q-learning</b> (Watkins, 1989). Read the update as "new estimate = old + step size × error". It has the same shape as a running mean, and as one SGD step on $\tfrac12 (y - Q)^2$ with $y$ held fixed (lesson 06). The difference $y - Q(s,a)$ is the <b>temporal-difference (TD) error</b>. You'll meet it again in lesson 27 as the building block of GAE.</p>
+<p>To keep every $(s,a)$ visited, the agent behaves <b>ε-greedily</b>: with probability ε it takes a random action, otherwise the greedy one. Note that the target uses the <em>max</em>, not the action actually taken next. Q-learning therefore learns about the greedy policy while following an exploratory one, which makes it an <b>off-policy</b> method. With every pair visited infinitely often and suitably decaying $\alpha$, $Q \to Q^*$.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-ql" width="420" height="320"></canvas></div>
+    <div><canvas id="fig-ql-curve" width="360" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-ql"></div>
+  <div class="readout" id="out-ql"></div>
+  <div class="caption"><b>Try it:</b> press <em>play</em>. The agent (dot) starts knowing nothing. Cells are shaded by $\max_a Q$ and arrows show $\arg\max_a Q$ once a cell has been visited. The right panel plots the discounted return of each episode (faint) and its moving average. The dashed line is $V^*(\text{start})$ from value iteration. Q-learning gets there <em>without</em> ever seeing $P$. Set ε = 0: early on the agent latches onto whatever it found first and may never discover the better route. Turn speed up to skip ahead.</div>
+</div>
+
+<div class="callout ml">
+<p>Replace the table $Q(s,a)$ with a neural network $Q_\theta(s,a)$ and you have DQN, which learned to play Atari games from pixels in 2015. For language models, value-based methods are awkward: the action space is the vocabulary and the reward arrives only at the end. The field instead optimizes the policy directly. That's <b>policy gradients</b>, lesson 27.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bandits">7. Bandits: exploration vs exploitation</h2>
+<p>Strip away states entirely: one situation, $K$ actions ("arms" of a slot machine), each paying a noisy reward with unknown mean $\mu_a$. This is the <b>multi-armed bandit</b>. It isolates the hardest idea in RL. Every pull either <b>exploits</b> (play the arm that looks best) or <b>explores</b> (play another arm to learn more about it). You can't do both with the same pull.</p>
+<p>Track a sample mean per arm. The incremental form avoids storing history. With $Q_n$ the mean of the first $n$ rewards,</p>
+$$Q_{n+1} = \frac{1}{n+1}\Big(\textstyle\sum_{i=1}^{n} r_i + r_{n+1}\Big) = \frac{n Q_n + r_{n+1}}{n+1} = Q_n + \frac{1}{n+1}\big(r_{n+1} - Q_n\big).$$
+<p>It has the same "old + step × error" shape again.</p>
+<p>To score a strategy we use <b>regret</b>: how much reward it lost relative to always playing the best arm $\mu^* = \max_a \mu_a$,</p>
+$$\text{Regret}(T) = \sum_{t=1}^{T} \big(\mu^* - \mu_{a_t}\big) = \sum_a \Delta_a\, N_a(T), \qquad \Delta_a = \mu^* - \mu_a .$$
+<p>Every pull of a suboptimal arm costs its gap $\Delta_a$. Three strategies:</p>
+<ul>
+  <li><b>Greedy</b> always pulls the arm with the highest current estimate. One unlucky early sample can make the best arm look bad forever. It is never pulled again, so the estimate is never corrected. The regret then grows <em>linearly</em> in $T$.</li>
+  <li><b>ε-greedy</b> explores at random with probability ε. It never gets stuck, but it also never stops exploring. It pays roughly $\varepsilon \cdot \frac{K-1}{K}\cdot\bar\Delta$ per step forever, so its regret is still linear, just with a smaller slope.</li>
+  <li><b>UCB</b> (upper confidence bound) is "optimism in the face of uncertainty". Pull the arm whose <em>plausible best case</em> is highest:
+  $$a_t = \arg\max_a \Big[\, Q_a + c\sqrt{\frac{\ln t}{N_a}}\,\Big].$$
+  The bonus is a confidence width. It comes from Hoeffding's inequality, and it shrinks like $1/\sqrt{N_a}$, the standard error from lesson 09. Rarely tried arms get a big bonus. The slowly growing $\ln t$ makes sure no arm is abandoned forever. A bad arm gets tried only about $\ln T / \Delta_a^2$ times, so the regret grows only <em>logarithmically</em>.</li>
+</ul>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-bandit" width="420" height="320"></canvas></div>
+    <div><canvas id="fig-bandit-arms" width="360" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-bandit"></div>
+  <div class="readout" id="out-bandit"></div>
+  <div class="caption"><b>Try it:</b> left, the average cumulative regret over 200 runs of 1000 pulls on a 10-armed Gaussian bandit, for <span style="color:var(--c4)">greedy</span>, <span style="color:var(--c2)">ε-greedy</span> and <span style="color:var(--c1)">UCB</span>. Right, the share of pulls each strategy gave each arm (arms sorted best first, true means underneath). Slide ε: too small and ε-greedy behaves like greedy, too large and it wastes pulls. Watch the slope of its line. Slide $c$ to 0 and UCB collapses into greedy. Press <em>new bandit</em> a few times: on bandits whose best arm stands far apart, greedy sometimes gets lucky, but UCB is the one that is reliably good.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: one UCB decision</div>
+  <p>After 10 pulls ($t = 11$ is next), three arms have $Q = (1.2,\ 1.5,\ 0.4)$ from $N = (6,\ 3,\ 1)$ pulls. With $c = 2$ and $\ln 11 \approx 2.398$:</p>
+  <ul>
+    <li>A: $1.2 + 2\sqrt{2.398/6} = 1.2 + 1.264 = 2.464$</li>
+    <li>B: $1.5 + 2\sqrt{2.398/3} = 1.5 + 1.788 = 3.288$</li>
+    <li>C: $0.4 + 2\sqrt{2.398/1} = 0.4 + 3.097 = 3.497$</li>
+  </ul>
+  <p>UCB pulls <b>C</b>, the arm with the <em>worst</em> estimate, because one sample says almost nothing. With $c=0.5$ the scores become $1.516, 1.947, 1.174$ and B wins. $c$ is the exploration knob.</p>
+</div>
+
+<div class="callout ml">
+<p>The exploration problem is front and centre in RL for LLMs. A policy can only reinforce completions it actually samples. If a model never writes a correct proof, a correctness reward gives it no gradient at all (lesson 29). Sampling temperature (lesson 25), the entropy bonus in PPO (lesson 27) and sampling a whole <em>group</em> of answers per prompt in GRPO are all exploration devices.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="next">8. From tables to transformers</h2>
+<p>Everything above stored one number per state, or per state–action pair. A language model's state is a whole token prefix. There are more possible prefixes than atoms in the universe, and you'll never visit the same one twice. Two changes make RL work at that scale:</p>
+<ol>
+  <li><b>Parameterize the policy directly</b> as a neural network $\pi_\theta(a\mid s)$ and climb the gradient of expected return. That's the <em>policy gradient</em> (lesson 27), and PPO is its workhorse version.</li>
+  <li><b>Keep a value estimate only as a helper</b> (a "baseline" or "critic") to reduce the variance of those gradients. GRPO (lesson 29) even replaces it with the average reward of a group of samples.</li>
+</ol>
+<p>The concepts carry over unchanged: return, discount, value, advantage $Q - V$, the Bellman recursion and exploration.</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+<p>Work on paper first. The numeric boxes accept expressions like <code>2/0.145</code>.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Rewards $(0, 0, 1, 0, 5)$ with $\gamma = 0.9$. Compute $G_0$. Then compute $G_0$ for $\gamma = 1$ and $\gamma = 0$, and say in words what each agent cares about.</p>
+<div class="numcheck" data-answer="4.0905" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$G_0 = 0.9^2 + 5\cdot 0.9^4 = 0.81 + 3.2805 = 4.0905$. With $\gamma=1$, $G_0 = 6$: every reward counts equally. With $\gamma=0$, $G_0 = r_0 = 0$: a completely myopic agent only cares about the very next reward.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>An agent receives reward 1 at every step forever with $\gamma = 0.95$. What is its return? What is the effective horizon for $\gamma = 0.99$?</p>
+<div class="numcheck" data-answer="20"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Geometric series: $\sum_k 0.95^k = 1/(1-0.95) = 20$. For $\gamma=0.99$, $H = 1/(1-0.99) = 100$ steps.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>In the fresh/tired MDP with $\gamma = 0.5$, evaluate the policy "work when fresh, rest when tired". Enter $V(\text{fresh}), V(\text{tired})$.</p>
+<div class="numcheck" data-answer="3.2,1.6" data-tol="1e-3"></div>
+<details class="hint"><summary>Hint</summary><p>Same two equations as the worked example in section 4, with $0.5$ in place of $0.9$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$V_t = 0.5\,V_f$ and $V_f = 2 + 0.5(0.5V_f + 0.5V_t) = 2 + 0.25V_f + 0.125V_f$. So $0.625\,V_f = 2$, giving $V_f = 3.2$ and $V_t = 1.6$. Compare "always work" at $\gamma = 0.5$: $V_t = 0.5/(1-0.5) = 1$ and $V_f = (2 + 0.25)/0.75 = 3$. Resting still wins, but only just. Below $\gamma = 2/7 \approx 0.286$ it flips (try it in the figure).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Option A pays $+1$ now. Option B pays $+10$ exactly 20 steps from now. For which discount factor is the agent indifferent?</p>
+<div class="numcheck" data-answer="0.8913" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Indifferent when $10\gamma^{20} = 1$, i.e. $\gamma = 0.1^{1/20} = e^{\ln(0.1)/20} \approx 0.8913$. Above that, the patient option wins. For example, $\gamma = 0.9$ gives $10\cdot0.9^{20} \approx 1.216$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>In the section 5 gridworld ($\gamma=0.9$, slip 0.2, step reward $-0.04$, $V_0 = 0$), the cell at row 1, column 5 sits directly above the pit. Compute $Q_1(\text{down})$ for that cell after the first sweep.</p>
+<div class="numcheck" data-answer="-0.808" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Intended move into the pit with probability 0.8 earns $-1$. The slips left and right (0.1 each) land on ordinary cells for $-0.04$. All $V_0 = 0$, so $Q_1 = 0.8(-1) + 0.1(-0.04)+0.1(-0.04) = -0.808$. By contrast, $Q_1(\text{up}) = -0.04$, so the max ignores the pit. Click that cell in the figure to check.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>For the UCB worked example ($Q=(1.2,1.5,0.4)$, $N=(6,3,1)$, $t=11$, $c=2$), enter the UCB score of arm C. Then explain why UCB's bonus uses $\ln t$ in the numerator rather than a constant.</p>
+<div class="numcheck" data-answer="3.497" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$0.4 + 2\sqrt{\ln 11 / 1} = 0.4 + 2\cdot1.5485 = 3.497$. With a constant numerator, the bonus of an arm that stops being pulled would freeze. A badly estimated arm could then stay below the others forever, which is greedy's failure mode. Because $\ln t$ keeps growing, an untouched arm's bonus slowly rises until it is tried again. Because it grows only logarithmically, those retries are rare.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>A 10-armed bandit has an average gap of $\bar\Delta = 1.5$ over its 9 suboptimal arms. Estimate the regret that ε-greedy with ε = 0.1 accumulates over 1000 steps from exploration alone, assuming its greedy choice is already the best arm.</p>
+<div class="numcheck" data-answer="135" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Each step explores with probability 0.1. A random arm is suboptimal with probability 9/10 and then costs $\bar\Delta=1.5$ on average. Per step: $0.1\cdot0.9\cdot1.5 = 0.135$. Over 1000 steps, about 135. That's a linear cost no matter how well the arms are known, which is why practical schemes decay ε over time.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · concept</span>
+<p>In the fresh/tired figure, the best policy is always at a corner of the $(p, q)$ square. Explain, using the Bellman equation, why some deterministic policy is always optimal in an MDP. Is the same true in a two-player game like rock-paper-scissors?</p>
+<details class="solution"><summary>Solution</summary>
+<p>$V^\pi(s) = \sum_a \pi(a\mid s)Q^\pi(s,a)$ is an average of $Q$ values, and an average never exceeds its largest term. Putting all probability on $\arg\max_a Q^*(s,a)$ in every state achieves $V^*$ (policy improvement). So randomizing can't beat the best pure choice. In a game the "environment" is an adversary who reacts to your policy. Any deterministic RPS strategy gets exploited, so the optimal (minimax) strategy is uniformly random. Stochastic policies also matter when the state is only partially observed.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch · proof</span>
+<p>Let $T_\pi V = \mathbf r_\pi + \gamma P_\pi V$. Prove that $\|T_\pi V - T_\pi U\|_\infty \le \gamma\|V - U\|_\infty$. Conclude that iterative policy evaluation converges to a unique $V^\pi$ from any starting point, with error at most $\gamma^k\|V_0 - V^\pi\|_\infty$ after $k$ sweeps.</p>
+<details class="hint"><summary>Hint</summary><p>$T_\pi V - T_\pi U = \gamma P_\pi(V-U)$. Each row of $P_\pi$ is a probability vector, so each entry of $P_\pi x$ is an average of the entries of $x$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$(T_\pi V - T_\pi U)(s) = \gamma\sum_{s'}P_\pi[s,s'](V-U)(s')$. An average of numbers is at most their largest absolute value: $|\sum_{s'} P_\pi[s,s'] x_{s'}| \le \sum_{s'} P_\pi[s,s']|x_{s'}| \le \|x\|_\infty$. Take the max over $s$ and you get the inequality.</p>
+<p>$V^\pi$ is a fixed point ($T_\pi V^\pi = V^\pi$), so $\|V_{k} - V^\pi\| = \|T_\pi V_{k-1} - T_\pi V^\pi\| \le \gamma \|V_{k-1} - V^\pi\| \le \dots \le \gamma^k\|V_0 - V^\pi\|$. If there were two fixed points $V, U$, then $\|V-U\| \le \gamma\|V-U\|$ forces $\|V - U\| = 0$. (The max in $T$ for value iteration also satisfies $|\max_a f(a) - \max_a g(a)| \le \max_a|f(a)-g(a)|$, so the same proof covers $V^*$.)</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 10</div><span class="difficulty">stretch · concept</span>
+<p>Set the gridworld's step reward to $+0.05$ with $\gamma = 0.99$. What does the optimal policy do near the goal, and why? What is the value of bumping into a wall forever? Enter it.</p>
+<div class="numcheck" data-answer="5" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Staying alive pays $0.05$ per step forever, worth $0.05/(1-0.99) = 5$. Entering the goal pays only $+1$ once and ends the episode. So the optimal agent avoids the goal and bumps into walls indefinitely. The reward said "be alive", not "finish the task". This is a tiny case of <b>reward misspecification</b>: the agent optimizes exactly what you wrote, not what you meant. Lesson 28's reward hacking is the same failure with a learned reward model. Note also that adding a constant to every reward changes the optimal policy in episodic tasks, because episode length then changes how much of the constant you collect.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">An agent uses $\gamma = 0$. What does it optimize?</div>
+  <div class="opts">
+    <button data-k="a">The sum of all future rewards, undiscounted.</button>
+    <button data-k="b">Only the immediate reward $r_t$. Every later reward has weight $0^k = 0$.</button>
+    <button data-k="c">Nothing. With $\gamma=0$ every return is 0.</button>
+    <button data-k="d">The reward at the end of the episode.</button>
+  </div>
+  <div class="explain">$G_t = r_t + 0\cdot G_{t+1} = r_t$. A $\gamma=0$ agent is a bandit player: it treats each step as a one-shot decision.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Why does value iteration need more sweeps on a bigger maze?</div>
+  <div class="opts">
+    <button data-k="a">Because the max over actions gets more expensive.</button>
+    <button data-k="b">Because $\gamma$ is effectively smaller on big mazes.</button>
+    <button data-k="c">Because each sweep propagates reward information only one step further from the goal.</button>
+    <button data-k="d">It doesn't. The number of sweeps depends only on $\gamma$.</button>
+  </div>
+  <div class="explain">A backup looks one step ahead. The worked example showed the goal's value reaching one more cell per sweep. A state $d$ steps from the reward learns nothing useful before sweep $d$. The $\gamma^k$ contraction bound limits the final convergence, but path length sets when values become meaningful at all.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">Q-learning behaves ε-greedily but its target uses $\max_{a'} Q(s',a')$. What does it converge to?</div>
+  <div class="opts">
+    <button data-k="a">$Q^*$, the values of the optimal greedy policy, even though it never fully follows that policy.</button>
+    <button data-k="b">The values of the ε-greedy policy it actually follows.</button>
+    <button data-k="c">The values of a uniformly random policy.</button>
+    <button data-k="d">Nothing in particular: off-policy learning doesn't converge.</button>
+  </div>
+  <div class="explain">The max makes the target a sample of the Bellman <em>optimality</em> equation, so Q-learning is off-policy. A variant whose target uses the action actually taken next (SARSA) learns the value of the ε-greedy policy instead.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">After many pulls, UCB keeps occasionally pulling an arm whose estimate is clearly worse. Why?</div>
+  <div class="opts">
+    <button data-k="a">A bug. UCB should never pull an arm it believes is worse.</button>
+    <button data-k="b">It is exploring at random with a fixed probability, like ε-greedy.</button>
+    <button data-k="c">Its estimates are wrong because it doesn't use the incremental mean.</button>
+    <button data-k="d">The arm's bonus $c\sqrt{\ln t/N_a}$ keeps slowly growing while it isn't pulled, until its optimistic score overtakes the leader.</button>
+  </div>
+  <div class="explain">UCB's exploration is deliberate and decreasing: rarely, and only for arms whose confidence intervals still overlap the best. That's why its regret grows like $\log T$ instead of $T$.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Return</td><td>$G_t = \sum_k \gamma^k r_{t+k} = r_t + \gamma G_{t+1}$</td><td>what the agent maximizes</td></tr>
+  <tr><td>Effective horizon</td><td>$1/(1-\gamma)$</td><td>how far ahead it looks</td></tr>
+  <tr><td>Values</td><td>$V^\pi(s)=\mathbb E[G\mid s]$, $Q^\pi(s,a)=\mathbb E[G\mid s,a]$</td><td>expected return from here</td></tr>
+  <tr><td>Bellman expectation</td><td>$V = r_\pi + \gamma P_\pi V$</td><td>linear system, solve for $V^\pi$</td></tr>
+  <tr><td>Bellman optimality</td><td>$V^*(s) = \max_a \sum_{s'}P[R + \gamma V^*(s')]$</td><td>iterate it (value iteration), act greedily</td></tr>
+  <tr><td>Q-learning</td><td>$Q \mathrel{+}= \alpha(r + \gamma\max Q(s',\cdot) - Q)$</td><td>learn $Q^*$ from samples, no model</td></tr>
+  <tr><td>Regret</td><td>$\sum_a \Delta_a N_a(T)$</td><td>greedy and ε-greedy: linear; UCB: logarithmic</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 26: build it</h3>
+  <p>Open <code>workbooks/26_rl_basics/exercises.py</code>. You'll write returns-to-go, build a slippery gridworld's $P$ and $R$ arrays, evaluate policies both iteratively and as a linear solve, run value iteration, implement tabular Q-learning against a step-only environment, and race greedy, ε-greedy and UCB on a 10-armed bandit until the regret ordering appears. NumPy only. Grade yourself with:</p>
+  <pre><code>./course check 26</code></pre>
+  <p>Print your gridworld solution with <code>helpers.render_values(mdp, V, policy)</code>. It should match the figure in section 5.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Sutton &amp; Barto, <em>Reinforcement Learning: An Introduction</em> (2nd ed.), ch. 2 (bandits), 3 (MDPs), 4 (dynamic programming), 6 (Q-learning). Free online.</li>
+  <li>David Silver's UCL RL course, lectures 1–3.</li>
+  <li>Auer, Cesa-Bianchi &amp; Fischer (2002), "Finite-time analysis of the multiarmed bandit problem" (UCB1).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt } = Course;
+
+  // shared gridworld geometry (rows top->bottom)
+  const DEMO = ["......G", ".###...", "...#.P.", ".#...#.", "S..#..."];
+  const MV = [[-1, 0], [0, 1], [1, 0], [0, -1]];
+  function gridModel(layout, slip, step) {
+    const R = layout.length, C = layout[0].length;
+    const ch = (r, c) => layout[r][c];
+    const land = (r, c, d) => { const nr = r + MV[d][0], nc = c + MV[d][1]; return (nr >= 0 && nr < R && nc >= 0 && nc < C && ch(nr, nc) !== "#") ? [nr, nc] : [r, c]; };
+    const rew = (r, c) => ch(r, c) === "G" ? 1 : ch(r, c) === "P" ? -1 : step;
+    const term = (r, c) => ch(r, c) === "G" || ch(r, c) === "P";
+    // outcomes(r,c,a) -> [[prob, nr, nc, reward], ...]
+    const outcomes = (r, c, a) => [[1 - slip, a], [slip / 2, (a + 1) % 4], [slip / 2, (a + 3) % 4]].filter(o => o[0] > 0).map(([p, d]) => { const [nr, nc] = land(r, c, d); return [p, nr, nc, rew(nr, nc)]; });
+    const Q = (V, r, c, a, g) => outcomes(r, c, a).reduce((s, [p, nr, nc, rw]) => s + p * (rw + g * V[nr][nc]), 0);
+    return { R, C, ch, term, outcomes, Q, wall: (r, c) => ch(r, c) === "#" };
+  }
+  const zeros = (R, C) => Array.from({ length: R }, () => new Array(C).fill(0));
+  function viSweep(M, V, g) {
+    const N = zeros(M.R, M.C); let d = 0;
+    for (let r = 0; r < M.R; r++) for (let c = 0; c < M.C; c++) {
+      if (M.wall(r, c) || M.term(r, c)) continue;
+      let best = -Infinity; for (let a = 0; a < 4; a++) best = Math.max(best, M.Q(V, r, c, a, g));
+      N[r][c] = best; d = Math.max(d, Math.abs(best - V[r][c]));
+    }
+    return [N, d];
+  }
+  function drawGrid(p, M, V, opts = {}) {
+    const { R, C } = M;
+    for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+      const x0 = c, y0 = R - r - 1, ch = M.ch(r, c);
+      if (ch === "#") { p.rect(x0, y0, x0 + 1, y0 + 1, { fill: "muted", fillAlpha: .55, color: "muted", width: 1 }); continue; }
+      const v = V[r][c], t = Math.max(0, Math.min(1, (v + 1) / 2));
+      p.ctx.fillStyle = Course.cmap("div", t, .85); p.ctx.fillRect(p.X(x0), p.Y(y0 + 1), p.X(x0 + 1) - p.X(x0), p.Y(y0) - p.Y(y0 + 1));
+      p.rect(x0, y0, x0 + 1, y0 + 1, { fill: "bg", fillAlpha: 0, color: "grid", width: 1 });
+      if (ch === "G" || ch === "P") {
+        p.rect(x0 + .06, y0 + .06, x0 + .94, y0 + .94, { fill: ch === "G" ? "ok" : "bad", fillAlpha: .25, color: ch === "G" ? "ok" : "bad", width: 2.5 });
+        p.label(x0 + .5, y0 + .5, ch === "G" ? "goal +1" : "pit −1", { align: "center", color: ch === "G" ? "ok" : "bad", font: `700 ${opts.small ? 10 : 13}px sans-serif` });
+        continue;
+      }
+      if (ch === "S") p.label(x0 + .07, y0 + .86, "S", { color: "muted", font: "700 11px sans-serif" });
+      if (opts.values !== false) p.label(x0 + .5, y0 + .22, v.toFixed(2), { align: "center", font: "11px " + getComputedStyle(document.documentElement).getPropertyValue("--mono"), color: "fg" });
+      const arrowA = opts.arrow ? opts.arrow(r, c) : -1;
+      if (arrowA >= 0) { const L = .28, cx = x0 + .5, cy = y0 + (opts.values === false ? .5 : .58); p.arrow(cx - MV[arrowA][1] * L * .6, cy + MV[arrowA][0] * L * .6, cx + MV[arrowA][1] * L, cy - MV[arrowA][0] * L, { color: "fg", width: 2, head: 8 }); }
+    }
+  }
+
+  // ---------- fig: discounting ----------
+  {
+    const p = new Plot("#fig-disc", { xmin: -3, xmax: 82, ymin: -0.12, ymax: 1.12 });
+    let g = 0.9; const out = document.getElementById("out-disc");
+    slider("#ctl-disc", { label: "γ ", min: 0, max: 0.995, step: 0.005, value: 0.9, digits: 3 }, v => { g = v; p.render(); });
+    p.render(p => {
+      p.line(-3, 0, 82, 0, { color: "axis", width: 1 });
+      const H = g < 1 ? 1 / (1 - g) : Infinity;
+      for (let k = 0; k <= 80; k++) { const w = Math.pow(g, k); p.rect(k - .38, 0, k + .38, w, { fill: k < H ? "c1" : "c3", fillAlpha: .75, color: k < H ? "c1" : "c3", width: 1 }); }
+      [0, 10, 20, 40, 60, 80].forEach(k => p.label(k, 0, String(k), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      p.label(81, -0.06, "steps ahead k", { align: "right", color: "muted", font: "11px sans-serif", dy: 10 });
+      if (H <= 80) { p.line(H, 0, H, 1.05, { color: "c5", dash: [6, 4], width: 2 }); p.label(H, 1.07, "H = 1/(1−γ) = " + fmt(H, 1), { color: "c5", align: H > 60 ? "right" : "left", dx: H > 60 ? -4 : 4 }); }
+      else p.label(80, 1.07, "H = " + fmt(H, 0) + " (off the chart →)", { color: "c5", align: "right" });
+      p.label(1, 0.92, "weight γᵏ", { color: "muted", font: "12px sans-serif" });
+      const now = 1, later = 10 * Math.pow(g, 20);
+      const Hc = Math.floor(H), within = isFinite(H) ? 1 - Math.pow(g, Math.ceil(H - 1e-9)) : 0;
+      out.textContent = `effective horizon 1/(1−γ) = ${isFinite(H) ? H.toFixed(1) : "∞"} steps;  share of total weight in the first ⌈H⌉ steps = ${(within * 100).toFixed(1)}%\n` +
+        `+1 now is worth 1.000;  +10 in 20 steps is worth 10·γ^20 = ${later.toFixed(3)}  →  agent prefers ${later > now ? "to WAIT" : "the reward NOW"}`;
+    });
+  }
+
+  // ---------- fig: fresh/tired MDP ----------
+  {
+    const d = new Plot("#fig-mdp", { xmin: 0, xmax: 10.5, ymin: 0, ymax: 8, equal: true });
+    const h = new Plot("#fig-mdp-heat", { xmin: -0.2, xmax: 1.08, ymin: -0.17, ymax: 1.1 });
+    let g = 0.9; const out = document.getElementById("out-mdp");
+    const hd = { x: 1, y: 0, color: "c2", constrain: (x, y) => [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))] };
+    const solve = (p, q) => { // states fresh, tired
+      const a = 1 - g * (p * .5 + (1 - p)), b = -g * p * .5, c = -g * (1 - q), dd = 1 - g * q, r0 = 2 * p, r1 = .5 * q, det = a * dd - b * c;
+      return [(r0 * dd - b * r1) / det, (a * r1 - c * r0) / det];
+    };
+    const N = 40; let M = [], lo = 0, hi = 1;
+    const rebuild = () => { M = []; for (let i = 0; i < N; i++) { const row = []; for (let j = 0; j < N; j++) row.push(solve((j + .5) / N, 1 - (i + .5) / N)[0]); M.push(row); } lo = Math.min(...M.flat()); hi = Math.max(...M.flat()); };
+    slider("#ctl-mdp", { label: "γ ", min: 0.05, max: 0.99, step: 0.01, value: 0.9 }, v => { g = v; rebuild(); h.render(); });
+    function curve(P, A, B, bend, o) {
+      const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2, nx = -(B[1] - A[1]), ny = B[0] - A[0], L = Math.hypot(nx, ny);
+      const C = [mx + nx / L * bend, my + ny / L * bend], pts = [];
+      for (let i = 0; i <= 30; i++) { const t = i / 30; pts.push([(1 - t) ** 2 * A[0] + 2 * (1 - t) * t * C[0] + t * t * B[0], (1 - t) ** 2 * A[1] + 2 * (1 - t) * t * C[1] + t * t * B[1]]); }
+      P.path(pts.slice(0, 25), o); P.arrow(pts[24][0], pts[24][1], pts[30][0], pts[30][1], { ...o, head: 10 + 1.5 * o.width }); return C;
+    }
+    function loop(P, cx, cy, up, o) { const pts = [], sg = up ? 1 : -1; for (let i = 0; i <= 40; i++) { const t = (-50 + 280 * i / 40) * Math.PI / 180; pts.push([cx + .6 * Math.cos(t), cy + sg * (1.6 + .6 * Math.sin(t))]); } P.path(pts.slice(0, 34), o); P.arrow(pts[33][0], pts[33][1], pts[40][0], pts[40][1], { ...o, head: 10 + 1.5 * o.width }); }
+    const onC = (C, deg, r = 1.18) => [C[0] + r * Math.cos(deg * Math.PI / 180), C[1] + r * Math.sin(deg * Math.PI / 180)];
+    function drawDiagram() {
+      d.clear();
+      const p = hd.x, q = hd.y, F = [2.8, 4], T = [7.9, 4], W = x => .6 + 5 * x;
+      const pFF = p * .5 + (1 - p), pFT = p * .5, pTT = q, pTF = 1 - q;
+      d.circle(F[0], F[1], 1.05, { color: "fg", fill: "panel", fillAlpha: 1, width: 2 }); d.circle(T[0], T[1], 1.05, { color: "fg", fill: "panel", fillAlpha: 1, width: 2 });
+      if (pFT > .005) curve(d, onC(F, 25, 1.1), onC(T, 155, 1.25), 0.7, { color: "c4", width: W(pFT) });
+      if (pTF > .005) curve(d, onC(T, 205, 1.1), onC(F, -25, 1.25), 0.7, { color: "c1", width: W(pTF) });
+      if (pFF > .005) loop(d, F[0], F[1], true, { color: "c3", width: W(pFF) });
+      if (pTT > .005) loop(d, T[0], T[1], false, { color: "c2", width: W(pTT) });
+      const V = solve(p, q);
+      d.label(F[0], F[1] + .25, "fresh", { align: "center" }); d.label(F[0], F[1] - .3, "V=" + V[0].toFixed(2), { align: "center", font: "12px sans-serif", color: "muted" });
+      d.label(T[0], T[1] + .25, "tired", { align: "center" }); d.label(T[0], T[1] - .3, "V=" + V[1].toFixed(2), { align: "center", font: "12px sans-serif", color: "muted" });
+      const f = "12px sans-serif";
+      d.label(F[0], 7.55, `stay: ${pFF.toFixed(2)}  (rest r=0 / work r=+2)`, { align: "center", font: f, color: "c3" });
+      d.label(5.25, 5.55, `work → tired: ${pFT.toFixed(2)}, r=+2`, { align: "center", font: f, color: "c4" });
+      d.label(5.25, 2.45, `rest → fresh: ${pTF.toFixed(2)}, r=0`, { align: "center", font: f, color: "c1" });
+      d.label(T[0], .45, `work, stay: ${pTT.toFixed(2)}, r=+0.5`, { align: "center", font: f, color: "c2" });
+      out.textContent = `policy: π(work|fresh) = p = ${p.toFixed(2)},  π(work|tired) = q = ${q.toFixed(2)},  γ = ${g.toFixed(2)}\n` +
+        `solve (I − γP_π)V = r_π  →  V(fresh) = ${V[0].toFixed(3)},  V(tired) = ${V[1].toFixed(3)}`;
+    }
+    rebuild();
+    h.draggable([hd], drawDiagram).render(h => {
+      h.heatmap(M, { x0: 0, x1: 1, y0: 0, y1: 1, cmap: "seq", vmin: lo, vmax: hi });
+      h.rect(0, 0, 1, 1, { fill: "bg", fillAlpha: 0, color: "axis", width: 1 });
+      [0, .5, 1].forEach(t => { h.label(t, 0, String(t), { align: "center", dy: 11, color: "muted", font: "11px sans-serif" }); h.label(0, t, String(t), { align: "right", dx: -5, color: "muted", font: "11px sans-serif" }); });
+      h.label(.5, -.13, "p = π(work | fresh)", { align: "center", color: "muted", font: "12px sans-serif" });
+      h.label(-.19, 1.05, "q = π(work | tired)", { align: "left", color: "muted", font: "12px sans-serif" });
+      // best corner
+      const corners = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([p, q]) => [p, q, solve(p, q)[0]]).sort((a, b) => b[2] - a[2]);
+      h.label(corners[0][0], corners[0][1], "★ best", { align: corners[0][0] ? "right" : "left", dx: corners[0][0] ? -8 : 8, dy: corners[0][1] ? 12 : -12, color: "c5", bg: true });
+      h.label(1.06, 1.05, "V(fresh) " + lo.toFixed(1) + " … " + hi.toFixed(1), { align: "right", color: "muted", font: "11px sans-serif" });
+      h.drawHandles(); drawDiagram();
+    });
+  }
+
+  // ---------- fig: gridworld value iteration ----------
+  {
+    let layout = DEMO.slice(), g = 0.9, slip = 0.2, step = -0.04, k = 0, lastD = NaN, sel = [0, 5], mode = "inspect";
+    let M = gridModel(layout, slip, step), V = zeros(M.R, M.C);
+    const p = new Plot("#fig-grid", { xmin: -0.05, xmax: 7.05, ymin: -0.05, ymax: 5.05, equal: true });
+    const out = document.getElementById("out-grid"), ctl = document.getElementById("ctl-grid");
+    const rebuild = () => { M = gridModel(layout, slip, step); };
+    const greedy = (r, c) => { if (k === 0) return -1; let qs = [0, 1, 2, 3].map(a => M.Q(V, r, c, a, g)); const mx = Math.max(...qs), mn = Math.min(...qs); return mx - mn < 1e-9 ? -1 : qs.indexOf(mx); };
+    const sweep = () => { const [N, d] = viSweep(M, V, g); V = N; k++; lastD = d; return d; };
+    const anim = Course.animator(() => { let d; for (let i = 0; i < 2; i++) d = sweep(); p.render(); return d > 1e-6 && k < 3000; });
+    button(ctl, "sweep", () => { anim.stop(); sweep(); p.render(); });
+    const playB = button(ctl, "play", () => { if (anim.running) anim.stop(); else anim.start(); });
+    button(ctl, "reset V", () => { anim.stop(); V = zeros(M.R, M.C); k = 0; lastD = NaN; p.render(); });
+    slider(ctl, { label: "γ ", min: 0.5, max: 0.99, step: 0.01, value: 0.9 }, v => { g = v; p.render(); });
+    slider(ctl, { label: "slip ", min: 0, max: 0.5, step: 0.05, value: 0.2 }, v => { slip = v; rebuild(); p.render(); });
+    slider(ctl, { label: "step reward ", min: -0.3, max: 0.1, step: 0.01, value: -0.04 }, v => { step = v; rebuild(); p.render(); });
+    select(ctl, "click: ", [["inspect", "inspect backup"], ["wall", "toggle wall"]], v => { mode = v; });
+    p.onClick = (x, y) => {
+      const c = Math.floor(x), r = M.R - 1 - Math.floor(y); if (r < 0 || r >= M.R || c < 0 || c >= M.C) return;
+      if (mode === "wall") { const ch = layout[r][c]; if ("GPS".includes(ch)) return; layout[r] = layout[r].slice(0, c) + (ch === "#" ? "." : "#") + layout[r].slice(c + 1); V[r][c] = 0; rebuild(); }
+      else sel = [r, c];
+      p.render();
+    };
+    p.render(p => {
+      drawGrid(p, M, V, { arrow: greedy });
+      const [r, c] = sel; if (!M.wall(r, c)) p.rect(c + .03, M.R - r - 1 + .03, c + .97, M.R - r - .03, { fill: "bg", fillAlpha: 0, color: "c5", width: 3 });
+      playB.textContent = anim.running ? "pause" : "play";
+      const names = ["up", "right", "down", "left"];
+      let s = `sweep k = ${k}    max |V_k − V_(k−1)| = ${isNaN(lastD) ? "—" : lastD.toExponential(2)}    γ=${g}  slip=${slip}  step=${step}\n`;
+      if (M.wall(r, c)) s += "selected cell is a wall";
+      else if (M.term(r, c)) s += `cell (row ${r}, col ${c}) is terminal: V = 0 by definition`;
+      else {
+        const qs = [0, 1, 2, 3].map(a => M.Q(V, r, c, a, g)), best = qs.indexOf(Math.max(...qs));
+        s += `backup at (row ${r}, col ${c}):  ` + qs.map((q, a) => `Q(${names[a]})=${q.toFixed(3)}${a === best ? "★" : ""}`).join("  ") + `\n  e.g. Q(${names[best]}) = ` +
+          M.outcomes(r, c, best).map(([pr, nr, nc, rw]) => `${pr.toFixed(2)}·(${rw.toFixed(2)} + ${g}·${V[nr][nc].toFixed(2)})`).join(" + ") + `  →  next V = ${Math.max(...qs).toFixed(3)}`;
+      }
+      out.textContent = s;
+    });
+  }
+
+  // ---------- fig: Q-learning ----------
+  {
+    const g = 0.95, slip = 0.1, step = -0.04, M = gridModel(DEMO, slip, step);
+    let V = zeros(M.R, M.C); for (let i = 0; i < 2000; i++) { const [N, d] = viSweep(M, V, g); V = N; if (d < 1e-10) break; }
+    const vstar = V[4][0];
+    const R = Course.rng(3);
+    let eps = 0.1, alpha = 0.3, speed = 1, Q, visited, pos, ep, G, disc, steps, hist;
+    const reset = () => { Q = Array.from({ length: M.R }, () => Array.from({ length: M.C }, () => [0, 0, 0, 0])); visited = zeros(M.R, M.C); pos = [4, 0]; ep = 0; G = 0; disc = 1; steps = 0; hist = []; };
+    reset();
+    const sample = (r, c, a) => { const o = M.outcomes(r, c, a); let u = R.uniform(); for (const x of o) { if ((u -= x[0]) <= 0) return x; } return o[o.length - 1]; };
+    function stepOnce() {
+      const [r, c] = pos; const q = Q[r][c];
+      const a = R.uniform() < eps ? R.int(4) : q.indexOf(Math.max(...q));
+      const [, nr, nc, rw] = sample(r, c, a), T = M.term(nr, nc);
+      const y = rw + (T ? 0 : g * Math.max(...Q[nr][nc]));
+      q[a] += alpha * (y - q[a]); visited[r][c] = 1;
+      G += disc * rw; disc *= g; steps++; pos = [nr, nc];
+      if (T || steps >= 200) { hist.push(G); ep++; pos = [4, 0]; G = 0; disc = 1; steps = 0; }
+    }
+    const p = new Plot("#fig-ql", { xmin: -0.05, xmax: 7.05, ymin: -0.05, ymax: 5.05, equal: true });
+    const cv = new Plot("#fig-ql-curve", { xmin: 0, xmax: 1, ymin: -1, ymax: 1 });
+    const ctl = document.getElementById("ctl-ql"), out = document.getElementById("out-ql");
+    const anim = Course.animator(() => { for (let i = 0; i < speed; i++) stepOnce(); p.render(); return true; });
+    const playB = button(ctl, "play", () => { anim.running ? anim.stop() : anim.start(); p.render(); });
+    button(ctl, "reset Q", () => { reset(); p.render(); });
+    slider(ctl, { label: "ε ", min: 0, max: 0.5, step: 0.01, value: 0.1 }, v => { eps = v; });
+    slider(ctl, { label: "α ", min: 0.05, max: 1, step: 0.05, value: 0.3 }, v => { alpha = v; });
+    select(ctl, "speed: ", [["1", "1 step/frame"], ["20", "20 steps/frame"], ["400", "400 steps/frame"]], v => { speed = +v; });
+    p.render(p => {
+      const VV = Q.map((row, r) => row.map((q, c) => M.term(r, c) ? 0 : Math.max(...q)));
+      drawGrid(p, M, VV, { values: false, small: true, arrow: (r, c) => visited[r][c] ? Q[r][c].indexOf(Math.max(...Q[r][c])) : -1 });
+      p.point(pos[1] + .5, M.R - pos[0] - .5, { r: 8, color: "c5", stroke: "bg" });
+      playB.textContent = anim.running ? "pause" : "play";
+      // curve
+      cv.clear();
+      const n = Math.max(20, hist.length); cv.setView(-0.08 * n, n * 1.02, -1.25, 1.15);
+      cv.line(0, 0, n, 0, { color: "axis", width: 1 });
+      cv.line(0, vstar, n, vstar, { color: "ok", dash: [6, 4], width: 1.5 }); cv.label(n, vstar, "V*(start) = " + vstar.toFixed(2), { align: "right", dy: -10, color: "ok", font: "11px sans-serif" });
+      hist.forEach((v, i) => cv.point(i + .5, Math.max(-1.2, v), { r: 1.6, color: "c1", alpha: .3 }));
+      const ma = []; for (let i = 0; i < hist.length; i++) { const a = Math.max(0, i - 19); let s = 0; for (let j = a; j <= i; j++) s += hist[j]; ma.push([i + .5, Math.max(-1.2, s / (i - a + 1))]); }
+      cv.path(ma, { color: "c1", width: 2.5 });
+      [-1, -0.5, 0.5, 1].forEach(t => cv.label(0, t, String(t), { align: "right", dx: -4, color: "muted", font: "11px sans-serif" }));
+      cv.label(n, -1.15, "episode " + ep, { align: "right", color: "muted", font: "11px sans-serif" });
+      cv.label(1, 1.08, "discounted return per episode", { color: "muted", font: "12px sans-serif" });
+      const recent = hist.slice(-20);
+      out.textContent = `episodes: ${ep}   avg return (last 20): ${recent.length ? (recent.reduce((a, b) => a + b, 0) / recent.length).toFixed(3) : "—"}   V*(start) = ${vstar.toFixed(3)}   (γ=${g}, slip=${slip})\n` +
+        `Q at start: [${Q[4][0].map(x => x.toFixed(2)).join(", ")}]  (up, right, down, left)`;
+    });
+  }
+
+  // ---------- fig: bandits ----------
+  {
+    const K = 10, T = 1000, RUNS = 200;
+    let eps = 0.1, c = 2, seed = 15, means = [], order = [];
+    // arms stay in random order for the algorithms (greedy breaks ties toward index 0); `order` sorts them for display only
+    const newMeans = () => { const R = Course.rng(seed); means = Array.from({ length: K }, () => R.normal()); order = means.map((m, i) => i).sort((a, b) => means[b] - means[a]); };
+    newMeans();
+    const p = new Plot("#fig-bandit", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const q = new Plot("#fig-bandit-arms", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const ctl = document.getElementById("ctl-bandit"), out = document.getElementById("out-bandit");
+    let res;
+    function simulate() {
+      const best = Math.max(...means), strat = ["greedy", "eps", "ucb"];
+      res = strat.map(() => ({ reg: new Float64Array(T), share: new Float64Array(K) }));
+      const R = Course.rng(1234);
+      for (let run = 0; run < RUNS; run++) strat.forEach((s, si) => {
+        const Qe = new Float64Array(K), N = new Float64Array(K); let reg = 0;
+        for (let t = 1; t <= T; t++) {
+          let a = 0;
+          if (s === "ucb") { let bs = -Infinity; for (let i = 0; i < K; i++) { const sc = N[i] === 0 ? Infinity : Qe[i] + c * Math.sqrt(Math.log(t) / N[i]); if (sc > bs) { bs = sc; a = i; } } }
+          else if (s === "eps" && R.uniform() < eps) a = R.int(K);
+          else { let bq = -Infinity; for (let i = 0; i < K; i++) if (Qe[i] > bq) { bq = Qe[i]; a = i; } }
+          const rw = R.normal(means[a], 1); N[a]++; Qe[a] += (rw - Qe[a]) / N[a];
+          reg += best - means[a]; res[si].reg[t - 1] += reg / RUNS; res[si].share[a] += 1 / (RUNS * T);
+        }
+      });
+    }
+    simulate();
+    const go = () => { simulate(); p.render(); q.render(); };
+    slider(ctl, { label: "ε ", min: 0, max: 0.5, step: 0.01, value: 0.1 }, v => { eps = v; go(); });
+    slider(ctl, { label: "UCB c ", min: 0, max: 4, step: 0.1, value: 2 }, v => { c = v; go(); });
+    button(ctl, "new bandit", () => { seed++; newMeans(); go(); });
+    const cols = ["c4", "c2", "c1"], names = ["greedy", "ε-greedy", "UCB"];
+    p.render(p => {
+      const ymax = Math.max(50, ...res.map(r => r.reg[T - 1])) * 1.1;
+      p.setView(-T * 0.1, T * 1.03, -ymax * 0.08, ymax);
+      p.line(0, 0, T, 0, { color: "axis", width: 1 }); p.line(0, 0, 0, ymax, { color: "axis", width: 1 });
+      res.forEach((r, i) => { const pts = []; for (let t = 0; t < T; t += 5) pts.push([t + 1, r.reg[t]]); pts.push([T, r.reg[T - 1]]); p.path(pts, { color: cols[i], width: 2.5 }); p.label(T, r.reg[T - 1], names[i], { align: "right", dy: -9, color: cols[i], font: "600 12px sans-serif" }); });
+      [250, 500, 750, 1000].forEach(t => p.label(t, 0, String(t), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      const st = Math.pow(10, Math.floor(Math.log10(ymax / 2))) * (ymax / 2 / Math.pow(10, Math.floor(Math.log10(ymax / 2))) > 2.5 ? 2 : 1);
+      for (let y = st; y < ymax * .95; y += st) p.label(0, y, String(Math.round(y)), { align: "right", dx: -4, color: "muted", font: "11px sans-serif" });
+      p.label(T * 0.02, ymax * .96, "average cumulative regret", { color: "muted", font: "12px sans-serif" });
+      p.label(T, -ymax * .05, "pull t", { align: "right", color: "muted", font: "11px sans-serif", dy: 2 });
+      out.textContent = `final regret after ${T} pulls (avg of ${RUNS} runs):  greedy ${res[0].reg[T - 1].toFixed(1)}   ε-greedy(ε=${eps}) ${res[1].reg[T - 1].toFixed(1)}   UCB(c=${c}) ${res[2].reg[T - 1].toFixed(1)}\n` +
+        `share of pulls on the best arm:  greedy ${(res[0].share[order[0]] * 100).toFixed(0)}%   ε-greedy ${(res[1].share[order[0]] * 100).toFixed(0)}%   UCB ${(res[2].share[order[0]] * 100).toFixed(0)}%`;
+    });
+    q.render(q => {
+      q.setView(-0.6, K + 0.1, -0.2, 1.08);
+      q.line(0, 0, K, 0, { color: "axis", width: 1 });
+      for (let i = 0; i < K; i++) for (let s = 0; s < 3; s++) { const x0 = i + .1 + s * .27; q.rect(x0, 0, x0 + .24, res[s].share[order[i]], { fill: cols[s], fillAlpha: .8, color: cols[s], width: 1 }); }
+      for (let i = 0; i < K; i++) { q.label(i + .5, 0, "#" + (i + 1), { align: "center", dy: 10, font: "11px sans-serif", color: "muted" }); q.label(i + .5, 0, means[order[i]].toFixed(1), { align: "center", dy: 24, font: "10px sans-serif", color: "muted" }); }
+      [0.25, 0.5, 0.75, 1].forEach(t => q.label(0, t, (t * 100) + "%", { align: "right", dx: -3, font: "10px sans-serif", color: "muted" }));
+      q.label(K, 1.03, "share of pulls per arm (μ below)", { align: "right", color: "muted", font: "12px sans-serif" });
+    });
+  }
+});
+</script>
+</body>
+</html>

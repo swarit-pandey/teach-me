@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expectation, variance, Gaussians & the CLT</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="09">
+<main>
+
+<div class="kicker">Part 3 · Probability &amp; statistics</div>
+<h1>Expectation, variance, Gaussians &amp; the CLT</h1>
+<p class="lede">A distribution is a whole function. Most of the time you only need two numbers from it: where it sits (the mean) and how wide it is (the variance). This lesson builds those two numbers, the covariance that ties variables together, the Gaussian that they define, and the central limit theorem, which explains why the Gaussian turns up everywhere.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Compute expectations and variances, and use linearity of expectation and the variance scaling rules without thinking.</li>
+    <li>Explain covariance and correlation geometrically, and say why "uncorrelated" does not mean "independent".</li>
+    <li>Derive why the sample variance divides by $n-1$.</li>
+    <li>Read a Gaussian's $\mu,\sigma$ (or $\boldsymbol\mu,\Sigma$) off a picture, standardize a value, and sample a multivariate normal with a Cholesky factor.</li>
+    <li>State the central limit theorem and use the standard error $\sigma/\sqrt n$ to reason about minibatch noise.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="expectation">1. Expectation: the balance point</h2>
+<p>In lesson 08 a random variable $X$ came with a PMF $p(x)$: the probability of each value. The <b>expectation</b> (or <b>mean</b>) is the probability-weighted average of the values:</p>
+$$\mathbb{E}[X] = \sum_x x\,p(x) \qquad\text{(discrete)}, \qquad \mathbb{E}[X] = \int x\,p(x)\,dx \qquad\text{(continuous)}.$$
+<p>Physically, put a weight of $p(x)$ at position $x$ on a weightless ruler. $\mathbb{E}[X]$ is the point where the ruler balances. That's exact, not a metaphor: the balance condition is that the torques cancel, $\sum_x (x - m)\,p(x) = 0$, and solving for $m$ gives $m = \sum_x x\,p(x)$.</p>
+
+<div class="figure">
+  <canvas id="fig-exp" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-exp"></div>
+  <div class="readout" id="out-exp"></div>
+  <div class="caption"><b>Try it:</b> drag the dots on top of the bars to reshape the distribution (heights are re-normalized to sum to 1; the small numbers are the probabilities). The orange triangle is the balance point $\mathbb{E}[X]$ and the pink bracket spans $\mathbb{E}[X]\pm\sigma$. Pull one far-right bar up a little and watch the mean move a lot: the mean is sensitive to outliers. Try the "two humps" preset: the mean can sit where there's almost no probability.</div>
+</div>
+
+<p>Two more facts you will use constantly. First, the expectation of a <em>function</em> of $X$ just reweights that function's values:</p>
+$$\mathbb{E}[g(X)] = \sum_x g(x)\,p(x).$$
+<p>Second, <b>linearity of expectation</b>: for any random variables $X, Y$ (dependent or not!) and constants $a, b, c$,</p>
+$$\mathbb{E}[aX + bY + c] = a\,\mathbb{E}[X] + b\,\mathbb{E}[Y] + c.$$
+<p>The proof is one line. Sum over the joint distribution and split the sum: $\sum_{x,y}(ax + by + c)\,p(x,y) = a\sum_{x,y} x\,p(x,y) + b\sum_{x,y} y\,p(x,y) + c\sum_{x,y}p(x,y)$. Summing out $y$ from $p(x,y)$ gives $p(x)$, so the first term is $a\,\mathbb{E}[X]$, the second is $b\,\mathbb{E}[Y]$, and the last is $c\cdot1$. Nothing in that argument used independence.</p>
+
+<div class="callout warning">
+<p>Linearity does <em>not</em> extend to non-linear functions: in general $\mathbb{E}[g(X)] \ne g(\mathbb{E}[X])$. For a fair die, $\mathbb{E}[X]^2 = 12.25$ but $\mathbb{E}[X^2] = 91/6 \approx 15.17$. The gap between those two numbers is exactly the variance (next section).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="variance">2. Variance and standard deviation</h2>
+<p>The mean says where the mass sits. The <b>variance</b> says how spread out it is: the expected squared distance from the mean,</p>
+$$\operatorname{Var}[X] = \mathbb{E}\big[(X - \mu)^2\big], \qquad \mu = \mathbb{E}[X].$$
+<p>Squared distance has squared units (meters²), so we usually quote the <b>standard deviation</b> $\sigma = \sqrt{\operatorname{Var}[X]}$, which is in the same units as $X$. Why squares and not $\mathbb{E}|X - \mu|$? Squares are smooth (differentiable everywhere, as lesson 05 likes), they add up nicely for independent variables (section 3), and they make the Gaussian come out naturally.</p>
+<p>Expand the square and use linearity to get the <b>shortcut formula</b>:</p>
+$$\operatorname{Var}[X] = \mathbb{E}[X^2 - 2\mu X + \mu^2] = \mathbb{E}[X^2] - 2\mu\,\mathbb{E}[X] + \mu^2 = \mathbb{E}[X^2] - \mu^2.$$
+<p>And the two scaling rules, both immediate from the definition:</p>
+$$\operatorname{Var}[X + c] = \operatorname{Var}[X], \qquad \operatorname{Var}[aX] = a^2\operatorname{Var}[X], \qquad\text{so}\quad \sigma_{aX + c} = |a|\,\sigma_X.$$
+<p>Shifting moves the distribution without widening it; scaling by $a$ stretches every distance from the mean by $|a|$, so squared distances grow by $a^2$.</p>
+
+<div class="example">
+  <div class="label">Worked example: a fair die</div>
+  <p>$\mathbb{E}[X] = \frac{1+2+3+4+5+6}{6} = \frac{21}{6} = 3.5$.</p>
+  <p>$\mathbb{E}[X^2] = \frac{1+4+9+16+25+36}{6} = \frac{91}{6} \approx 15.167$.</p>
+  <p>$\operatorname{Var}[X] = \frac{91}{6} - 3.5^2 = \frac{91}{6} - \frac{147}{12} = \frac{182 - 147}{12} = \frac{35}{12} \approx 2.917$, so $\sigma \approx 1.708$.</p>
+  <p>Now let $Y = 10X - 5$ (a die with relabeled faces). Without recomputing anything: $\mathbb{E}[Y] = 10(3.5) - 5 = 30$ and $\sigma_Y = 10 \times 1.708 = 17.08$.</p>
+</div>
+
+<div class="callout warning">
+<p>The shortcut $\mathbb{E}[X^2] - \mu^2$ is exact algebra but bad numerics. If your data are around $10^9$ with spread $0.1$, both terms are about $10^{18}$ and their difference drowns in float rounding. Code should subtract the mean first and then square ("two-pass"). The workbook tests for this.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="covariance">3. Covariance and correlation</h2>
+<p>With two variables, we want to know whether they move together. The <b>covariance</b> is the expected product of their deviations from their means:</p>
+$$\operatorname{Cov}[X, Y] = \mathbb{E}\big[(X - \mu_X)(Y - \mu_Y)\big] = \mathbb{E}[XY] - \mu_X\mu_Y.$$
+<p>Read the product's sign quadrant by quadrant. When $X$ is above its mean and $Y$ is above its mean, the product is positive. Both below: also positive. One above and one below: negative. Covariance is the <em>average</em> of those signed products. It is positive when points mostly fall in the "agree" quadrants and negative when they mostly fall in the "disagree" ones. Note $\operatorname{Cov}[X, X] = \operatorname{Var}[X]$.</p>
+<p>Covariance has units of $X$ times units of $Y$, so its size is hard to judge. Divide out the standard deviations and you get the unit-free <b>correlation</b>:</p>
+$$\rho_{XY} = \frac{\operatorname{Cov}[X, Y]}{\sigma_X\,\sigma_Y} \in [-1, 1].$$
+<p>This should look familiar. Center a dataset and stack the $x$-deviations into a vector $\mathbf{a}$ and the $y$-deviations into $\mathbf{b}$. Then the sample covariance is $\mathbf{a}\cdot\mathbf{b}/n$, each variance is $\|\cdot\|^2/n$, and the correlation is exactly the <b>cosine similarity</b> $\mathbf{a}\cdot\mathbf{b}/(\|\mathbf{a}\|\|\mathbf{b}\|)$ from lesson 01. That's why it lies in $[-1,1]$: Cauchy–Schwarz.</p>
+
+<div class="figure">
+  <canvas id="fig-corr" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-corr"></div>
+  <div class="readout" id="out-corr"></div>
+  <div class="caption"><b>Try it:</b> slide $\rho$. Each point is colored by the sign of its contribution $(x-\bar x)(y-\bar y)$: blue adds to the covariance, pink subtracts. At $\rho = 0.8$ blue dominates; at $\rho = 0$ they cancel. Press "resample" a few times at $\rho = 0$: with 300 points the sample correlation wobbles around 0 by roughly $\pm0.06$. That wobble is sampling noise, the topic of section 8. Then choose "Y = X² (curved)": a perfect dependence, yet the correlation is about 0.</div>
+</div>
+
+<div class="callout key">
+<p><b>Uncorrelated does not mean independent.</b> Correlation only measures the <em>linear</em> part of a relationship. If $X$ is symmetric around 0 and $Y = X^2$, then $Y$ is completely determined by $X$, but $\operatorname{Cov}[X, Y] = \mathbb{E}[X^3] - \mathbb{E}[X]\,\mathbb{E}[X^2] = 0 - 0 = 0$. The converse does hold: independent ⇒ $\mathbb{E}[XY] = \mathbb{E}[X]\,\mathbb{E}[Y]$ ⇒ covariance 0.</p>
+</div>
+
+<h3>Variance of a sum</h3>
+<p>Expand $(X + Y - \mu_X - \mu_Y)^2$ and take expectations:</p>
+$$\operatorname{Var}[X + Y] = \operatorname{Var}[X] + \operatorname{Var}[Y] + 2\operatorname{Cov}[X, Y].$$
+<p>More generally $\operatorname{Var}[aX + bY] = a^2\operatorname{Var}[X] + b^2\operatorname{Var}[Y] + 2ab\operatorname{Cov}[X,Y]$. When the variables are independent the cross term vanishes and <b>variances add</b>. Standard deviations don't add; variances do. The CLT and the $1/\sqrt n$ law below both come from this one fact.</p>
+
+<div class="example">
+  <div class="label">Worked example: two dice</div>
+  <p>Let $S = X_1 + X_2$ be the sum of two independent fair dice. By linearity, $\mathbb{E}[S] = 3.5 + 3.5 = 7$. By independence, $\operatorname{Var}[S] = \frac{35}{12} + \frac{35}{12} = \frac{35}{6} \approx 5.833$, so $\sigma_S \approx 2.415$.</p>
+  <p>Compare $T = 2X_1$ (one die, doubled). Same mean, 7, but $\operatorname{Var}[T] = 4 \cdot \frac{35}{12} = \frac{35}{3} \approx 11.667$. That's twice as much as $S$. $X_1$ is perfectly correlated with itself, so the cross term $2\operatorname{Cov}[X_1, X_1] = 2\operatorname{Var}[X_1]$ is fully present. Independent noise partly cancels; copies of the same noise never do.</p>
+</div>
+
+<h3>The covariance matrix</h3>
+<p>For a random vector $\mathbf{x} \in \mathbb{R}^d$, collect every pairwise covariance into the $d \times d$ <b>covariance matrix</b> $\Sigma_{jk} = \operatorname{Cov}[x_j, x_k]$, or compactly $\Sigma = \mathbb{E}[(\mathbf{x}-\boldsymbol\mu)(\mathbf{x}-\boldsymbol\mu)^\top]$. It's symmetric, its diagonal holds the variances, and it is positive semi-definite: for any direction $\mathbf{w}$, $\mathbf{w}^\top\Sigma\,\mathbf{w} = \operatorname{Var}[\mathbf{w}\cdot\mathbf{x}] \ge 0$. With data in an $n\times d$ matrix $X$ with centered columns $X_c$, the sample version is one matmul: $\hat\Sigma = X_c^\top X_c / (n-1)$. That's the matrix whose eigenvectors were the principal components in lesson 04.</p>
+
+<!-- ============================================================ -->
+<h2 id="sample">4. From data: sample mean, sample variance, and n − 1</h2>
+<p>In practice you don't know $p(x)$. You have $n$ samples $x_1, \dots, x_n$ and you <em>estimate</em>:</p>
+$$\bar x = \frac1n\sum_i x_i, \qquad s^2 = \frac{1}{n-1}\sum_i (x_i - \bar x)^2.$$
+<p>Why $n-1$ and not $n$? Because $\bar x$ was fitted to the same data, the data sit closer to $\bar x$ than to the true $\mu$ (in fact $\bar x$ is the number that <em>minimizes</em> $\sum_i (x_i - c)^2$). Dividing by $n$ therefore underestimates the spread on average. Here is the exact amount. Write $x_i - \bar x = (x_i - \mu) - (\bar x - \mu)$ and expand:</p>
+$$\sum_i (x_i - \bar x)^2 = \sum_i (x_i - \mu)^2 - n(\bar x - \mu)^2.$$
+<p>(The cross term is $-2(\bar x - \mu)\sum_i(x_i - \mu) = -2n(\bar x-\mu)^2$, which combines with the $+n(\bar x - \mu)^2$ from the last square.) Take expectations. Each $\mathbb{E}[(x_i - \mu)^2] = \sigma^2$, and $\mathbb{E}[(\bar x - \mu)^2] = \operatorname{Var}[\bar x] = \sigma^2/n$ (section 8). So</p>
+$$\mathbb{E}\Big[\sum_i (x_i - \bar x)^2\Big] = n\sigma^2 - n\cdot\frac{\sigma^2}{n} = (n-1)\,\sigma^2.$$
+<p>Dividing by $n-1$ gives an estimator whose average is exactly $\sigma^2$: it's <b>unbiased</b>. Intuitively, one of the $n$ "degrees of freedom" was spent estimating the mean. This is Bessel's correction. NumPy's <code>np.var</code> defaults to dividing by $n$ (<code>ddof=0</code>) and <code>np.cov</code> to $n-1$, a classic source of confusion. For $n$ in the thousands, nobody cares. For $n = 5$, it's a 25% difference.</p>
+
+<!-- ============================================================ -->
+<h2 id="gaussian">5. The Gaussian</h2>
+<p>The <b>normal</b> or <b>Gaussian</b> distribution $\mathcal{N}(\mu, \sigma^2)$ has density</p>
+$$p(x) = \frac{1}{\sigma\sqrt{2\pi}}\exp\!\Big(-\frac{(x - \mu)^2}{2\sigma^2}\Big).$$
+<p>Read it from the inside out. $(x-\mu)/\sigma$ measures distance from the center in units of $\sigma$. Squaring it and negating it inside $\exp$ gives a bump that falls off very fast: one $\sigma$ away the density is $e^{-1/2}\approx 0.61$ of the peak, three $\sigma$ away it's $e^{-4.5}\approx 0.011$. The constant $\frac{1}{\sigma\sqrt{2\pi}}$ just makes the area 1. Its mean is $\mu$ and its variance is $\sigma^2$, so the two parameters are exactly the two numbers from sections 1 and 2.</p>
+
+<div class="figure">
+  <canvas id="fig-gauss" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-gauss"></div>
+  <div class="readout" id="out-gauss"></div>
+  <div class="caption"><b>Try it:</b> move $\mu$ (shifts) and $\sigma$ (widens). The dashed curve is the standard normal $\mathcal{N}(0,1)$ for reference. Shrink $\sigma$ and the peak climbs above 1: a <em>density</em> can exceed 1, only its area must equal 1. Switch the mode to "CDF" and drag the dot on the axis: the shaded area is $P(X \le x) = \Phi(z)$, and it depends only on the z-score $z = (x-\mu)/\sigma$.</div>
+</div>
+
+<div class="callout key">
+<p><b>The 68–95–99.7 rule.</b> A Gaussian puts about 68.3% of its mass within $1\sigma$ of the mean, 95.4% within $2\sigma$, and 99.7% within $3\sigma$. So "4σ away" is a roughly 1-in-16,000 event, and anything far out deserves suspicion.</p>
+</div>
+
+<p><b>Standardization.</b> If $X \sim \mathcal{N}(\mu, \sigma^2)$ then $Z = (X - \mu)/\sigma \sim \mathcal{N}(0, 1)$. By the scaling rules, $Z$ has mean 0 and variance 1. A shifted and scaled Gaussian is still Gaussian (substitute into the density). So every Gaussian question becomes a question about one table: the standard normal CDF $\Phi$. Conversely, $X = \mu + \sigma Z$ is how you <em>sample</em> any Gaussian from a standard one.</p>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Adult heights in some population are roughly $\mathcal{N}(170, 10^2)$ cm. What fraction are taller than 190 cm?</p>
+  <p>Standardize: $z = (190 - 170)/10 = 2$. So $P(X > 190) = P(Z > 2) = 1 - \Phi(2) \approx 1 - 0.97725 = 0.02275$. About 2.3%. Sanity check with the rule: 95.4% lie within $\pm 2\sigma$, the remaining 4.6% splits evenly between the two tails, giving 2.3% above. ✓</p>
+</div>
+
+<div class="callout ml">
+<p>Gaussians are everywhere in deep learning. Weights are initialized from $\mathcal{N}(0, \sigma^2)$ with $\sigma$ chosen to keep activations' variance stable (lesson 18, using exactly the "variances add" rule). Layer norm standardizes activations (lesson 18 again). Assuming Gaussian noise on the targets is what turns maximum likelihood into mean-squared-error (lesson 10). Diffusion models add and remove Gaussian noise.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mvn">6. The multivariate Gaussian</h2>
+<p>In $d$ dimensions, the Gaussian $\mathcal{N}(\boldsymbol\mu, \Sigma)$ has density</p>
+$$p(\mathbf{x}) = \frac{1}{\sqrt{(2\pi)^d \det\Sigma}}\exp\!\Big(-\tfrac12(\mathbf{x}-\boldsymbol\mu)^\top\Sigma^{-1}(\mathbf{x}-\boldsymbol\mu)\Big).$$
+<p>It has the same shape as the 1-D formula: $(x-\mu)^2/\sigma^2$ became the quadratic form $(\mathbf{x}-\boldsymbol\mu)^\top\Sigma^{-1}(\mathbf{x}-\boldsymbol\mu)$, the squared <b>Mahalanobis distance</b>. Points with the same density are where that quadratic form is constant, and that set is an <b>ellipse</b> (an ellipsoid in higher dimensions).</p>
+<p>The ellipse's geometry is the eigen-decomposition of $\Sigma$ from lesson 04. $\Sigma = Q\Lambda Q^\top$, the eigenvectors (columns of $Q$) are the ellipse's axes, and the half-lengths of the 1-σ ellipse are $\sqrt{\lambda_i}$. The first eigenvector is the direction of greatest variance: the first <b>principal component</b>. PCA is fitting a Gaussian and reading off its axes.</p>
+
+<div class="figure">
+  <canvas id="fig-mvn" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-mvn"></div>
+  <div class="readout" id="out-mvn"></div>
+  <div class="caption"><b>Try it:</b> set $\sigma_1$, $\sigma_2$ and $\rho$. That builds $\Sigma = \begin{bmatrix}\sigma_1^2 & \rho\sigma_1\sigma_2\\ \rho\sigma_1\sigma_2 & \sigma_2^2\end{bmatrix}$. The ellipses are Mahalanobis distance 1, 2 and 3. The arrows are the eigenvectors scaled by $\sqrt{\lambda}$. With $\rho = 0$ the ellipse is axis-aligned. Push $\rho$ toward $\pm1$ and it collapses toward a line: $\det\Sigma \to 0$, the second eigenvalue vanishes, and the data become effectively 1-D. The 400 dots are the <em>same</em> standard-normal draws $\mathbf{z}$ mapped through $\mathbf{x} = L\mathbf{z}$, so you can watch each one move.</div>
+</div>
+
+<h3>Sampling with a Cholesky factor</h3>
+<p>How do you draw from $\mathcal{N}(\boldsymbol\mu, \Sigma)$ when your library only gives you independent standard normals? Use the 1-D trick $x = \mu + \sigma z$ with a <em>matrix</em> square root. If $\mathbf{z} \sim \mathcal{N}(\mathbf{0}, I)$ and $\mathbf{x} = \boldsymbol\mu + L\mathbf{z}$, then</p>
+$$\operatorname{Cov}[\mathbf{x}] = \mathbb{E}[L\mathbf{z}\mathbf{z}^\top L^\top] = L\,\mathbb{E}[\mathbf{z}\mathbf{z}^\top]\,L^\top = L I L^\top = LL^\top.$$
+<p>So any $L$ with $LL^\top = \Sigma$ works. The standard choice is the <b>Cholesky factor</b>: the unique lower-triangular $L$ with a positive diagonal. It exists exactly when $\Sigma$ is positive definite. For 2×2 you can solve for it by hand.</p>
+
+<div class="example">
+  <div class="label">Worked example: Cholesky and ellipse of a 2×2 covariance</div>
+  <p>Take $\Sigma = \begin{bmatrix}2 & 1\\ 1 & 2\end{bmatrix}$ and write $L = \begin{bmatrix}a & 0\\ b & c\end{bmatrix}$, so $LL^\top = \begin{bmatrix}a^2 & ab\\ ab & b^2 + c^2\end{bmatrix}$.</p>
+  <p>Match entries: $a^2 = 2 \Rightarrow a = \sqrt2 \approx 1.414$. Then $ab = 1 \Rightarrow b = 1/\sqrt2 \approx 0.707$. Then $b^2 + c^2 = 2 \Rightarrow c = \sqrt{2 - 1/2} = \sqrt{1.5} \approx 1.225$.</p>
+  <p>Ellipse: the eigenvalues of $\Sigma$ are $2 \pm 1$, so $\lambda_1 = 3$ along $(1,1)/\sqrt2$ and $\lambda_2 = 1$ along $(1,-1)/\sqrt2$. The 1-σ ellipse is tilted 45° with half-axes $\sqrt3 \approx 1.732$ and $1$. The correlation is $\rho = 1/\sqrt{2\cdot2} = 0.5$.</p>
+</div>
+
+<div class="callout ml">
+<p>The equation $\mathbf{x} = \boldsymbol\mu + L\mathbf{z}$ is the <b>reparameterization trick</b>. Writing a random sample as a deterministic, differentiable function of parameters plus parameter-free noise lets gradients flow through sampling. Variational autoencoders depend on it, and you'll see the same idea behind sampling layers generally.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="clt">7. The central limit theorem</h2>
+<p>Add up many independent random variables. Whatever their individual distribution (flat, skewed, discrete), the sum's distribution approaches a Gaussian. Precisely: if $X_1, \dots, X_n$ are i.i.d. with mean $\mu$ and finite variance $\sigma^2$, and $S_n = X_1 + \dots + X_n$, then</p>
+$$Z_n = \frac{S_n - n\mu}{\sigma\sqrt n} \;\xrightarrow{\;n\to\infty\;}\; \mathcal{N}(0, 1)\quad\text{in distribution.}$$
+<p>The centering and scaling are not mysterious. By linearity $\mathbb{E}[S_n] = n\mu$, and by "variances add" $\operatorname{Var}[S_n] = n\sigma^2$. So $Z_n$ is just $S_n$ standardized, and it always has mean 0 and variance 1. What the CLT adds is the <em>shape</em>: it becomes the bell curve.</p>
+
+<div class="figure">
+  <canvas id="fig-clt" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-clt"></div>
+  <div class="readout" id="out-clt"></div>
+  <div class="caption"><b>Try it:</b> start with $n = 1$. The histogram is just the base distribution. Raise $n$ (the histogram resets and refills) and watch the sum turn into the red $\mathcal{N}(0,1)$ curve. The flat uniform gets there by $n \approx 5$. The skewed exponential and the lopsided "rare event" Bernoulli(0.1) need much larger $n$: their asymmetry fades only like $1/\sqrt n$. With the Bernoulli you also see spikes, because the sum can only take integer values. The CLT is about the overall shape, not about gaps between points.</div>
+</div>
+
+<div class="callout intuition">
+<p>Why a Gaussian, of all shapes? One way to see it: the Gaussian is a fixed point. A sum of two independent Gaussians is again Gaussian, so standardized sums of Gaussians stay exactly Gaussian. Adding many small independent pieces washes out every feature of the original shape except its mean and variance, and the Gaussian is the shape determined by just those two numbers. (Lesson 11 makes this sharp: among all distributions with a given variance, the Gaussian has maximum entropy.)</p>
+</div>
+
+<div class="callout warning">
+<p>The CLT needs <b>finite variance</b> and enough <b>independence</b>. Heavy-tailed variables (a Cauchy distribution, or financial returns in a crash) can break it: their averages never settle into a bell. Strongly correlated terms, such as consecutive tokens or consecutive steps of a training run, converge much more slowly than $n$ suggests.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="se">8. Standard error: the 1/√n law</h2>
+<p>Divide the sum by $n$ to get the sample mean $\bar X = S_n / n$. By the scaling rule,</p>
+$$\operatorname{Var}[\bar X] = \frac{1}{n^2}\operatorname{Var}[S_n] = \frac{n\sigma^2}{n^2} = \frac{\sigma^2}{n}, \qquad \operatorname{SE} = \operatorname{std}[\bar X] = \frac{\sigma}{\sqrt n}.$$
+<p>This is the <b>standard error</b>. Together with the CLT it says $\bar X \approx \mathcal{N}(\mu, \sigma^2/n)$, so $\bar x \pm 2\sigma/\sqrt n$ is a roughly 95% confidence interval for $\mu$. (In lesson 08 the law of large numbers said $\bar X \to \mu$. This says <em>how fast</em>.) The square root has teeth: <b>to halve your error you need four times the data</b>, and one more decimal digit of precision costs 100× the samples.</p>
+
+<div class="figure">
+  <canvas id="fig-se" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-se"></div>
+  <div class="readout" id="out-se"></div>
+  <div class="caption"><b>Try it:</b> each column holds 150 sample means of $n$ die rolls, with $n$ doubling from left to right. The curves mark $3.5 \pm 2\sigma/\sqrt n$. Every step right is 2× the data but shrinks the cloud only by $1/\sqrt2 \approx 0.71$, and it takes two steps to halve it. Press "resample" and compare the empirical spread with $\sigma/\sqrt n$ in the readout.</div>
+</div>
+
+<div class="callout ml">
+<p><b>Minibatch gradients are sample means.</b> In stochastic gradient descent (lessons 06 and 18), the gradient of the loss over a minibatch of $B$ examples is the average of $B$ per-example gradients, an estimate of the full-dataset gradient. Its noise shrinks like $1/\sqrt B$. Going from $B = 64$ to $B = 256$ costs 4× the compute per step and only halves the gradient noise. That trade-off sits behind the batch-size and learning-rate scaling rules in large-model training. The same law sets how many prompts you need to evaluate an LLM before a 1-point accuracy difference means anything.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+<p>Pencil and paper first. Compute by hand, then check.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>A biased coin shows heads with probability $p$. Let $X = 1$ for heads and $0$ for tails (a Bernoulli variable). Find $\mathbb{E}[X]$ and $\operatorname{Var}[X]$ as functions of $p$. For which $p$ is the variance largest? Enter the variance at $p = 0.3$.</p>
+<div class="numcheck" data-answer="0.21"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbb{E}[X] = 1\cdot p + 0\cdot(1-p) = p$. Since $X^2 = X$, $\mathbb{E}[X^2] = p$, so $\operatorname{Var}[X] = p - p^2 = p(1-p)$. That's a downward parabola, largest at $p = 1/2$ (value $1/4$) and zero at $p \in \{0, 1\}$, where there's no uncertainty. At $p = 0.3$: $0.3 \times 0.7 = 0.21$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>$\mathbb{E}[X] = 3$, $\mathbb{E}[Y] = 2$, $\operatorname{Var}[X] = 1$, $\operatorname{Var}[Y] = 4$, $\operatorname{Cov}[X, Y] = 0.5$. Compute $\mathbb{E}[2X - Y + 1]$ and $\operatorname{Var}[2X - Y + 1]$. Enter both, comma-separated.</p>
+<div class="numcheck" data-answer="5,6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Mean: $2(3) - 2 + 1 = 5$. Variance: the $+1$ doesn't matter. With $a = 2$, $b = -1$: $a^2\operatorname{Var}[X] + b^2\operatorname{Var}[Y] + 2ab\operatorname{Cov} = 4(1) + 1(4) + 2(2)(-1)(0.5) = 4 + 4 - 2 = 6$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Heights are $\mathcal{N}(170, 10^2)$ cm. (a) What fraction are taller than 190 cm? (b) What fraction lie between 150 and 190 cm? Enter both as probabilities, comma-separated (4 decimal places).</p>
+<div class="numcheck" data-answer="0.0228,0.9545" data-tol="5e-4"></div>
+<details class="hint"><summary>Hint</summary><p>Standardize both endpoints. $\Phi(2) \approx 0.97725$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $z = 2$, so $1 - \Phi(2) \approx 0.02275$. (b) $z \in [-2, 2]$: $\Phi(2) - \Phi(-2) = 2\Phi(2) - 1 \approx 0.9545$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>(a) What is the standard error of the mean of 100 fair-die rolls? (b) You estimate the probability that a model answers a benchmark question correctly. The true rate is about 0.5, so each question is a Bernoulli with $\sigma \approx 0.5$. How many questions do you need for a standard error of 0.01 (one percentage point)? Enter both, comma-separated.</p>
+<div class="numcheck" data-answer="0.1708,2500"></div>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\sigma/\sqrt n = \sqrt{35/12}/\sqrt{100} \approx 1.7078/10 \approx 0.1708$. (b) $0.5/\sqrt n = 0.01 \Rightarrow \sqrt n = 50 \Rightarrow n = 2500$. A 95% interval would still be $\pm 2$ points, so beware of leaderboards built on a few hundred questions.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · proof</span>
+<p>Let $X$ be uniform on $\{-1, 0, 1\}$ and $Y = X^2$. (a) Show that $\operatorname{Cov}[X, Y] = 0$. (b) Show that $X$ and $Y$ are not independent by finding one pair of events that violates $P(A\cap B) = P(A)P(B)$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\mathbb{E}[X] = 0$. $XY = X^3 = X$, so $\mathbb{E}[XY] = 0$. Then $\operatorname{Cov} = \mathbb{E}[XY] - \mathbb{E}[X]\mathbb{E}[Y] = 0 - 0 = 0$.</p>
+<p>(b) $P(X = 0) = 1/3$ and $P(Y = 1) = 2/3$, but $P(X = 0, Y = 1) = 0 \ne 2/9$. Knowing $X$ tells you $Y$ exactly. The relationship is a perfect parabola, and correlation, which only sees straight lines, misses it.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Find the Cholesky factor $L$ of $\Sigma = \begin{bmatrix}4 & 2\\ 2 & 5\end{bmatrix}$. Enter $L_{11}, L_{21}, L_{22}$. Then explain how you'd draw 1000 samples from $\mathcal{N}(\mathbf{0}, \Sigma)$ given only <code>standard_normal</code>.</p>
+<div class="numcheck" data-answer="2,1,2"></div>
+<details class="hint"><summary>Hint</summary><p>Match $LL^\top = \begin{bmatrix}a^2 & ab\\ ab & b^2+c^2\end{bmatrix}$ entry by entry, top-left first.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$a^2 = 4 \Rightarrow a = 2$. $ab = 2 \Rightarrow b = 1$. $b^2 + c^2 = 5 \Rightarrow c = 2$. So $L = \begin{bmatrix}2 & 0\\ 1 & 2\end{bmatrix}$. Draw $Z$ of shape $(1000, 2)$ from <code>standard_normal</code> and return $Z L^\top$. Each row is $L\mathbf{z}$, with covariance $LL^\top = \Sigma$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Your training loop uses minibatches of 64 and the gradient estimate is noisy. A colleague suggests batch size 256. Assuming per-example gradients are independent, by what factor does the standard deviation of each gradient component <em>shrink</em>?</p>
+<div class="numcheck" data-answer="2"></div>
+<details class="solution"><summary>Solution</summary>
+<p>SE $\propto 1/\sqrt B$, so the ratio is $\sqrt{256/64} = \sqrt4 = 2$. Four times the compute per step buys half the noise. In practice examples within a batch are not fully independent (e.g. sequences from the same document), so the real gain is often smaller.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch · proof</span>
+<p>Let $x_1, \dots, x_n$ be i.i.d. with mean $\mu$ and variance $\sigma^2$. (a) Prove $\operatorname{Var}[\bar x] = \sigma^2/n$. (b) Prove the identity $\sum_i (x_i - \bar x)^2 = \sum_i (x_i - \mu)^2 - n(\bar x - \mu)^2$. (c) Conclude that $\mathbb{E}\big[\frac{1}{n}\sum_i(x_i - \bar x)^2\big] = \frac{n-1}{n}\sigma^2$. For $n = 5$, what fraction of the true variance does the divide-by-$n$ estimator recover on average?</p>
+<div class="numcheck" data-answer="0.8"></div>
+<details class="hint"><summary>Hint</summary><p>(a) Independence makes the variance of a sum the sum of variances; then use $\operatorname{Var}[aX] = a^2\operatorname{Var}[X]$ with $a = 1/n$. (b) Write $x_i - \bar x = (x_i - \mu) - (\bar x - \mu)$ and use $\sum_i (x_i - \mu) = n(\bar x - \mu)$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\operatorname{Var}[\sum x_i] = n\sigma^2$ by independence, so $\operatorname{Var}[\bar x] = n\sigma^2/n^2 = \sigma^2/n$.</p>
+<p>(b) $\sum_i [(x_i-\mu) - (\bar x-\mu)]^2 = \sum_i (x_i-\mu)^2 - 2(\bar x - \mu)\sum_i(x_i - \mu) + n(\bar x-\mu)^2 = \sum_i (x_i-\mu)^2 - 2n(\bar x-\mu)^2 + n(\bar x-\mu)^2$.</p>
+<p>(c) Expectation of the right side: $n\sigma^2 - n\cdot\sigma^2/n = (n-1)\sigma^2$. Divide by $n$: $\frac{n-1}{n}\sigma^2$. For $n = 5$ that's $4/5 = 0.8$. The plug-in estimator is 20% low on average, which is why <code>ddof=1</code> exists.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>A neuron computes $y = \sum_{i=1}^{d} w_i x_i$ with $d$ inputs. The $x_i$ are independent with mean 0 and variance 1, and the weights are independent of them and of each other, with mean 0 and variance $v$. (a) Show $\operatorname{Var}[y] = d\,v$. (b) What $v$ keeps $\operatorname{Var}[y] = 1$ when $d = 512$? Enter $v$.</p>
+<div class="numcheck" data-answer="0.001953125" data-tol="1e-5"></div>
+<details class="hint"><summary>Hint</summary><p>For independent zero-mean $W$ and $X$: $\operatorname{Var}[WX] = \mathbb{E}[W^2X^2] = \mathbb{E}[W^2]\,\mathbb{E}[X^2]$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) Each term has mean 0 and variance $\mathbb{E}[w_i^2]\mathbb{E}[x_i^2] = v \cdot 1 = v$. The terms are independent, so variances add: $d\,v$. (b) $v = 1/d = 1/512 \approx 0.00195$, i.e. weight std $1/\sqrt{512} \approx 0.0442$. This is the core of Xavier/He initialization (lesson 18). Get it wrong and activations explode or vanish layer after layer.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">Two features in your dataset have correlation 0. What can you conclude?</div>
+  <div class="opts">
+    <button data-k="a">They are independent, so knowing one tells you nothing about the other.</button>
+    <button data-k="b">One of them must be constant.</button>
+    <button data-k="c">There is no <em>linear</em> relationship, but there may still be a strong non-linear one.</button>
+    <button data-k="d">Their covariance matrix is the identity.</button>
+  </div>
+  <div class="explain">Correlation measures only the linear trend. $Y = X^2$ for symmetric $X$ is perfectly dependent with zero correlation. (Independence ⇒ uncorrelated, not the reverse. For jointly Gaussian variables the two happen to coincide.)</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">$\operatorname{Var}[X] = 1$. What is $\operatorname{Var}[X + X]$?</div>
+  <div class="opts">
+    <button data-k="a">1</button>
+    <button data-k="b">2, because variances add</button>
+    <button data-k="c">$\sqrt2$</button>
+    <button data-k="d">4</button>
+  </div>
+  <div class="explain">$X + X = 2X$, and $\operatorname{Var}[2X] = 4\operatorname{Var}[X]$. "Variances add" requires independence (zero covariance), and $X$ is perfectly correlated with itself. The cross term $2\operatorname{Cov}[X,X] = 2$ supplies the difference between 2 and 4.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">What does the central limit theorem actually say?</div>
+  <div class="opts">
+    <button data-k="a">With enough data, any dataset becomes normally distributed.</button>
+    <button data-k="b">The standardized sum (or mean) of many independent, finite-variance variables is approximately normal, whatever their own distribution.</button>
+    <button data-k="c">The sample mean equals the true mean once $n$ is about 30.</button>
+    <button data-k="d">Every random variable with a finite mean is approximately Gaussian.</button>
+  </div>
+  <div class="explain">The data themselves keep their shape. A histogram of a million exponential draws is still exponential. It's the distribution of <em>sums or averages</em> that becomes Gaussian. Option c confuses the CLT with the law of large numbers, and "30" is folklore.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">An A/B test with 10,000 users per arm gives a standard error of 0.4 percentage points. Roughly how many users per arm for 0.1 points?</div>
+  <div class="opts">
+    <button data-k="a">160,000</button>
+    <button data-k="b">40,000</button>
+    <button data-k="c">20,000</button>
+    <button data-k="d">1,000,000</button>
+  </div>
+  <div class="explain">SE ∝ $1/\sqrt n$. To shrink it 4× you need $4^2 = 16$× the data: $16 \times 10{,}000 = 160{,}000$.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Expectation</td><td>$\mathbb{E}[X] = \sum_x x\,p(x)$</td><td>balance point; linear, always</td></tr>
+  <tr><td>Variance</td><td>$\mathbb{E}[(X-\mu)^2] = \mathbb{E}[X^2] - \mu^2$</td><td>spread; $\operatorname{Var}[aX+c] = a^2\operatorname{Var}[X]$</td></tr>
+  <tr><td>Covariance</td><td>$\mathbb{E}[(X-\mu_X)(Y-\mu_Y)]$</td><td>do they move together (linearly)?</td></tr>
+  <tr><td>Correlation</td><td>$\operatorname{Cov}/(\sigma_X\sigma_Y)$</td><td>cosine of the centered data vectors, in $[-1,1]$</td></tr>
+  <tr><td>Sum</td><td>$\operatorname{Var}[X+Y] = \operatorname{Var}X + \operatorname{Var}Y + 2\operatorname{Cov}$</td><td>independent ⇒ variances add</td></tr>
+  <tr><td>Sample variance</td><td>$\frac{1}{n-1}\sum(x_i-\bar x)^2$</td><td>unbiased; one d.o.f. spent on $\bar x$</td></tr>
+  <tr><td>Gaussian</td><td>$\mathcal{N}(\mu,\sigma^2)$, $z = (x-\mu)/\sigma$</td><td>68–95–99.7; sample as $\mu + \sigma z$</td></tr>
+  <tr><td>Multivariate</td><td>$\mathcal{N}(\boldsymbol\mu,\Sigma)$, $\mathbf{x} = \boldsymbol\mu + L\mathbf{z}$</td><td>ellipses = eigenvectors of $\Sigma$ (PCA)</td></tr>
+  <tr><td>CLT</td><td>$(S_n - n\mu)/(\sigma\sqrt n) \to \mathcal{N}(0,1)$</td><td>sums of many small things are Gaussian</td></tr>
+  <tr><td>Standard error</td><td>$\sigma/\sqrt n$</td><td>4× the data for half the error</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 09: build it</h3>
+  <p>Open <code>workbooks/09_expectation_gaussian_clt/exercises.py</code>. In Part A you write <code>expectation</code>, <code>variance</code> (with <code>ddof</code>), <code>covariance</code> and <code>correlation</code> in plain Python. Part B is NumPy: a <code>covariance_matrix</code> as one matmul, <code>standardize</code>, the Gaussian <code>pdf</code>/<code>cdf</code>, a from-scratch <code>cholesky</code>, and <code>sample_mvn</code> built on it. Part C runs experiments: a CLT experiment with sums of uniforms, a simulation that shows the $n$ vs $n-1$ bias, and the $1/\sqrt n$ standard-error curve. Grade yourself with:</p>
+  <pre><code>./course check 09</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Joseph Blitzstein &amp; Jessica Hwang, <em>Introduction to Probability</em>, ch. 4 (expectation), 7 (joint distributions, covariance) and 10 (CLT).</li>
+  <li>3Blue1Brown, <em>But what is the Central Limit Theorem?</em> and the follow-up on why $\pi$ appears in the Gaussian.</li>
+  <li>Christopher Bishop, <em>Pattern Recognition and Machine Learning</em>, §2.3 (the Gaussian distribution).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, LA, fmt, animator } = Course;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // erf via Abramowitz–Stegun 7.1.26 (|error| < 1.5e-7) — enough for a readout
+  const erf = x => { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x); return s * y; };
+  const Phi = z => 0.5 * (1 + erf(z / Math.SQRT2));
+  const npdf = (x, m = 0, s = 1) => Math.exp(-((x - m) ** 2) / (2 * s * s)) / (s * Math.sqrt(2 * Math.PI));
+  const checkbox = (host, text, val, onChange) => { const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = val; cb.addEventListener("change", () => onChange(cb.checked)); lab.append(cb, " " + text); document.querySelector(host).appendChild(lab); return cb; };
+
+  // ---------- fig: expectation as balance point ----------
+  {
+    const p = new Plot("#fig-exp", { xmin: -0.8, xmax: 10.8, ymin: -0.42, ymax: 1.12 });
+    const out = document.getElementById("out-exp");
+    const presets = {
+      skew: [0.15, 0.6, 0.9, 0.7, 0.45, 0.3, 0.2, 0.12, 0.08, 0.05, 0.03],
+      uniform: [0, 0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0, 0, 0],
+      humps: [0.1, 0.8, 0.9, 0.3, 0, 0, 0, 0.3, 0.9, 0.8, 0.1],
+      spike: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+    };
+    const H = presets.skew.map((w, i) => ({ x: i, y: w, color: "c1", r: 6, constrain: (x, y) => [i, clamp(y, 0, 1)] }));
+    select("#ctl-exp", "preset ", [["skew", "skewed"], ["uniform", "uniform on 2..7"], ["humps", "two humps"], ["spike", "a sure thing"]], v => { presets[v].forEach((w, i) => H[i].y = w); p.render(); });
+    p.draggable(H).render(p => {
+      let tot = H.reduce((s, h) => s + h.y, 0);
+      if (tot < 1e-9) { H[5].y = 0.05; tot = 0.05; }
+      const pr = H.map(h => h.y / tot);
+      const m = pr.reduce((s, q, i) => s + q * i, 0), v = pr.reduce((s, q, i) => s + q * (i - m) ** 2, 0), sd = Math.sqrt(v);
+      p.grid({ step: 1, stepY: 0.25 });
+      H.forEach((h, i) => {
+        if (h.y > 0) p.rect(i - 0.34, 0, i + 0.34, h.y, { fill: "c1", fillAlpha: .45, color: "c1", width: 1 });
+        p.label(i, h.y, pr[i].toFixed(2), { align: "center", dy: -15, font: "11px sans-serif", color: "muted" });
+      });
+      p.line(-0.6, 0, 10.6, 0, { color: "fg", width: 3 });
+      p.polygon([[m, 0], [m - 0.22, -0.17], [m + 0.22, -0.17]], { fill: "c2", fillAlpha: 1, color: "c2", width: 1 });
+      const y = -0.3;
+      p.line(m - sd, y, m + sd, y, { color: "c4", width: 2.5 });
+      p.line(m - sd, y - 0.04, m - sd, y + 0.04, { color: "c4", width: 2.5 });
+      p.line(m + sd, y - 0.04, m + sd, y + 0.04, { color: "c4", width: 2.5 });
+      p.label(m + sd, y, "  ±σ", { color: "c4", font: "12px sans-serif" });
+      H.forEach((h, i) => p.label(i, 0, String(i), { align: "center", dy: 12, font: "12px sans-serif", color: "muted" }));
+      p.label(m, -0.17, "E[X] = " + m.toFixed(2), { color: "c2", dx: 22, dy: 4, font: "600 12px sans-serif", bg: true });
+      p.drawHandles();
+      out.textContent = `E[X] = Σ x·p(x) = ${m.toFixed(3)}     Var[X] = Σ (x−E[X])²·p(x) = ${v.toFixed(3)}     σ = ${sd.toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: covariance / correlation scatter ----------
+  {
+    const p = new Plot("#fig-corr", { xmin: -3.6, xmax: 3.6, ymin: -3.6, ymax: 3.6, equal: true });
+    const out = document.getElementById("out-corr");
+    let rho = 0.8, seed = 1, mode = "lin", colorBy = true; const N = 300;
+    let Z = [];
+    const draw = () => { const R = Course.rng(seed); Z = Array.from({ length: N }, () => [R.normal(), R.normal()]); };
+    draw();
+    const rs = slider("#ctl-corr", { label: "ρ ", min: -1, max: 1, step: 0.05, value: 0.8 }, x => { rho = x; p.render(); });
+    select("#ctl-corr", "data ", [["lin", "Y = ρX + noise"], ["sq", "Y = X² (curved)"]], v => { mode = v; rs.disabled = v === "sq"; p.render(); });
+    button("#ctl-corr", "resample", () => { seed++; draw(); p.render(); });
+    checkbox("#ctl-corr", "color by sign", true, v => { colorBy = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      const pts = Z.map(([a, b]) => mode === "lin" ? [a, rho * a + Math.sqrt(Math.max(0, 1 - rho * rho)) * b] : [a, a * a - 1 + 0.15 * b]);
+      const mx = pts.reduce((s, q) => s + q[0], 0) / N, my = pts.reduce((s, q) => s + q[1], 0) / N;
+      let sxy = 0, sxx = 0, syy = 0;
+      pts.forEach(([x, y]) => { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; });
+      const r = sxy / Math.sqrt(sxx * syy);
+      p.line(mx, -10, mx, 10, { color: "muted", dash: [4, 4], width: 1 });
+      p.line(-10, my, 10, my, { color: "muted", dash: [4, 4], width: 1 });
+      pts.forEach(([x, y]) => p.point(x, y, { r: 3, color: colorBy ? ((x - mx) * (y - my) >= 0 ? "c1" : "c4") : "c5", alpha: .7 }));
+      const slope = sxy / sxx; p.line(-4, my + slope * (-4 - mx), 4, my + slope * (4 - mx), { color: "c2", width: 2 });
+      p.label(8, 14, "dashed: means (x̄, ȳ)   orange: best-fit line", { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      out.textContent = (mode === "lin" ? `true ρ = ${rho.toFixed(2)}     ` : "Y = X² − 1 + small noise     ") +
+        `sample cov = ${(sxy / (N - 1)).toFixed(3)}     sample corr r = ${r.toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: 1-D Gaussian ----------
+  {
+    const p = new Plot("#fig-gauss", { xmin: -7, xmax: 7, ymin: -0.07, ymax: 1.05 });
+    const out = document.getElementById("out-gauss");
+    let mu = 0, sg = 1, mode = "bands";
+    const xh = { x: 1, y: 0, color: "c2", constrain: (x) => [clamp(x, -6.9, 6.9), 0] };
+    slider("#ctl-gauss", { label: "μ ", min: -3, max: 3, step: 0.1, value: 0 }, v => { mu = v; p.render(); });
+    slider("#ctl-gauss", { label: "σ ", min: 0.4, max: 3, step: 0.05, value: 1 }, v => { sg = v; p.render(); });
+    select("#ctl-gauss", "mode ", [["bands", "68–95–99.7 bands"], ["cdf", "CDF: area left of x"]], v => { mode = v; xh.hidden = v !== "cdf"; p.render(); });
+    xh.hidden = true;
+    const area = (a, b, col, al) => { const pts = [[a, 0]]; for (let i = 0; i <= 120; i++) { const x = a + (b - a) * i / 120; pts.push([x, npdf(x, mu, sg)]); } pts.push([b, 0]); p.polygon(pts, { fill: col, fillAlpha: al, stroke: false }); };
+    p.draggable([xh]).render(p => {
+      p.grid({ step: 1, stepY: 0.2 }).axes({ step: 1, stepY: 0.2 });
+      const lo = p.xmin, hi = p.xmax;
+      if (mode === "bands") {
+        area(Math.max(lo, mu - 3 * sg), Math.min(hi, mu + 3 * sg), "c1", .10);
+        area(Math.max(lo, mu - 2 * sg), Math.min(hi, mu + 2 * sg), "c1", .16);
+        area(mu - sg, mu + sg, "c1", .28);
+        const yl = npdf(mu + sg, mu, sg);
+        p.line(mu - sg, yl, mu + sg, yl, { color: "c1", width: 1.5, dash: [3, 3] });
+        p.label(mu, yl, "68.3%", { align: "center", dy: -10, font: "600 12px sans-serif", color: "c1", bg: true });
+        [-1, 1, -2, 2].forEach(k => { const x = mu + k * sg; if (x > lo && x < hi) p.label(x, 0, (k > 0 ? "+" : "−") + Math.abs(k) + "σ", { align: "center", dy: -10, font: "11px sans-serif", color: "c1", bg: true }); });
+      } else {
+        area(lo, xh.x, "c2", .3);
+      }
+      p.fn(x => npdf(x), { color: "muted", width: 1.5, dash: [5, 4] });
+      p.fn(x => npdf(x, mu, sg), { color: "c1", width: 3, samples: 600 });
+      p.line(mu, 0, mu, npdf(mu, mu, sg), { color: "c1", width: 1, alpha: .6 });
+      if (mode === "cdf") p.drawHandles();
+      const peak = 1 / (sg * Math.sqrt(2 * Math.PI));
+      if (mode === "bands") out.textContent = `μ = ${mu.toFixed(1)}  σ = ${sg.toFixed(2)}   peak height 1/(σ√2π) = ${peak.toFixed(3)}   P(|X−μ|<σ) = 68.3%   <2σ: 95.4%   <3σ: 99.7%`;
+      else { const z = (xh.x - mu) / sg; out.textContent = `x = ${xh.x.toFixed(2)}   z = (x−μ)/σ = ${z.toFixed(2)}   p(x) = ${npdf(xh.x, mu, sg).toFixed(4)}   P(X ≤ x) = Φ(z) = ${Phi(z).toFixed(4)}`; }
+    });
+  }
+
+  // ---------- fig: 2-D Gaussian ----------
+  {
+    const p = new Plot("#fig-mvn", { xmin: -5, xmax: 5, ymin: -4, ymax: 4, equal: true });
+    const out = document.getElementById("out-mvn");
+    let s1 = 1.6, s2 = 0.9, rho = 0.6;
+    const R = Course.rng(3), Z = Array.from({ length: 400 }, () => [R.normal(), R.normal()]);
+    slider("#ctl-mvn", { label: "σ₁ ", min: 0.3, max: 2.5, step: 0.05, value: s1 }, v => { s1 = v; p.render(); });
+    slider("#ctl-mvn", { label: "σ₂ ", min: 0.3, max: 2.5, step: 0.05, value: s2 }, v => { s2 = v; p.render(); });
+    slider("#ctl-mvn", { label: "ρ ", min: -0.95, max: 0.95, step: 0.05, value: rho }, v => { rho = v; p.render(); });
+    p.render(p => {
+      const c = rho * s1 * s2, S = [[s1 * s1, c], [c, s2 * s2]];
+      const L = [[s1, 0], [rho * s2, s2 * Math.sqrt(1 - rho * rho)]];
+      const det = LA.det2(S), Si = [[S[1][1] / det, -c / det], [-c / det, S[0][0] / det]];
+      p.field((x, y) => Math.exp(-0.5 * (Si[0][0] * x * x + 2 * Si[0][1] * x * y + Si[1][1] * y * y)), { cmap: "seq", alpha: 0.55, res: 4, vmin: 0, vmax: 1.6 });
+      p.grid({ step: 1 }).axes({ step: 1 });
+      Z.forEach(([a, b]) => p.point(L[0][0] * a, L[1][0] * a + L[1][1] * b, { r: 2.2, color: "c5", alpha: .55 }));
+      [1, 2, 3].forEach(k => { const pts = []; for (let i = 0; i <= 120; i++) { const t = i / 120 * 2 * Math.PI, a = k * Math.cos(t), b = k * Math.sin(t); pts.push([L[0][0] * a, L[1][0] * a + L[1][1] * b]); } p.path(pts, { color: "c1", width: k === 1 ? 2.5 : 1.5, alpha: k === 1 ? 1 : .7, close: true }); });
+      const E = LA.eigSym2(S);
+      E.vecs.forEach((v, i) => { const r = Math.sqrt(Math.max(0, E.vals[i])); p.arrow(0, 0, r * v[0], r * v[1], { color: i ? "c3" : "c2", width: 3 }); p.label(r * v[0], r * v[1], i ? "√λ₂ v₂" : "√λ₁ v₁", { color: i ? "c3" : "c2", dx: v[0] >= 0 ? 8 : -8, align: v[0] >= 0 ? "left" : "right", dy: -10, bg: true }); });
+      const ang = Math.atan2(E.vecs[0][1], E.vecs[0][0]) * 180 / Math.PI;
+      out.textContent = `Σ = [[${S[0][0].toFixed(2)}, ${c.toFixed(2)}], [${c.toFixed(2)}, ${S[1][1].toFixed(2)}]]   det Σ = ${det.toFixed(3)}\n` +
+        `eigenvalues λ₁ = ${E.vals[0].toFixed(3)}, λ₂ = ${E.vals[1].toFixed(3)}   main axis at ${(((ang % 180) + 180) % 180).toFixed(0)}°   ` +
+        `L = [[${L[0][0].toFixed(2)}, 0], [${L[1][0].toFixed(2)}, ${L[1][1].toFixed(2)}]]`;
+    });
+  }
+
+  // ---------- fig: CLT ----------
+  {
+    const p = new Plot("#fig-clt", { xmin: -4.2, xmax: 4.2, ymin: -0.07, ymax: 1.08 });
+    const out = document.getElementById("out-clt");
+    const R = Course.rng(11);
+    const dists = {
+      unif: { draw: () => R.uniform(), mu: 0.5, sd: Math.sqrt(1 / 12), name: "Uniform(0,1)" },
+      die: { draw: () => 1 + R.int(6), mu: 3.5, sd: Math.sqrt(35 / 12), name: "fair die" },
+      exp: { draw: () => -Math.log(1 - R.uniform()), mu: 1, sd: 1, name: "Exponential(1) — skewed" },
+      bern: { draw: () => (R.uniform() < 0.1 ? 1 : 0), mu: 0.1, sd: Math.sqrt(0.09), name: "Bernoulli(0.1) — rare event" },
+    };
+    let D = dists.exp, n = 1, count = 0; const NB = 56, lo = -4.2, hi = 4.2, w = (hi - lo) / NB; let bins = new Array(NB).fill(0), sum = 0, sum2 = 0, in1 = 0;
+    const MAX = 20000;
+    const add = k => { for (let t = 0; t < k && count < MAX; t++) { let s = 0; for (let i = 0; i < n; i++) s += D.draw(); const z = (s - n * D.mu) / (D.sd * Math.sqrt(n)); count++; sum += z; sum2 += z * z; if (Math.abs(z) < 1) in1++; const b = Math.floor((z - lo) / w); if (b >= 0 && b < NB) bins[b]++; } };
+    const reset = () => { bins.fill(0); count = sum = sum2 = in1 = 0; };
+    const anim = animator(() => { add(150); p.render(); return count < MAX; });
+    const restart = () => { reset(); add(1500); p.render(); anim.start(); };
+    select("#ctl-clt", "base distribution ", [["exp", dists.exp.name], ["unif", dists.unif.name], ["die", dists.die.name], ["bern", dists.bern.name]], v => { D = dists[v]; restart(); });
+    slider("#ctl-clt", { label: "n (terms in the sum) ", min: 1, max: 64, step: 1, value: 1, digits: 0 }, v => { n = v; restart(); });
+    button("#ctl-clt", "▶ more samples", () => { if (count >= MAX) restart(); else anim.start(); });
+    p.render(p => {
+      p.grid({ step: 1, stepY: 0.2 }).axes({ step: 1, stepY: 0.2 });
+      // densities above ~1 (the n=1 Bernoulli spikes) are clipped; mark them with a cap.
+      bins.forEach((c, i) => { const h = count ? c / (count * w) : 0; const x0 = lo + i * w; if (h > 0) p.rect(x0 + w * .06, 0, x0 + w * .94, Math.min(h, 1.02), { fill: "c1", fillAlpha: .6, color: "c1", width: 1 }); if (h > 1.02) p.label(x0 + w / 2, 1.02, "↑", { align: "center", dy: -6, color: "c1", font: "11px sans-serif" }); });
+      p.fn(x => npdf(x), { color: "c4", width: 2.5 });
+      p.label(8, 14, `${D.name}: standardized sum of n = ${n}`, { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      const m = count ? sum / count : 0, sd = count ? Math.sqrt(sum2 / count - m * m) : 0;
+      out.textContent = `samples: ${count}   mean of Z = ${m.toFixed(3)}   std of Z = ${sd.toFixed(3)}   P(|Z|<1) = ${count ? (100 * in1 / count).toFixed(1) : "–"}%  (Gaussian: 68.3%)`;
+    });
+    add(1500); p.render(); anim.start();
+  }
+
+  // ---------- fig: standard error ----------
+  {
+    const p = new Plot("#fig-se", { xmin: -0.7, xmax: 10.7, ymin: 0.5, ymax: 6.9 });
+    const out = document.getElementById("out-se");
+    let seed = 5, band = true; const K = 150, sig = Math.sqrt(35 / 12);
+    let cols = [];
+    const sim = () => { const R = Course.rng(seed); cols = []; for (let j = 0; j <= 10; j++) { const n = 2 ** j, ms = []; for (let t = 0; t < K; t++) { let s = 0; for (let i = 0; i < n; i++) s += 1 + R.int(6); ms.push([j + (R.uniform() - .5) * .5, s / n]); } cols.push(ms); } };
+    sim();
+    button("#ctl-se", "resample", () => { seed++; sim(); p.render(); });
+    checkbox("#ctl-se", "show ±2σ/√n", true, v => { band = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 1, stepY: 1 });
+      for (let y = 1; y <= 6; y++) p.label(-0.6, y, String(y), { font: "11px sans-serif", color: "muted" });
+      for (let j = 0; j <= 10; j++) p.label(j, 0.5, String(2 ** j), { align: "center", dy: -10, font: "11px sans-serif", color: "muted" });
+      p.line(-0.7, 3.5, 10.7, 3.5, { color: "muted", dash: [4, 4], width: 1 });
+      cols.forEach(ms => ms.forEach(([x, y]) => p.point(x, y, { r: 2, color: "c1", alpha: .45 })));
+      if (band) { [1, -1].forEach(s => p.fn(j => { const y = 3.5 + s * 2 * sig / Math.sqrt(2 ** j); return y > 0.6 && y < 6.4 ? y : NaN; }, { color: "c4", width: 2, xmin: -0.3, xmax: 10.3 })); }
+      p.label(10.6, 6.65, "n = rolls per sample →", { align: "right", font: "12px sans-serif", color: "muted" });
+      p.label(-0.6, 6.65, "sample means (die, 1–6)", { font: "12px sans-serif", color: "muted" });
+      const show = [0, 2, 4, 6, 8, 10].map(j => { const ys = cols[j].map(q => q[1]), m = ys.reduce((a, b) => a + b, 0) / K, sd = Math.sqrt(ys.reduce((a, b) => a + (b - m) ** 2, 0) / K); return `n=${2 ** j}: ${sd.toFixed(3)} (theory ${(sig / Math.sqrt(2 ** j)).toFixed(3)})`; });
+      out.textContent = "spread of the means vs σ/√n\n" + show.join("   ");
+    });
+  }
+});
+</script>
+</body>
+</html>

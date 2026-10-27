@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matmul, systems, inverse & rank</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="03">
+<main>
+
+<div class="kicker">Part 1 · Linear algebra</div>
+<h1>Matmul, systems, inverse &amp; rank</h1>
+<p class="lede">Matrix multiplication looks like a fiddly rule for combining grids of numbers. It is really one idea, doing one transformation after another, and once you see it that way the rest of this lesson follows: solving equations, undoing a transformation, and measuring how much information a matrix destroys.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Explain why $AB$ means "apply $B$, then $A$", why the order matters, and which shapes can be multiplied.</li>
+    <li>Compute a matrix product four different ways and say what each view is good for.</li>
+    <li>Read $A\mathbf{x}=\mathbf{b}$ as intersecting lines (row picture) and as mixing columns (column picture), and solve it by Gaussian elimination.</li>
+    <li>Say when an inverse exists, compute one, and explain what a singular matrix does to space.</li>
+    <li>Find the rank, column space and null space of a matrix, and use rank–nullity.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="composition">1. Matrix multiplication is composition</h2>
+<p>Lesson 02 showed that a $2\times2$ matrix <em>is</em> a transformation of the plane, and its columns record where the basis vectors $\hat\imath$ and $\hat\jmath$ land. Now apply two transformations in a row: first $B$, then $A$. A vector $\mathbf{x}$ goes to $B\mathbf{x}$, then to $A(B\mathbf{x})$.</p>
+<p>The combined map is still linear, so it is also a matrix. Call it $AB$. Which matrix is it? Follow the basis vectors. $\hat\imath$ first lands on $B$'s first column $\mathbf{b}_1$; then $A$ sends that to $A\mathbf{b}_1$. Same for $\hat\jmath$. So</p>
+$$AB = \begin{bmatrix} | & | \\ A\mathbf{b}_1 & A\mathbf{b}_2 \\ | & | \end{bmatrix}, \qquad (AB)\mathbf{x} = A(B\mathbf{x}).$$
+<p>That's the whole definition. Every formula for matrix multiplication is a way of computing "column $j$ of $AB$ is $A$ times column $j$ of $B$".</p>
+
+<div class="callout warning">
+<p><b>Read right to left.</b> $AB\mathbf{x}$ applies $B$ first, because $B$ is the one touching $\mathbf{x}$. It's the same as function composition $f(g(x))$: written left to right, executed right to left.</p>
+</div>
+
+<p>Since "rotate then shear" and "shear then rotate" are different motions, there's no reason to expect $AB = BA$. Usually it isn't.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-comp-ab" width="400" height="400"></canvas></div>
+    <div><canvas id="fig-comp-ba" width="400" height="400"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-comp"></div>
+  <div class="readout" id="out-comp"></div>
+  <div class="caption"><b>Try it:</b> left panel is $AB$ (do $B$ first), right panel is $BA$ (do $A$ first). Drag the slider $t$ from 0 to 2 to watch the first transformation happen, then the second. Pick "rotate 90°" and "shear" and compare where the F ends up. Then try two rotations, or two scalings: some pairs <em>do</em> commute. Which ones, and why?</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: order matters</div>
+  <p>Let $R = \begin{bmatrix}0&-1\\1&0\end{bmatrix}$ (rotate 90° counter-clockwise) and $S = \begin{bmatrix}1&1\\0&1\end{bmatrix}$ (horizontal shear).</p>
+  <p>$RS$ (shear first): the columns of $S$ are $(1,0)$ and $(1,1)$. Rotating them gives $R(1,0) = (0,1)$ and $R(1,1) = (-1,1)$. So $RS = \begin{bmatrix}0&-1\\1&1\end{bmatrix}$.</p>
+  <p>$SR$ (rotate first): the columns of $R$ are $(0,1)$ and $(-1,0)$. Shearing gives $S(0,1) = (1,1)$ and $S(-1,0) = (-1,0)$. So $SR = \begin{bmatrix}1&-1\\1&0\end{bmatrix}$.</p>
+  <p>Different matrices, different pictures. Both have determinant 1, though: $\det(AB) = \det A\,\det B$ in either order, because area scale factors just multiply (lesson 02).</p>
+</div>
+
+<div class="callout ml">
+<p>A neural network is a chain of layers $\mathbf{x} \mapsto W_3\,\sigma(W_2\,\sigma(W_1\mathbf{x}))$. Take the non-linearities $\sigma$ away and the whole stack collapses to a single matrix $W_3W_2W_1$: depth buys nothing. That's why the non-linearity is essential (lesson 16).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="shapes">2. Shapes: what can be multiplied</h2>
+<p>Matrices don't have to be square. An $m\times n$ matrix ($m$ rows, $n$ columns) eats vectors in $\mathbb{R}^n$ and outputs vectors in $\mathbb{R}^m$: each of its $n$ columns is an $m$-dimensional vector, and $A\mathbf{x}$ mixes them.</p>
+<p>For $AB$ to make sense, $A$ must accept what $B$ outputs. So:</p>
+$$\underbrace{A}_{m\times n}\;\underbrace{B}_{n\times p} = \underbrace{AB}_{m\times p}.$$
+<p>The inner dimensions must match and cancel; the outer ones survive. Entry $(i,j)$ of the result is</p>
+$$(AB)_{ij} = \sum_{k=1}^{n} A_{ik}B_{kj}.$$
+<p>Computing it naively costs $m\cdot n\cdot p$ multiply-adds. Two more facts you'll use constantly:</p>
+<ul>
+  <li><b>Associative:</b> $(AB)C = A(BC)$. Composition doesn't care how you bracket it. But the <em>cost</em> does (problem 3).</li>
+  <li><b>Transpose reverses order:</b> $(AB)^\top = B^\top A^\top$. Check the shapes: $(m\times p)^\top = p\times m = (p\times n)(n\times m)$.</li>
+</ul>
+
+<div class="callout ml">
+<p>In code, a batch of $N$ inputs sits in the rows of $X$ ($N\times d_\text{in}$). A linear layer with weights $W$ ($d_\text{out}\times d_\text{in}$) computes all outputs at once as $XW^\top$ ($N\times d_\text{out}$). PyTorch's <code>nn.Linear</code> does exactly this (lesson 19). Most shape errors you'll ever hit are a violated inner-dimension rule.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="four-views">3. Four ways to see one product</h2>
+<p>The same sum $\sum_k A_{ik}B_{kj}$ can be grouped four ways. Each is the right mental model in a different situation.</p>
+<table>
+  <tr><th>View</th><th>Formula</th><th>Good for</th></tr>
+  <tr><td>1. Dot products</td><td>$(AB)_{ij} = (\text{row } i \text{ of } A)\cdot(\text{col } j \text{ of } B)$</td><td>computing one entry; attention scores $QK^\top$</td></tr>
+  <tr><td>2. Column combinations</td><td>col $j$ of $AB$ $= A\,(\text{col } j \text{ of } B) = \sum_k B_{kj}\,\mathbf{a}_k$</td><td>the transformation view (section 1); column space</td></tr>
+  <tr><td>3. Row combinations</td><td>row $i$ of $AB$ $= \sum_k A_{ik}\,(\text{row } k \text{ of } B)$</td><td>row operations in elimination (section 5)</td></tr>
+  <tr><td>4. Sum of outer products</td><td>$AB = \sum_k \mathbf{a}_k\,\mathbf{b}_k^{\top}$ (col $k$ of $A$ times row $k$ of $B$)</td><td>low-rank structure, SVD (lesson 04), gradients (lesson 07)</td></tr>
+</table>
+<p>View 4 is the least familiar. An <b>outer product</b> $\mathbf{u}\mathbf{v}^\top$ of a column and a row is a full matrix whose $(i,j)$ entry is $u_iv_j$. Every row is a multiple of $\mathbf{v}^\top$, so it has rank 1 (section 7). View 4 says <em>every</em> product $AB$ is a sum of $n$ such rank-1 layers.</p>
+
+<div class="figure">
+  <canvas id="fig-views" width="680" height="330"></canvas>
+  <div class="controls" id="ctl-views"></div>
+  <div class="readout" id="out-views"></div>
+  <div class="caption"><b>Try it:</b> pick a view and press <em>step</em> to build $C = AB$ piece by piece. Highlighted cells are the ones in use. In the dot-product view each step fills one entry; in the column and row views each step fills a whole column or row; in the outer-product view each step adds a full rank-1 layer, and $C$ is only correct after the last one. All four end at the same $C$.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: one product, four ways</div>
+  <p>$A = \begin{bmatrix}1&2&0\\0&1&-1\end{bmatrix}$ ($2\times3$), $B = \begin{bmatrix}1&1\\2&0\\0&3\end{bmatrix}$ ($3\times2$). The result is $2\times2$.</p>
+  <p><b>Dot products.</b> $C_{11} = (1,2,0)\cdot(1,2,0) = 5$, $C_{12} = (1,2,0)\cdot(1,0,3) = 1$, $C_{21} = (0,1,-1)\cdot(1,2,0) = 2$, $C_{22} = (0,1,-1)\cdot(1,0,3) = -3$.</p>
+  <p><b>Columns.</b> Column 1 of $C$ $= 1\cdot\begin{bmatrix}1\\0\end{bmatrix} + 2\cdot\begin{bmatrix}2\\1\end{bmatrix} + 0\cdot\begin{bmatrix}0\\-1\end{bmatrix} = \begin{bmatrix}5\\2\end{bmatrix}$.</p>
+  <p><b>Rows.</b> Row 2 of $C$ $= 0\cdot(1,1) + 1\cdot(2,0) + (-1)\cdot(0,3) = (2,-3)$.</p>
+  <p><b>Outer products.</b> $\begin{bmatrix}1\\0\end{bmatrix}(1,1) + \begin{bmatrix}2\\1\end{bmatrix}(2,0) + \begin{bmatrix}0\\-1\end{bmatrix}(0,3) = \begin{bmatrix}1&1\\0&0\end{bmatrix} + \begin{bmatrix}4&0\\2&0\end{bmatrix} + \begin{bmatrix}0&0\\0&-3\end{bmatrix} = \begin{bmatrix}5&1\\2&-3\end{bmatrix}.$</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="systems">4. Linear systems: the row picture and the column picture</h2>
+<p>A system of linear equations is a single matrix equation. For example</p>
+$$\begin{aligned} 2x + y &= 5 \\ x - y &= 1 \end{aligned} \quad\Longleftrightarrow\quad \underbrace{\begin{bmatrix}2&1\\1&-1\end{bmatrix}}_{A}\underbrace{\begin{bmatrix}x\\y\end{bmatrix}}_{\mathbf{x}} = \underbrace{\begin{bmatrix}5\\1\end{bmatrix}}_{\mathbf{b}}.$$
+<p>There are two ways to picture it, matching views 1 and 2 above.</p>
+<ul>
+  <li><b>Row picture.</b> Each row is one equation, and each equation is a line in the $(x,y)$ plane (in 3-D, a plane). The solution is where all the lines meet. Here they meet at $(2, 1)$.</li>
+  <li><b>Column picture.</b> $A\mathbf{x} = x\,\mathbf{a}_1 + y\,\mathbf{a}_2$. The question becomes: <em>which combination of the columns produces $\mathbf{b}$?</em> Here $2\cdot(2,1) + 1\cdot(1,-1) = (5,1)$. ✓</li>
+</ul>
+<p>The column picture is the one that scales to understanding. $A\mathbf{x}=\mathbf{b}$ has a solution exactly when $\mathbf{b}$ is in the span of the columns (lesson 01). In the language of lesson 02: when $\mathbf{b}$ is somewhere the transformation $A$ can reach.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-row" width="400" height="400"></canvas></div>
+    <div><canvas id="fig-col" width="400" height="400"></canvas></div>
+  </div>
+  <div class="readout" id="out-sys"></div>
+  <div class="caption"><b>Try it:</b> right panel (column picture): drag the columns <span style="color:var(--c1)">a₁</span>, <span style="color:var(--c2)">a₂</span> and the target <span style="color:var(--c3)">b</span>. The faint arrows show $x\,\mathbf{a}_1$ followed by $y\,\mathbf{a}_2$ landing exactly on $\mathbf{b}$. The left panel (row picture) shows the same system as two lines meeting at $(x, y)$. Now drag $\mathbf{a}_2$ onto the line through $\mathbf{a}_1$. In the row picture the lines go parallel. In the column picture the columns only reach a line, and unless $\mathbf{b}$ is on it there's no solution.</div>
+</div>
+
+<div class="callout key">
+<p>For a square $A$ there are only two possibilities. If $\det A \ne 0$, the columns span everything and there is <b>exactly one</b> solution for every $\mathbf{b}$. If $\det A = 0$, there are <b>none or infinitely many</b>, depending on $\mathbf{b}$. "Exactly two solutions" never happens: if $\mathbf{x}$ and $\mathbf{y}$ both solve it, so does every point on the line through them.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="elimination">5. Gaussian elimination</h2>
+<p>Drawing pictures doesn't scale past 3 unknowns. The algorithm that does is <b>Gaussian elimination</b>, and it's the one you learned in school with a bit more discipline. Three row operations never change the solution set:</p>
+<ol>
+  <li>Swap two equations.</li>
+  <li>Multiply an equation by a non-zero number.</li>
+  <li>Subtract a multiple of one equation from another.</li>
+</ol>
+<p>Each is "multiply both sides on the left by an invertible matrix" (view 3: left-multiplication combines rows). So they can't create or destroy solutions.</p>
+<p>The plan: write the <b>augmented matrix</b> $[A\,|\,\mathbf{b}]$. For each column $k$, pick a <b>pivot</b> in row $k$, and subtract multiples of the pivot row to zero out everything below it. The multiplier for row $i$ is $\ell_{ik} = a_{ik}/a_{kk}$. You end with an upper-triangular system $U\mathbf{x} = \mathbf{c}$, which <b>back-substitution</b> solves from the bottom up.</p>
+
+<div class="example">
+  <div class="label">Worked example: elimination by hand</div>
+  <p>Solve $x+2y+z = 4$, $2x+5y+3z = 11$, $x+3y+4z = 9$.</p>
+  $$\left[\begin{array}{ccc|c}1&2&1&4\\2&5&3&11\\1&3&4&9\end{array}\right] \xrightarrow[R_3 - R_1]{R_2 - 2R_1} \left[\begin{array}{ccc|c}1&2&1&4\\0&1&1&3\\0&1&3&5\end{array}\right] \xrightarrow{R_3 - R_2} \left[\begin{array}{ccc|c}1&2&1&4\\0&1&1&3\\0&0&2&2\end{array}\right]$$
+  <p>Back-substitute: $2z = 2 \Rightarrow z = 1$. Then $y + 1 = 3 \Rightarrow y = 2$. Then $x + 4 + 1 = 4 \Rightarrow x = -1$.</p>
+  <p>Check in the original third equation: $-1 + 6 + 4 = 9$. ✓ The pivots were $1, 1, 2$, and their product is $\det A = 2$. That's no accident: row operation 3 doesn't change the determinant, and the determinant of a triangular matrix is the product of its diagonal.</p>
+</div>
+
+<h3>Partial pivoting</h3>
+<p>If a pivot is zero, you can't divide by it, so you swap in a row from below. In floating point you should swap even when the pivot is merely <em>small</em>: dividing by $10^{-20}$ makes huge multipliers that swamp the other numbers in rounding error. <b>Partial pivoting</b> always picks the largest $|a_{ik}|$ in the column as the pivot. Every serious solver does this. If <em>no</em> row has a usable pivot, the column is a combination of earlier ones and the matrix is singular.</p>
+
+<div class="figure">
+  <canvas id="fig-gauss" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-gauss"></div>
+  <div class="readout" id="out-gauss"></div>
+  <div class="caption"><b>Try it:</b> press <em>step</em> to run elimination on $[A\,|\,\mathbf{b}]$. The boxed cell is the current pivot and the tinted row is the one being changed. Then watch back-substitution read off the solution. Switch to "zero pivot" and untick partial pivoting: the naive algorithm hits a 0 on the diagonal and stops. Tick it again and it swaps rows and carries on. "Singular" fails either way, because no pivot exists.</div>
+</div>
+
+<div class="callout intuition">
+<p>Elimination costs about $\tfrac23 n^3$ operations: for each of $n$ pivots, update an $(n-k)\times(n-k)$ block. Recording the multipliers $\ell_{ik}$ in a lower-triangular $L$ gives the factorization $PA = LU$ ($P$ records the swaps). Factor once, then each new right-hand side costs only $O(n^2)$. That's what <code>np.linalg.solve</code> does under the hood (LAPACK's <code>gesv</code>).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="inverse">6. The inverse: undo</h2>
+<p>If $A$ is a transformation, its <b>inverse</b> $A^{-1}$ is the transformation that puts everything back:</p>
+$$A^{-1}A = AA^{-1} = I.$$
+<p>Then $A\mathbf{x}=\mathbf{b}$ has solution $\mathbf{x} = A^{-1}\mathbf{b}$. For a $2\times2$ matrix there's a closed form. Multiply out to check it:</p>
+$$\begin{bmatrix}a&b\\c&d\end{bmatrix}^{-1} = \frac{1}{ad-bc}\begin{bmatrix}d&-b\\-c&a\end{bmatrix}, \qquad \begin{bmatrix}a&b\\c&d\end{bmatrix}\begin{bmatrix}d&-b\\-c&a\end{bmatrix} = \begin{bmatrix}ad-bc&0\\0&ad-bc\end{bmatrix}.$$
+<p>The determinant appears in the denominator, so the inverse exists exactly when $\det A \ne 0$. Geometrically: if $A$ squashes the plane onto a line (area scale 0), many points land on the same output, and no function can tell them apart to send them back.</p>
+<p>For bigger matrices, use <b>Gauss–Jordan</b>. Row-reduce $[A\,|\,I]$ all the way until the left half is $I$, eliminating above each pivot as well as below. The row operations multiply to $A^{-1}$, so the right half becomes $A^{-1}I = A^{-1}$.</p>
+<p>Two rules worth deriving rather than memorizing:</p>
+<ul>
+  <li>$(AB)^{-1} = B^{-1}A^{-1}$. To undo "put on socks, then shoes", take off the shoes first. Check: $(AB)(B^{-1}A^{-1}) = A(BB^{-1})A^{-1} = AA^{-1} = I$.</li>
+  <li>$\det(A^{-1}) = 1/\det A$. The undo must un-scale area.</li>
+</ul>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-inv-in" width="400" height="400"></canvas></div>
+    <div><canvas id="fig-inv-out" width="400" height="400"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-inv"></div>
+  <div class="readout" id="out-inv"></div>
+  <div class="caption"><b>Try it:</b> left is the input space, right is the output after $A$. Drag the column handles <span style="color:var(--c1)">Aî</span> and <span style="color:var(--c2)">Aĵ</span> on the right, and the probe point <span style="color:var(--c5)">x</span> on the left. The dashed outline on the left is $A^{-1}(A\cdot\text{shape})$, and it sits exactly on the original: the undo works. Now press "make singular", or line the two columns up yourself. The output collapses onto a line (the <b>column space</b>). On the left, a whole line of inputs (the dashed one through $\mathbf{x}$, parallel to the <b>null space</b>) now maps to the single output $A\mathbf{x}$, and the undo is gone.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: a 2×2 inverse</div>
+  <p>$A = \begin{bmatrix}4&7\\2&6\end{bmatrix}$. $\det A = 24 - 14 = 10$, so</p>
+  $$A^{-1} = \frac{1}{10}\begin{bmatrix}6&-7\\-2&4\end{bmatrix} = \begin{bmatrix}0.6&-0.7\\-0.2&0.4\end{bmatrix}.$$
+  <p>Check the first column of $AA^{-1}$: $A(0.6,-0.2) = (2.4-1.4,\;1.2-1.2) = (1, 0)$. ✓</p>
+</div>
+
+<div class="callout warning">
+<p>In numerical code, <b>don't compute $A^{-1}$ just to solve $A\mathbf{x}=\mathbf{b}$</b>. Use <code>np.linalg.solve(A, b)</code>. Forming the inverse costs about 3× more and is less accurate. The inverse is a thinking tool far more often than a computing tool.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rank">7. Rank, column space and null space</h2>
+<p>"Singular or not" is too coarse for non-square matrices, or for asking <em>how</em> singular. Three linked ideas fill the gap. Let $A$ be $m\times n$.</p>
+<ul>
+  <li>The <b>column space</b> $C(A)$ is the span of the columns, everything $A\mathbf{x}$ can reach. It lives in $\mathbb{R}^m$. $A\mathbf{x}=\mathbf{b}$ is solvable iff $\mathbf{b}\in C(A)$.</li>
+  <li>The <b>rank</b> is $\dim C(A)$: the number of independent columns. It's the dimension of the output, after any squashing.</li>
+  <li>The <b>null space</b> $N(A) = \{\mathbf{x} : A\mathbf{x} = \mathbf{0}\}$ is everything $A$ crushes to zero. It lives in $\mathbb{R}^n$. If $\mathbf{x}_0$ solves $A\mathbf{x}=\mathbf{b}$, then so does $\mathbf{x}_0 + \mathbf{n}$ for every $\mathbf{n}\in N(A)$. The null space is exactly the ambiguity in the answer.</li>
+</ul>
+<p>Elimination finds all three. Keep row-reducing until each pivot is 1 and is the only non-zero in its column. That's the <b>reduced row echelon form</b> (RREF). Columns with a pivot are <b>pivot columns</b>; the rest are <b>free columns</b>.</p>
+<ul>
+  <li>rank = number of pivots.</li>
+  <li>The pivot columns <em>of the original $A$</em> are a basis for $C(A)$.</li>
+  <li>Each free column gives one null-space basis vector: set that free variable to 1, the other free variables to 0, and solve for the pivot variables.</li>
+</ul>
+<p>Each of the $n$ columns is either a pivot or free, which gives the <b>rank–nullity theorem</b>:</p>
+$$\operatorname{rank}(A) + \dim N(A) = n.$$
+<p>In words: the input dimensions that survive, plus the ones crushed to zero, add up to all of them.</p>
+
+<div class="example">
+  <div class="label">Worked example: RREF, rank and null space</div>
+  <p>$A = \begin{bmatrix}1&2&1&1\\2&4&0&6\\1&2&2&-1\end{bmatrix}$ ($3\times4$).</p>
+  <p>$R_2 - 2R_1$ and $R_3 - R_1$ give rows $(0,0,-2,4)$ and $(0,0,1,-2)$. Column 2 has no pivot below row 1, so it's free. Scale row 2 by $-\tfrac12$ to get $(0,0,1,-2)$, subtract it from row 3 (leaving zeros) and from row 1:</p>
+  $$R = \begin{bmatrix}1&2&0&3\\0&0&1&-2\\0&0&0&0\end{bmatrix}.$$
+  <p>Pivots are in columns 1 and 3, so <b>rank 2</b>. The column space is spanned by $(1,2,1)$ and $(1,0,2)$, a plane in $\mathbb{R}^3$. Free columns are 2 and 4, so the null space has dimension $4 - 2 = 2$.</p>
+  <p>The rows of $R$ say $x_1 = -2x_2 - 3x_4$ and $x_3 = 2x_4$. Setting $(x_2,x_4) = (1,0)$ gives $(-2,1,0,0)$; setting $(0,1)$ gives $(-3,0,2,1)$. Check the second: $A(-3,0,2,1) = (-3+0+2+1,\; -6+0+0+6,\; -3+0+4-1) = (0,0,0)$. ✓</p>
+</div>
+
+<div class="callout ml">
+<p>Rank is a capacity limit. A product $UV$ with $U$ of shape $d\times r$ and $V$ of shape $r\times d$ has rank at most $r$, however large $d$ is. Each attention head projects to a small dimension, so its $QK^\top$ score matrix is low-rank. <b>LoRA</b> fine-tunes a big model by learning only a low-rank update $\Delta W = UV$ (lesson 25). Lesson 04 shows how the SVD finds the best low-rank approximation of any matrix.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="least-squares">8. When there's no solution: a least-squares teaser</h2>
+<p>Real data gives <em>tall</em> systems: more equations (data points) than unknowns (parameters). Then $\mathbf{b}$ is almost never in the column space, and $A\mathbf{x} = \mathbf{b}$ has no exact solution. The useful question becomes: <b>which $\mathbf{x}$ makes $A\mathbf{x}$ as close to $\mathbf{b}$ as possible?</b></p>
+<p>The closest point in the column space is the <em>projection</em> of $\mathbf{b}$ onto it, exactly as in lesson 01. The residual $\mathbf{b} - A\hat{\mathbf{x}}$ is perpendicular to every column, so $A^\top(\mathbf{b} - A\hat{\mathbf{x}}) = \mathbf{0}$, which gives the <b>normal equations</b>:</p>
+$$A^\top A\,\hat{\mathbf{x}} = A^\top\mathbf{b}.$$
+<p>That's a square system you now know how to solve. With one column $\mathbf{a}$ it reduces to $\hat x = \dfrac{\mathbf{a}\cdot\mathbf{b}}{\mathbf{a}\cdot\mathbf{a}}$, the projection coefficient from lesson 01.</p>
+
+<div class="figure">
+  <canvas id="fig-ls" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-ls"></div>
+  <div class="readout" id="out-ls"></div>
+  <div class="caption"><b>Try it:</b> here $A$ is a single column $\mathbf{a}$ (a $2\times1$ matrix), so its column space is the dashed line. Drag $\mathbf{b}$ off the line: no $x$ solves $x\,\mathbf{a} = \mathbf{b}$. Slide $x$ and watch the error $\|x\mathbf{a} - \mathbf{b}\|$. It is smallest exactly at $\hat x$, where the error vector meets the line at a right angle. Press "jump to x̂" to snap there.</div>
+</div>
+<p>Lesson 13 builds linear regression on exactly this, and shows why $A^\top A$ is invertible precisely when the columns of $A$ are independent (problem 8).</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+<p>Do these with pencil and paper before opening the solutions. The struggle is where the learning happens.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Compute $\begin{bmatrix}1&2\\3&4\end{bmatrix}\begin{bmatrix}5&6\\7&8\end{bmatrix}$. Enter the four entries row by row.</p>
+<div class="numcheck" data-answer="19,22,43,50"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Row 1: $(1\cdot5+2\cdot7,\;1\cdot6+2\cdot8) = (19, 22)$. Row 2: $(3\cdot5+4\cdot7,\;3\cdot6+4\cdot8) = (43, 50)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Let $A$ be $3\times4$, $B$ be $4\times2$ and $C$ be $2\times3$. Which of $AB$, $BA$, $BC$, $CA$, $ABC$, $CAB$ are defined, and what shape is each?</p>
+<details class="solution"><summary>Solution</summary>
+<p>$AB$: $3\times2$. $BA$: $(4\times2)(3\times4)$, inner 2 ≠ 3, undefined. $BC$: $4\times3$. $CA$: $(2\times3)(3\times4) = 2\times4$. $ABC$: $3\times3$. $CAB$: $(2\times3)(3\times4)(4\times2) = 2\times2$. $ABC$ and $CAB$ are both square but different sizes. Order matters for shape, not only for values.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>With the shapes from problem 2, a naive $(m\times n)(n\times p)$ product costs $mnp$ multiply-adds. How many does $(AB)C$ cost in total? How many does $A(BC)$ cost? Enter both.</p>
+<div class="numcheck" data-answer="42,60"></div>
+<details class="hint"><summary>Hint</summary><p>$(AB)C$: first $3\cdot4\cdot2$ to form $AB$ ($3\times2$), then multiply that by $C$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$(AB)C$: $3\cdot4\cdot2 = 24$ for $AB$, then $(3\times2)(2\times3)$ costs $18$. Total $42$. $A(BC)$: $4\cdot2\cdot3 = 24$ for $BC$ ($4\times3$), then $(3\times4)(4\times3)$ costs $36$. Total $60$. Same answer, 43% more work. The same effect is huge in backprop: computing gradients right-to-left (reverse mode) versus left-to-right is a bracketing choice (lesson 17).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Solve by elimination: $x+y+z = 6$, $2x+3y+z = 11$, $x-y+2z = 5$. Enter $x, y, z$.</p>
+<div class="numcheck" data-answer="1,2,3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$R_2 - 2R_1 = (0,1,-1\,|\,-1)$. $R_3 - R_1 = (0,-2,1\,|\,-1)$. Then $R_3 + 2R_2 = (0,0,-1\,|\,-3)$, so $z = 3$. Then $y - 3 = -1$ gives $y = 2$, and $x + 2 + 3 = 6$ gives $x = 1$. Check equation 3: $1 - 2 + 6 = 5$. ✓</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>(a) Find the inverse of $\begin{bmatrix}2&1\\5&3\end{bmatrix}$ and enter its entries row by row. (b) For which $k$ is $\begin{bmatrix}1&2\\3&k\end{bmatrix}$ singular?</p>
+<p>(a): <span class="numcheck" data-answer="3,-1,-5,2"></span></p>
+<p>(b): <span class="numcheck" data-answer="6"></span></p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\det = 6 - 5 = 1$, so the inverse is $\begin{bmatrix}3&-1\\-5&2\end{bmatrix}$. It has integer entries because the determinant is 1. (b) $\det = k - 6 = 0 \Rightarrow k = 6$. Then column 2 $= 2\times$ column 1.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · proof</span>
+<p>Prove (a) $(AB)^\top = B^\top A^\top$ using the index formula, and (b) if $A$ and $B$ are invertible then so is $AB$, with $(AB)^{-1} = B^{-1}A^{-1}$. (c) Why can't it be $A^{-1}B^{-1}$?</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\big((AB)^\top\big)_{ij} = (AB)_{ji} = \sum_k A_{jk}B_{ki} = \sum_k (B^\top)_{ik}(A^\top)_{kj} = (B^\top A^\top)_{ij}$.</p>
+<p>(b) $(AB)(B^{-1}A^{-1}) = A(BB^{-1})A^{-1} = AIA^{-1} = I$ by associativity, and similarly on the other side.</p>
+<p>(c) $(AB)(A^{-1}B^{-1})$ doesn't simplify, because $B$ and $A^{-1}$ aren't adjacent. Geometrically, the last thing done must be the first thing undone.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Let $M = \begin{bmatrix}1&2&3\\2&4&6\\1&1&1\end{bmatrix}$. Find its rank and a basis for its null space. Enter the rank, then the null-space vector scaled so its first entry is 1.</p>
+<div class="numcheck" data-answer="2,1,-2,1"></div>
+<details class="hint"><summary>Hint</summary><p>Row 2 is twice row 1. Eliminate, then find the free column.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$R_2 - 2R_1 = \mathbf{0}$ and $R_3 - R_1 = (0,-1,-2)$. Swap and clean up to get $\text{RREF} = \begin{bmatrix}1&0&-1\\0&1&2\\0&0&0\end{bmatrix}$. Two pivots, so rank 2, and column 3 is free. Set $x_3 = 1$: $x_1 = 1$, $x_2 = -2$. Null space is spanned by $(1,-2,1)$. Check: $1-4+3 = 0$ and $1-2+1 = 0$. ✓ Rank–nullity: $2 + 1 = 3$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch · proof</span>
+<p>Let $A$ be $m\times n$. Prove that $N(A^\top A) = N(A)$, and conclude that $A^\top A$ is invertible exactly when the columns of $A$ are independent. (This is what makes the normal equations of section 8 solvable.)</p>
+<details class="hint"><summary>Hint</summary><p>One direction is immediate. For the other, if $A^\top A\mathbf{x} = \mathbf{0}$, take the dot product with $\mathbf{x}$ and recognize a squared norm.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>If $A\mathbf{x} = \mathbf{0}$ then $A^\top A\mathbf{x} = \mathbf{0}$. Conversely, if $A^\top A\mathbf{x} = \mathbf{0}$ then $0 = \mathbf{x}^\top A^\top A\mathbf{x} = (A\mathbf{x})^\top(A\mathbf{x}) = \|A\mathbf{x}\|^2$, so $A\mathbf{x} = \mathbf{0}$. The null spaces are equal. $A^\top A$ is square ($n\times n$), so it's invertible iff its null space is $\{\mathbf{0}\}$, iff $N(A) = \{\mathbf{0}\}$, iff the columns of $A$ are independent (no non-trivial combination gives zero).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>A layer maps $\mathbb{R}^{512}\to\mathbb{R}^{512}$ with $W = UV$, where $U$ is $512\times16$ and $V$ is $16\times512$. (a) What is the largest possible rank of $W$? (b) What is the smallest possible dimension of $N(W)$? (c) How many parameters do $U, V$ have compared to a full $W$? Enter (a), (b), and the ratio (full)/(factored).</p>
+<div class="numcheck" data-answer="16,496,16"></div>
+<details class="solution"><summary>Solution</summary>
+<p>(a) Every column of $W = UV$ is $U$ times something, so $C(W)\subseteq C(U)$, which has dimension at most 16. (b) Rank–nullity: $\dim N(W) = 512 - \operatorname{rank} \ge 496$. At least 496 input directions are thrown away completely. (c) Full: $512^2 = 262{,}144$. Factored: $2\cdot512\cdot16 = 16{,}384$. Ratio 16. This is the trade LoRA makes (lesson 25).</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">You know $AB = AC$. When can you conclude $B = C$?</div>
+  <div class="opts">
+    <button data-k="a">Always: just cancel the $A$.</button>
+    <button data-k="b">Only if $A$ is square.</button>
+    <button data-k="c">When $A$ is invertible (more generally, when $A$ has independent columns).</button>
+    <button data-k="d">Only if $B$ and $C$ commute with $A$.</button>
+  </div>
+  <div class="explain">$A(B - C) = 0$ says every column of $B - C$ is in $N(A)$. If the null space is just $\{\mathbf{0}\}$, then $B = C$. Otherwise $B$ and $C$ can differ by null-space vectors. Example: $A = \begin{bmatrix}1&0\\0&0\end{bmatrix}$ can't tell apart matrices that differ only in their second row.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">$A$ is $3\times3$ with $\det A = 0$. What can you say about $A\mathbf{x} = \mathbf{b}$?</div>
+  <div class="opts">
+    <button data-k="a">It never has a solution.</button>
+    <button data-k="b">It has no solution or infinitely many, depending on $\mathbf{b}$.</button>
+    <button data-k="c">It has exactly one solution, but elimination can't find it.</button>
+    <button data-k="d">It has at most finitely many solutions.</button>
+  </div>
+  <div class="explain">Singular means a non-trivial null space and a column space smaller than $\mathbb{R}^3$. If $\mathbf{b}$ is outside $C(A)$: no solution. If it's inside, any one solution plus any null-space vector is another, so infinitely many.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">A $5\times3$ matrix has rank 3. Which statement is true?</div>
+  <div class="opts">
+    <button data-k="a">$A\mathbf{x} = \mathbf{b}$ is solvable for every $\mathbf{b}\in\mathbb{R}^5$.</button>
+    <button data-k="b">Its null space is 2-dimensional.</button>
+    <button data-k="c">It has an inverse.</button>
+    <button data-k="d">Its column space is a 3-D subspace of $\mathbb{R}^5$, and its null space is $\{\mathbf{0}\}$.</button>
+  </div>
+  <div class="explain">Rank–nullity uses $n = 3$ (columns): nullity $= 3 - 3 = 0$. Three columns can span at most 3 dimensions of $\mathbb{R}^5$, so most $\mathbf{b}$ are unreachable (that's the least-squares setting). Non-square matrices don't have two-sided inverses.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">Why does every serious solver use partial pivoting?</div>
+  <div class="opts">
+    <button data-k="a">Dividing by a tiny pivot makes huge multipliers that amplify rounding error; picking the largest available pivot keeps multipliers at most 1 in size.</button>
+    <button data-k="b">Without it, elimination gives the wrong answer even in exact arithmetic.</button>
+    <button data-k="c">It makes elimination asymptotically faster than $O(n^3)$.</button>
+    <button data-k="d">It's needed to detect when the solution is unique.</button>
+  </div>
+  <div class="explain">In exact arithmetic, any non-zero pivot works. In floating point, $|\ell_{ik}| = |a_{ik}/a_{kk}| \le 1$ when $a_{kk}$ is the largest in its column, which keeps errors from blowing up. The cost is the same $O(n^3)$.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula / rule</th><th>Meaning</th></tr>
+  <tr><td>Matrix product</td><td>$(AB)\mathbf{x} = A(B\mathbf{x})$; $(m\times n)(n\times p)\to m\times p$</td><td>do $B$, then $A$</td></tr>
+  <tr><td>Four views</td><td>entries = dots; columns = $A\,\mathbf{b}_j$; rows = $\mathbf{a}^{\text{row}}_i B$; $\sum_k \mathbf{a}_k\mathbf{b}_k^\top$</td><td>one sum, grouped four ways</td></tr>
+  <tr><td>$A\mathbf{x} = \mathbf{b}$</td><td>row picture / column picture</td><td>lines meeting / mixing columns to hit $\mathbf{b}$</td></tr>
+  <tr><td>Elimination</td><td>$[A|\mathbf{b}]\to[U|\mathbf{c}]$, back-substitute; $PA = LU$</td><td>the $O(n^3)$ workhorse</td></tr>
+  <tr><td>Inverse</td><td>$A^{-1}A = I$; exists iff $\det A\ne0$; $(AB)^{-1} = B^{-1}A^{-1}$</td><td>undo</td></tr>
+  <tr><td>Rank–nullity</td><td>$\operatorname{rank}A + \dim N(A) = n$</td><td>surviving + crushed input dimensions</td></tr>
+  <tr><td>Least squares</td><td>$A^\top A\hat{\mathbf{x}} = A^\top\mathbf{b}$</td><td>project $\mathbf{b}$ onto $C(A)$</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 03: build it</h3>
+  <p>Open <code>workbooks/03_matmul_systems_inverse/exercises.py</code>. Part A, in plain Python: <code>matmul</code> as a triple loop and <code>matmul_outer</code> as a sum of outer products. Part B, without <code>np.linalg</code>: Gaussian elimination with partial pivoting, back-substitution, <code>solve</code>, a Gauss–Jordan <code>inverse</code>, <code>rref</code>, <code>rank</code> and a <code>null_space</code> basis. Part C (stretch): solve any $m\times n$ system or report that none exists. The tests compare everything against <code>numpy.linalg</code>. Grade yourself with:</p>
+  <pre><code>./course check 03</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>3Blue1Brown, <em>Essence of Linear Algebra</em>, ch. 4 (matrix multiplication as composition), 7 (inverse, column space, null space) and 8 (non-square matrices).</li>
+  <li>Gilbert Strang, <em>Introduction to Linear Algebra</em>, ch. 2–3, and his MIT 18.06 lectures 1–10.</li>
+  <li>Trefethen &amp; Bau, <em>Numerical Linear Algebra</em>, lectures 20–22 (elimination and why pivoting matters).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, LA, fmt } = Course;
+  const f2 = v => { const r = Math.round(v * 100) / 100; return (Object.is(r, -0) ? 0 : r).toString(); };
+  const mat2 = M => `[[${f2(M[0][0])}, ${f2(M[0][1])}], [${f2(M[1][0])}, ${f2(M[1][1])}]]`;
+  const inv2 = M => { const d = LA.det2(M); return [[M[1][1] / d, -M[0][1] / d], [-M[1][0] / d, M[0][0] / d]]; };
+  const checkbox = (host, text, val, on) => { const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = val; cb.addEventListener("change", () => on(cb.checked)); lab.append(cb, " " + text); document.querySelector(host).appendChild(lab); return cb; };
+  // an "F" shape: asymmetric, so flips and rotations are obvious
+  const F = [[0, 0], [0.35, 0], [0.35, 0.65], [0.8, 0.65], [0.8, 0.95], [0.35, 0.95], [0.35, 1.25], [1, 1.25], [1, 1.6], [0, 1.6]];
+  // draw the image of the integer grid under M
+  const grid2 = (p, M, o = {}) => {
+    const n = o.n || 6, col = o.color || "c6", a = o.alpha ?? .35;
+    for (let i = -n; i <= n; i++) {
+      p.line(M[0][0] * i + M[0][1] * -n, M[1][0] * i + M[1][1] * -n, M[0][0] * i + M[0][1] * n, M[1][0] * i + M[1][1] * n, { color: col, width: i ? 1 : 1.6, alpha: a });
+      p.line(M[0][0] * -n + M[0][1] * i, M[1][0] * -n + M[1][1] * i, M[0][0] * n + M[0][1] * i, M[1][0] * n + M[1][1] * i, { color: col, width: i ? 1 : 1.6, alpha: a });
+    }
+  };
+  const apply = (M, pts) => pts.map(q => LA.matvec(M, q));
+
+  // ---------- fig: composition AB vs BA ----------
+  {
+    const c30 = Math.cos(Math.PI / 6), s30 = Math.sin(Math.PI / 6);
+    const P = {
+      rot90: ["rotate 90°", [[0, -1], [1, 0]]], rot30: ["rotate 30°", [[c30, -s30], [s30, c30]]],
+      shear: ["shear", [[1, 1], [0, 1]]], scale: ["scale x2, y×0.5", [[2, 0], [0, 0.5]]],
+      scale2: ["scale x×0.5, y2", [[0.5, 0], [0, 2]]], refl: ["reflect in y-axis", [[-1, 0], [0, 1]]], proj: ["project onto x-axis", [[1, 0], [0, 0]]],
+    };
+    const opts = Object.entries(P).map(([k, v]) => [k, v[0]]);
+    let a = "rot90", b = "shear", t = 2;
+    const pAB = new Plot("#fig-comp-ab", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const pBA = new Plot("#fig-comp-ba", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const out = document.getElementById("out-comp");
+    const lerp = (M, s) => [[1 + (M[0][0] - 1) * s, M[0][1] * s], [M[1][0] * s, 1 + (M[1][1] - 1) * s]];
+    // staged matrix: first transform over t in [0,1], second over [1,2]
+    const staged = (first, second) => t <= 1 ? lerp(first, t) : LA.matmul(lerp(second, t - 1), first);
+    const draw = (p, first, second, title, firstName, secondName) => {
+      const M = staged(first, second);
+      p.grid({ step: 1 }); grid2(p, M);
+      p.polygon(F, { color: "muted", fill: "muted", fillAlpha: .08, width: 1, dash: [4, 4] });
+      p.polygon(apply(M, F), { color: "c2", fill: "c2", fillAlpha: .3, width: 2 });
+      p.arrow(0, 0, M[0][0], M[1][0], { color: "c1", width: 3, label: "î" });
+      p.arrow(0, 0, M[0][1], M[1][1], { color: "c4", width: 3, label: "ĵ" });
+      const stage = t === 0 ? "start" : t <= 1 ? `applying ${firstName} first` : t < 2 ? `then ${secondName}` : "done";
+      p.label(8, 14, title, { px: true, bg: true, font: "700 14px sans-serif" });
+      p.label(8, 34, stage, { px: true, bg: true, color: "muted", font: "12px sans-serif" });
+    };
+    const render = () => {
+      const A = P[a][1], B = P[b][1], AB = LA.matmul(A, B), BA = LA.matmul(B, A);
+      pAB.render(p => draw(p, B, A, "AB  (B first, then A)", "B", "A"));
+      pBA.render(p => draw(p, A, B, "BA  (A first, then B)", "A", "B"));
+      const same = AB.every((r, i) => r.every((v, j) => Math.abs(v - BA[i][j]) < 1e-9));
+      out.textContent = `A = ${P[a][0]} = ${mat2(A)}    B = ${P[b][0]} = ${mat2(B)}\nAB = ${mat2(AB)}    BA = ${mat2(BA)}    ` + (same ? "→ these commute: AB = BA" : "→ AB ≠ BA");
+    };
+    select("#ctl-comp", "A ", opts, v => { a = v; render(); });
+    select("#ctl-comp", "B ", opts, v => { b = v; render(); }).value = "shear";
+    slider("#ctl-comp", { label: "t ", min: 0, max: 2, step: 0.02, value: 2 }, v => { t = v; render(); });
+    render();
+  }
+
+  // ---------- fig: four views of matmul ----------
+  {
+    const p = new Plot("#fig-views", { xmin: 0, xmax: 680, ymin: 330, ymax: 0 }); // world = pixels, y down
+    const out = document.getElementById("out-views"), R = Course.rng(11);
+    let A = [[1, 2, 0], [0, 1, -1]], B = [[1, 1], [2, 0], [0, 3]], view = "dot", step = 0;
+    const C = () => LA.matmul(A, B);
+    const nSteps = { dot: 4, col: 2, row: 2, outer: 3 };
+    const cw = 46, ch = 40;
+    const drawM = (M, x0, y0, name, hl, mask) => {
+      const rows = M.length, cols = M[0].length;
+      p.label(x0 + cols * cw / 2, y0 - 16, name, { align: "center", font: "700 15px sans-serif" });
+      for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+        const x = x0 + j * cw, y = y0 + i * ch, h = hl(i, j);
+        p.rect(x, y, x + cw, y + ch, { fill: h || "muted", fillAlpha: h ? .32 : .04, color: "line", width: 1 });
+        const show = !mask || mask(i, j);
+        p.label(x + cw / 2, y + ch / 2, show ? f2(M[i][j]) : "·", { align: "center", font: (h ? "700 " : "") + "15px ui-monospace, monospace", color: show ? "fg" : "muted" });
+      }
+      // brackets
+      const L = x0 - 4, Rr = x0 + cols * cw + 4, T = y0 - 3, Bt = y0 + rows * ch + 3;
+      p.path([[L + 7, T], [L, T], [L, Bt], [L + 7, Bt]], { color: "fg", width: 1.5 });
+      p.path([[Rr - 7, T], [Rr, T], [Rr, Bt], [Rr - 7, Bt]], { color: "fg", width: 1.5 });
+    };
+    const render = () => p.render(p => {
+      const c = C(), k = step - 1, done = step >= nSteps[view];
+      let hA = () => null, hB = () => null, hC = () => null, mask = () => false, Cshow = c, msg = ["Press step to start.", ""];
+      const ax = 70, bx = 280, cxx = 470, y0 = 80;
+      if (view === "dot") {
+        const i = Math.floor(Math.max(k, 0) / 2), j = Math.max(k, 0) % 2;
+        if (k >= 0) {
+          hA = (r) => r === i ? "c1" : null; hB = (_, cc) => cc === j ? "c2" : null; hC = (r, cc) => r === i && cc === j ? "c3" : null;
+          msg = [`C[${i + 1}][${j + 1}] = (row ${i + 1} of A) · (column ${j + 1} of B)`, `       = ` + A[i].map((v, q) => `(${v})(${B[q][j]})`).join(" + ") + ` = ${c[i][j]}`];
+        }
+        mask = (r, cc) => r * 2 + cc <= k;
+      } else if (view === "col") {
+        if (k >= 0) {
+          hB = (_, cc) => cc === k ? "c2" : null; hC = (_, cc) => cc === k ? "c3" : null; hA = () => "c1";
+          msg = [`column ${k + 1} of C = A · (column ${k + 1} of B), a combination of A's columns:`, `   ` + B.map((r, q) => `(${r[k]})·a${q + 1}`).join(" + ") + ` = (${c[0][k]}, ${c[1][k]})`];
+        }
+        mask = (_, cc) => cc <= k;
+      } else if (view === "row") {
+        if (k >= 0) {
+          hA = (r) => r === k ? "c1" : null; hB = () => "c2"; hC = (r) => r === k ? "c3" : null;
+          msg = [`row ${k + 1} of C = (row ${k + 1} of A) · B, a combination of B's rows:`, `   ` + A[k].map((v, q) => `(${v})·B[${q + 1}]`).join(" + ") + ` = (${c[k][0]}, ${c[k][1]})`];
+        }
+        mask = (r) => r <= k;
+      } else {
+        Cshow = [[0, 0], [0, 0]];
+        for (let q = 0; q <= k; q++) for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) Cshow[i][j] += A[i][q] * B[q][j];
+        if (k >= 0) {
+          hA = (_, cc) => cc === k ? "c1" : null; hB = (r) => r === k ? "c2" : null; hC = () => "c3";
+          msg = [`add layer ${k + 1}: (column ${k + 1} of A)(row ${k + 1} of B) = rank-1 [[${A[0][k] * B[k][0]}, ${A[0][k] * B[k][1]}], [${A[1][k] * B[k][0]}, ${A[1][k] * B[k][1]}]]`, done ? "   → all layers added: C is complete" : "   C shows the partial sum so far"];
+        }
+        mask = () => k >= 0;
+      }
+      drawM(A, ax, y0, "A  (2×3)", hA);
+      p.label(ax + 3 * cw + 22, y0 + ch, "×", { align: "center", font: "22px sans-serif" });
+      drawM(B, bx, y0 - 20, "B  (3×2)", hB);
+      p.label(bx + 2 * cw + 50, y0 + ch, "=", { align: "center", font: "22px sans-serif" });
+      drawM(Cshow, cxx + 30, y0, "C = AB  (2×2)", hC, mask);
+      p.label(20, 245, msg[0], { font: "13px ui-monospace, monospace", color: "fg" });
+      p.label(20, 267, msg[1], { font: "13px ui-monospace, monospace", color: "c3" });
+      p.label(20, 305, `step ${step} of ${nSteps[view]}`, { font: "12px sans-serif", color: "muted" });
+      out.textContent = done ? `Finished. C = ${JSON.stringify(c)} by every view.` : "";
+    });
+    select("#ctl-views", "view ", [["dot", "1. dot products"], ["col", "2. column combinations"], ["row", "3. row combinations"], ["outer", "4. sum of outer products"]], v => { view = v; step = 0; render(); });
+    button("#ctl-views", "step ▸", () => { step = step >= nSteps[view] ? 0 : step + 1; render(); });
+    button("#ctl-views", "reset", () => { step = 0; render(); });
+    button("#ctl-views", "new numbers", () => { A = A.map(r => r.map(() => R.int(7) - 3)); B = B.map(r => r.map(() => R.int(7) - 3)); step = 0; render(); });
+    render();
+  }
+
+  // ---------- fig: row picture vs column picture ----------
+  {
+    const pr = new Plot("#fig-row", { xmin: -4, xmax: 4, ymin: -4, ymax: 4, equal: true });
+    const pc = new Plot("#fig-col", { xmin: -3, xmax: 6, ymin: -4.5, ymax: 4.5, equal: true });
+    const a1 = { x: 2, y: 1, color: "c1", snap: 0.25 }, a2 = { x: 1, y: -1, color: "c2", snap: 0.25 }, b = { x: 5, y: 1, color: "c3", snap: 0.25 };
+    const out = document.getElementById("out-sys");
+    // line  u*x + v*y = w
+    const term = (c, v, first) => { if (Math.abs(c) < 1e-12) return ""; const sg = c < 0 ? (first ? "−" : " − ") : (first ? "" : " + "), m = Math.abs(c); return sg + (Math.abs(m - 1) < 1e-12 ? "" : f2(m)) + v; };
+    const eqStr = (u, v, w) => { let s = term(u, "x", true); s += term(v, "y", !s); return (s || "0") + " = " + f2(w); };
+    const eqLine = (p, u, v, w, o) => { const n2 = u * u + v * v; if (n2 < 1e-12) return; p.ray(u * w / n2, v * w / n2, -v, u, o); };
+    pc.draggable([a1, a2, b], () => pr.render()).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const A = [[a1.x, a2.x], [a1.y, a2.y]], d = LA.det2(A);
+      if (Math.abs(d) < 1e-9) {
+        const dir = Math.hypot(a1.x, a1.y) > 1e-9 ? [a1.x, a1.y] : [a2.x, a2.y];
+        p.ray(0, 0, dir[0], dir[1], { color: "c5", width: 7, alpha: .2 });
+        p.label(8, 34, "columns only reach this line", { px: true, color: "c5", bg: true, font: "12px sans-serif" });
+      } else {
+        const [x, y] = LA.matvec(inv2(A), [b.x, b.y]), t1 = [x * a1.x, x * a1.y];
+        p.arrow(0, 0, t1[0], t1[1], { color: "c1", width: 2, alpha: .45, dash: [6, 4] });
+        p.arrow(t1[0], t1[1], b.x, b.y, { color: "c2", width: 2, alpha: .45, dash: [6, 4] });
+        p.label(t1[0], t1[1], `${f2(x)}·a₁`, { color: "c1", dx: 6, dy: 12, font: "12px sans-serif", bg: true });
+      }
+      p.arrow(0, 0, b.x, b.y, { color: "c3", width: 3, label: "b" });
+      p.arrow(0, 0, a1.x, a1.y, { color: "c1", width: 3, label: "a₁" });
+      p.arrow(0, 0, a2.x, a2.y, { color: "c2", width: 3, label: "a₂" });
+      p.label(8, 14, "column picture: x·a₁ + y·a₂ = b", { px: true, bg: true, font: "700 13px sans-serif" });
+      p.drawHandles();
+      pr.render();
+    });
+    pr.render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const A = [[a1.x, a2.x], [a1.y, a2.y]], d = LA.det2(A);
+      eqLine(p, A[0][0], A[0][1], b.x, { color: "c4", width: 2.5 });
+      eqLine(p, A[1][0], A[1][1], b.y, { color: "c6", width: 2.5 });
+      p.label(8, 14, "row picture: one line per equation", { px: true, bg: true, font: "700 13px sans-serif" });
+      p.label(8, 34, eqStr(A[0][0], A[0][1], b.x), { px: true, bg: true, color: "c4", font: "12px ui-monospace, monospace" });
+      p.label(8, 52, eqStr(A[1][0], A[1][1], b.y), { px: true, bg: true, color: "c6", font: "12px ui-monospace, monospace" });
+      let msg;
+      if (Math.abs(d) < 1e-9) {
+        const consistent = Math.abs(a1.x * b.y - a1.y * b.x) < 1e-9 && Math.abs(a2.x * b.y - a2.y * b.x) < 1e-9;
+        msg = consistent ? "det = 0 and b is on the column line → infinitely many solutions (the two lines coincide)" : "det = 0 and b is off the column line → no solution (parallel lines)";
+      } else {
+        const [x, y] = LA.matvec(inv2(A), [b.x, b.y]);
+        p.point(x, y, { r: 6, color: "c3", stroke: "bg" });
+        p.label(x, y, `(${f2(x)}, ${f2(y)})`, { color: "c3", dx: 10, dy: -12, bg: true });
+        msg = `det A = ${f2(d)}   unique solution x = ${f2(x)}, y = ${f2(y)}   check: ${f2(x)}·a₁ + ${f2(y)}·a₂ = (${f2(x * a1.x + y * a2.x)}, ${f2(x * a1.y + y * a2.y)})`;
+      }
+      out.textContent = `A = ${mat2([[a1.x, a2.x], [a1.y, a2.y]])}   b = (${f2(b.x)}, ${f2(b.y)})\n` + msg;
+    });
+  }
+
+  // ---------- fig: Gaussian elimination ----------
+  {
+    const p = new Plot("#fig-gauss", { xmin: 0, xmax: 680, ymin: 300, ymax: 0 });
+    const out = document.getElementById("out-gauss");
+    const systems = {
+      classic: [[2, 1, -1, 8], [-3, -1, 2, -11], [-2, 1, 2, -3]],
+      zero: [[0, 1, 1, 3], [1, 1, 1, 4], [2, 1, 3, 9]],
+      singular: [[1, 2, 3, 6], [2, 4, 6, 12], [1, 1, 1, 3]],
+    };
+    let sys = "classic", pivoting = true, steps = [], idx = 0, anim = null;
+    const fr = v => { const r = Math.round(v * 1000) / 1000; return (Object.is(r, -0) ? 0 : r).toString(); };
+    const build = () => {
+      const M = systems[sys].map(r => r.slice()), n = 3, S = [];
+      const snap = (desc, hl = {}) => S.push({ M: M.map(r => r.slice()), desc, hl });
+      snap("Start: the augmented matrix [A | b].");
+      for (let k = 0; k < n; k++) {
+        let piv = k;
+        if (pivoting) { for (let i = k + 1; i < n; i++) if (Math.abs(M[i][k]) > Math.abs(M[piv][k]) + 1e-12) piv = i; }
+        if (Math.abs(M[piv][k]) < 1e-12) {
+          const rest = M.slice(k).every(r => r.slice(k, n).every(v => Math.abs(v) < 1e-12)), cons = rest && M.slice(k).every(r => Math.abs(r[n]) < 1e-12);
+          snap(pivoting ? `Column ${k + 1}: no non-zero pivot at or below row ${k + 1}. A is singular.` + (rest ? (cons ? "\nLeftover rows read 0 = 0: infinitely many solutions." : "\nA leftover row reads 0 = nonzero: no solution.") : "")
+            : `Column ${k + 1}: pivot is 0 and we may not swap. \nNaive elimination is stuck (try partial pivoting).`, { pivot: [k, k], bad: true });
+          return S;
+        }
+        if (piv !== k) { [M[k], M[piv]] = [M[piv], M[k]]; snap(`Swap R${k + 1} ↔ R${piv + 1}: largest |entry| in column ${k + 1} becomes the pivot.`, { pivot: [k, k], rows: [k, piv] }); }
+        for (let i = k + 1; i < n; i++) {
+          const l = M[i][k] / M[k][k]; if (Math.abs(l) < 1e-12) continue;
+          for (let j = k; j <= n; j++) M[i][j] -= l * M[k][j];
+          M[i][k] = 0;
+          snap(`R${i + 1} ← R${i + 1} − (${fr(l)})·R${k + 1}   (multiplier ℓ = ${fr(M[i][k] + l * M[k][k])}/${fr(M[k][k])})`, { pivot: [k, k], rows: [i] });
+        }
+      }
+      const x = [0, 0, 0], names = ["x", "y", "z"];
+      for (let i = n - 1; i >= 0; i--) {
+        let s = M[i][n]; for (let j = i + 1; j < n; j++) s -= M[i][j] * x[j]; x[i] = s / M[i][i];
+        snap(`Back-substitute row ${i + 1}: ${names[i]} = ${fr(x[i])}`, { pivot: [i, i], sol: x.slice(), solFrom: i });
+      }
+      return S;
+    };
+    const render = () => p.render(p => {
+      const st = steps[idx], M = st.M, cw = 74, ch = 46, x0 = 185, y0 = 40;
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 4; j++) {
+        const x = x0 + j * cw + (j === 3 ? 18 : 0), y = y0 + i * ch;
+        const rowHl = st.hl.rows && st.hl.rows.includes(i), isPiv = st.hl.pivot && st.hl.pivot[0] === i && st.hl.pivot[1] === j;
+        const below = j < 3 && i > j && Math.abs(M[i][j]) < 1e-12;
+        p.rect(x, y, x + cw, y + ch, { fill: rowHl ? "c2" : "muted", fillAlpha: rowHl ? .22 : .04, color: "line", width: 1 });
+        if (isPiv) p.rect(x + 3, y + 3, x + cw - 3, y + ch - 3, { fill: st.hl.bad ? "bad" : "c1", fillAlpha: .12, color: st.hl.bad ? "bad" : "c1", width: 2.5 });
+        p.label(x + cw / 2, y + ch / 2, fr(M[i][j]), { align: "center", font: (isPiv ? "700 " : "") + "16px ui-monospace, monospace", color: below ? "muted" : "fg" });
+      }
+      p.line(x0 + 3 * cw + 9, y0 - 6, x0 + 3 * cw + 9, y0 + 3 * ch + 6, { color: "fg", width: 1.5 });
+      ["x", "y", "z", "b"].forEach((s, j) => p.label(x0 + j * cw + cw / 2 + (j === 3 ? 18 : 0), y0 - 14, s, { align: "center", color: "muted", font: "13px sans-serif" }));
+      for (let i = 0; i < 3; i++) p.label(x0 - 14, y0 + i * ch + ch / 2, "R" + (i + 1), { align: "right", color: "muted", font: "13px sans-serif" });
+      if (st.hl.sol) {
+        const s = ["x", "y", "z"].map((nm, i) => i >= st.hl.solFrom ? `${nm} = ${fr(st.hl.sol[i])}` : `${nm} = ?`).join("     ");
+        p.label(x0 + 2 * cw + 9, y0 + 3 * ch + 40, s, { align: "center", color: "c3", font: "700 16px ui-monospace, monospace" });
+      }
+      st.desc.split("\n").forEach((ln, q) => p.label(20, 262 + q * 21, ln, { font: "14px sans-serif", color: st.hl.bad ? "bad" : "fg" }));
+      out.textContent = `step ${idx} of ${steps.length - 1}`;
+    });
+    const reset = () => { if (anim) anim.stop(); steps = build(); idx = 0; render(); };
+    select("#ctl-gauss", "system ", [["classic", "classic 3×3"], ["zero", "zero pivot"], ["singular", "singular"]], v => { sys = v; reset(); });
+    checkbox("#ctl-gauss", "partial pivoting", true, v => { pivoting = v; reset(); });
+    button("#ctl-gauss", "◂ back", () => { if (idx > 0) idx--; render(); });
+    button("#ctl-gauss", "step ▸", () => { if (idx < steps.length - 1) idx++; render(); });
+    let last = 0;
+    anim = Course.animator(() => { const now = performance.now(); if (now - last > 900) { last = now; if (idx >= steps.length - 1) return false; idx++; render(); } });
+    button("#ctl-gauss", "play", () => { if (idx >= steps.length - 1) idx = 0; last = performance.now(); render(); anim.start(); });
+    button("#ctl-gauss", "reset", reset);
+    reset();
+  }
+
+  // ---------- fig: inverse / singular ----------
+  {
+    const pin = new Plot("#fig-inv-in", { xmin: -4, xmax: 4, ymin: -4, ymax: 4, equal: true });
+    const pout = new Plot("#fig-inv-out", { xmin: -4, xmax: 4, ymin: -4, ymax: 4, equal: true });
+    const ci = { x: 1.5, y: 0.5, color: "c1", snap: 0.25 }, cj = { x: -0.5, y: 1, color: "c2", snap: 0.25 }, x = { x: 1.5, y: -1.5, color: "c5", snap: 0.25 };
+    const out = document.getElementById("out-inv");
+    const Am = () => [[ci.x, cj.x], [ci.y, cj.y]];
+    const nullDir = A => { // non-zero vector with A n = 0 (A singular), or null
+      if (Math.abs(A[0][0]) + Math.abs(A[0][1]) > 1e-9) return [-A[0][1], A[0][0]];
+      if (Math.abs(A[1][0]) + Math.abs(A[1][1]) > 1e-9) return [-A[1][1], A[1][0]];
+      return null;
+    };
+    pin.draggable([x], () => pout.render()).render(p => {
+      const A = Am(), d = LA.det2(A), sing = Math.abs(d) < 1e-9;
+      p.grid({ step: 1 }).axes({ step: 1 });
+      p.polygon(F, { color: "c2", fill: "c2", fillAlpha: .3, width: 2 });
+      if (!sing) {
+        const back = apply(inv2(A), apply(A, F));
+        p.polygon(back, { color: "c3", fill: false, width: 2.5, dash: [6, 4] });
+        p.label(8, 34, "dashed: A⁻¹(A·F) lands back on F", { px: true, bg: true, color: "c3", font: "12px sans-serif" });
+      } else {
+        const n = nullDir(A);
+        if (n) {
+          p.ray(0, 0, n[0], n[1], { color: "c4", width: 6, alpha: .25 });
+          p.ray(x.x, x.y, n[0], n[1], { color: "c5", width: 1.5, dash: [5, 4] });
+          p.label(8, 34, "pink: null space (crushed to 0)", { px: true, bg: true, color: "c4", font: "12px sans-serif" });
+          p.label(8, 52, "dashed: all inputs that land on Ax", { px: true, bg: true, color: "c5", font: "12px sans-serif" });
+        } else p.label(8, 34, "A = 0: everything is crushed to 0", { px: true, bg: true, color: "c4", font: "12px sans-serif" });
+      }
+      p.label(8, 14, "input space", { px: true, bg: true, font: "700 13px sans-serif" });
+      p.point(x.x, x.y, { r: 4, color: "c5", label: "x" });
+      p.drawHandles();
+    });
+    pout.draggable([ci, cj], () => pin.render()).render(p => {
+      const A = Am(), d = LA.det2(A), sing = Math.abs(d) < 1e-9;
+      p.grid({ step: 1 }).axes({ step: 1 });
+      grid2(p, A, { n: 8 });
+      if (sing && (ci.x || ci.y || cj.x || cj.y)) { const dir = Math.hypot(ci.x, ci.y) > 1e-9 ? [ci.x, ci.y] : [cj.x, cj.y]; p.ray(0, 0, dir[0], dir[1], { color: "c5", width: 7, alpha: .22 }); }
+      p.polygon(apply(A, F), { color: "c2", fill: "c2", fillAlpha: .3, width: 2 });
+      p.arrow(0, 0, ci.x, ci.y, { color: "c1", width: 3, label: "Aî" });
+      p.arrow(0, 0, cj.x, cj.y, { color: "c2", width: 3, label: "Aĵ" });
+      const Ax = LA.matvec(A, [x.x, x.y]);
+      p.point(Ax[0], Ax[1], { r: 6, color: "c5", stroke: "bg", label: "Ax" });
+      p.label(8, 14, "output space (after A)", { px: true, bg: true, font: "700 13px sans-serif" });
+      if (sing) p.label(8, 34, "column space: a line (rank " + ((ci.x || ci.y || cj.x || cj.y) ? 1 : 0) + ")", { px: true, bg: true, color: "c5", font: "12px sans-serif" });
+      p.drawHandles();
+      const n = sing ? nullDir(A) : null;
+      out.textContent = `A = ${mat2(A)}   det A = ${f2(d)}   x = (${f2(x.x)}, ${f2(x.y)})   Ax = (${f2(Ax[0])}, ${f2(Ax[1])})\n` +
+        (sing ? `singular: rank ${n ? 1 : 0}, no inverse.` + (n ? ` Null space = span{(${f2(n[0])}, ${f2(n[1])})}: A·(x + t·n) = Ax for every t.` : "")
+              : `A⁻¹ = ${mat2(inv2(A))}   rank 2, null space = {0}, det A⁻¹ = ${f2(1 / d)}`);
+    });
+    button("#ctl-inv", "make singular", () => { cj.x = ci.x * 0.5; cj.y = ci.y * 0.5; pout.render(); pin.render(); });
+    button("#ctl-inv", "reset", () => { Object.assign(ci, { x: 1.5, y: 0.5 }); Object.assign(cj, { x: -0.5, y: 1 }); pout.render(); pin.render(); });
+    pin.render();
+  }
+
+  // ---------- fig: least squares teaser ----------
+  {
+    const p = new Plot("#fig-ls", { xmin: -1, xmax: 6, ymin: -0.8, ymax: 3.6, equal: true });
+    const a = { x: 2, y: 0.8, color: "c1", snap: 0.1 }, b = { x: 3, y: 2.6, color: "c3", snap: 0.1 };
+    const out = document.getElementById("out-ls");
+    let xs = 0.6;
+    const xIn = slider("#ctl-ls", { label: "x ", min: -1, max: 3, step: 0.01, value: 0.6 }, v => { xs = v; p.render(); });
+    button("#ctl-ls", "jump to x̂", () => { xs = LA.dot([a.x, a.y], [b.x, b.y]) / (LA.dot([a.x, a.y], [a.x, a.y]) || 1); xIn.set(xs); p.render(); });
+    p.draggable([a, b]).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const A = [a.x, a.y], B = [b.x, b.y], aa = LA.dot(A, A) || 1, xh = LA.dot(A, B) / aa;
+      const ph = LA.scale(A, xh), cur = LA.scale(A, xs), err = LA.norm(LA.sub(cur, B)), errh = LA.norm(LA.sub(ph, B));
+      p.ray(0, 0, a.x, a.y, { color: "c1", width: 1.5, dash: [5, 5], alpha: .6 });
+      // right-angle mark at the projection
+      const u = LA.scale(A, 1 / Math.sqrt(aa)), r = LA.sub(B, ph), rn = LA.norm(r);
+      if (rn > 0.15) { const v = LA.scale(r, 0.18 / rn), q = LA.scale(u, 0.18); p.path([[ph[0] + v[0], ph[1] + v[1]], [ph[0] + v[0] + q[0], ph[1] + v[1] + q[1]], [ph[0] + q[0], ph[1] + q[1]]], { color: "muted", width: 1.2 }); }
+      p.line(ph[0], ph[1], b.x, b.y, { color: "muted", width: 1.5, dash: [3, 4] });
+      p.line(cur[0], cur[1], b.x, b.y, { color: "c4", width: 2.5 });
+      p.arrow(0, 0, cur[0], cur[1], { color: "c5", width: 5, alpha: .5 });
+      p.arrow(0, 0, a.x, a.y, { color: "c1", width: 3, label: "a" });
+      p.arrow(0, 0, b.x, b.y, { color: "c3", width: 3, label: "b" });
+      p.point(ph[0], ph[1], { r: 5, color: "fg" });
+      p.label(ph[0], ph[1], "x̂a", { dx: 8, dy: 14, font: "12px sans-serif", bg: true });
+      p.label(cur[0], cur[1], "xa", { color: "c5", dx: -10, dy: -14, align: "right", font: "700 12px sans-serif", bg: true });
+      p.label(8, 14, "column space of A = [a]:  all multiples x·a", { px: true, bg: true, font: "700 13px sans-serif" });
+      p.drawHandles();
+      out.textContent = `x = ${xs.toFixed(2)}   error ‖xa − b‖ = ${err.toFixed(3)}\n` +
+        `best: x̂ = a·b / a·a = ${f2(LA.dot(A, B))} / ${f2(aa)} = ${xh.toFixed(3)}   minimum error = ${errh.toFixed(3)}` + (errh < 1e-6 ? "   (b is in the column space: exact solution!)" : "");
+    });
+  }
+});
+</script>
+</body>
+</html>

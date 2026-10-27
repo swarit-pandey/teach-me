@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Optimizers, initialization & normalization</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="18">
+<main>
+
+<div class="kicker">Part 5 · Deep learning</div>
+<h1>Optimizers, initialization &amp; normalization</h1>
+<p class="lede">Backprop (lesson 17) tells you which way is downhill. It doesn't tell you how big a step to take, where to start, or how to stop signals from dying or blowing up on their way through 100 layers. This lesson covers the engineering that turns "gradient descent works in principle" into "this transformer actually trains": Adam, learning-rate schedules, careful initialization, LayerNorm and residual connections. Every modern LLM uses all five.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Explain why plain SGD struggles in ravines, and how momentum, RMSProp and Adam fix different parts of the problem.</li>
+    <li>Derive Adam's bias correction and the effective step size of momentum.</li>
+    <li>Design a warmup + cosine learning-rate schedule and say why each half exists.</li>
+    <li>Derive Xavier and He initialization from variance propagation (lesson 09).</li>
+    <li>Explain vanishing/exploding gradients as a product of Jacobians, and how LayerNorm and residual connections defeat it.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="sgd">1. The trouble with plain gradient descent</h2>
+<p>Gradient descent, $\theta \leftarrow \theta - \eta\,\nabla L(\theta)$, uses one learning rate for every direction. Lesson 06 showed what goes wrong on an elongated bowl ("ravine") like $L = \tfrac12(x^2 + 50y^2)$. The gradient points mostly across the ravine, not along it. Stability in the steep direction requires $\eta \lt 2/50$. At that step size, progress in the shallow direction shrinks by a factor of only $1 - \eta \approx 0.96$ per step. The number of steps scales with the <b>condition number</b>, the ratio of the largest to smallest curvature (here 50). Real networks have condition numbers in the millions.</p>
+<p>Two more problems show up in practice:</p>
+<ul>
+  <li><b>Noise.</b> We never compute the true gradient. We estimate it from a <b>minibatch</b> of $B$ examples. The estimate is unbiased, but its standard deviation shrinks only like $1/\sqrt{B}$ (lesson 09's CLT).</li>
+  <li><b>Wildly different scales.</b> Different parameters (an embedding row for a rare token versus a LayerNorm gain) see gradients that differ by orders of magnitude. One global $\eta$ is too big for some and too small for others.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="momentum">2. Momentum: a heavy ball</h2>
+<p>Instead of stepping along the current gradient, keep a running <b>velocity</b> and step along that:</p>
+$$\mathbf{v}_t = \beta\,\mathbf{v}_{t-1} + \mathbf{g}_t, \qquad \theta_t = \theta_{t-1} - \eta\,\mathbf{v}_t, \qquad \beta \approx 0.9.$$
+<p>Unroll it: $\mathbf{v}_t = \mathbf{g}_t + \beta\mathbf{g}_{t-1} + \beta^2\mathbf{g}_{t-2} + \cdots$, an exponentially weighted sum of past gradients. Two effects follow:</p>
+<ul>
+  <li><b>Along the ravine</b> the gradients keep pointing the same way, so they add up. With a constant gradient $\mathbf{g}$, $\mathbf{v}\to\mathbf{g}(1 + \beta + \beta^2 + \cdots) = \mathbf{g}/(1-\beta)$. The effective step is $\eta/(1-\beta)$, which is <b>10× larger</b> for $\beta = 0.9$.</li>
+  <li><b>Across the ravine</b> the gradient flips sign every step, so consecutive terms cancel and the zig-zag is damped.</li>
+</ul>
+<p>Physically: a ball with mass rolling in the loss landscape. It builds up speed on consistent slopes and averages out the jitter.</p>
+
+<!-- ============================================================ -->
+<h2 id="adam">3. RMSProp and Adam: a step size per parameter</h2>
+<p><b>RMSProp</b> attacks the scale problem. Keep a running average of the <em>squared</em> gradient, per coordinate, and divide by its square root:</p>
+$$\mathbf{s}_t = \beta_2\mathbf{s}_{t-1} + (1-\beta_2)\,\mathbf{g}_t^2, \qquad \theta_t = \theta_{t-1} - \eta\,\frac{\mathbf{g}_t}{\sqrt{\mathbf{s}_t} + \epsilon}.$$
+<p>(Squares, roots and division are element-wise.) A coordinate whose gradients are typically huge gets a small step, and one with tiny gradients gets a big step. The update has roughly unit size in every direction, so its magnitude is set by $\eta$ alone. In the ravine, the steep and shallow directions are equalized. Problem 9 shows the update is even invariant to rescaling the loss.</p>
+<p><b>Adam</b> (Kingma &amp; Ba, 2014) combines both ideas: momentum for direction, RMSProp for scale.</p>
+$$\begin{aligned}
+\mathbf{m}_t &= \beta_1\mathbf{m}_{t-1} + (1-\beta_1)\,\mathbf{g}_t & \text{(1st moment: mean)}\\
+\mathbf{v}_t &= \beta_2\mathbf{v}_{t-1} + (1-\beta_2)\,\mathbf{g}_t^2 & \text{(2nd moment: uncentred variance)}\\
+\hat{\mathbf{m}}_t &= \mathbf{m}_t/(1-\beta_1^t), \quad \hat{\mathbf{v}}_t = \mathbf{v}_t/(1-\beta_2^t) & \text{(bias correction)}\\
+\theta_t &= \theta_{t-1} - \eta\,\hat{\mathbf{m}}_t/(\sqrt{\hat{\mathbf{v}}_t} + \epsilon)
+\end{aligned}$$
+<p>Defaults: $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$. Typical $\eta$ is $10^{-4}$ to $10^{-3}$ for transformers.</p>
+
+<h3>Deriving the bias correction</h3>
+<p>$\mathbf{m}$ starts at $\mathbf{0}$, so early on it is dragged toward zero. Unroll: $\mathbf{m}_t = (1-\beta_1)\sum_{k=1}^{t}\beta_1^{t-k}\mathbf{g}_k$. If the gradients are drawn from a distribution with mean $\mathbb{E}[\mathbf{g}]$, then by linearity of expectation (lesson 09)</p>
+$$\mathbb{E}[\mathbf{m}_t] = (1-\beta_1)\,\mathbb{E}[\mathbf{g}]\sum_{k=0}^{t-1}\beta_1^k = (1-\beta_1)\frac{1-\beta_1^t}{1-\beta_1}\,\mathbb{E}[\mathbf{g}] = (1-\beta_1^t)\,\mathbb{E}[\mathbf{g}].$$
+<p>So dividing by $1-\beta_1^t$ makes $\hat{\mathbf{m}}_t$ unbiased, and the same argument works for $\mathbf{v}$. The correction matters most for $\mathbf{v}$: with $\beta_2 = 0.999$, the uncorrected $\mathbf{v}$ is about 1000× too small at step 1, which would make the first steps huge.</p>
+
+<div class="example">
+  <div class="label">Worked example: Adam's first steps</div>
+  <p>One parameter, $\eta = 0.01$, gradient $g_1 = 2$. Then $m_1 = 0.1\cdot2 = 0.2$ and $v_1 = 0.001\cdot4 = 0.004$. Corrected: $\hat m_1 = 0.2/0.1 = 2$, $\hat v_1 = 0.004/0.001 = 4$. Step: $0.01\cdot 2/\sqrt4 = 0.01$. <b>The first Adam step has size exactly $\eta$</b>, whatever the gradient's magnitude: it's $\eta\cdot\mathrm{sign}(g)$.</p>
+  <p>Without correction: $0.01\cdot0.2/\sqrt{0.004} = 0.0316$, about $3.16\eta$, and with $\beta_2=0.999$ the inflation persists for hundreds of steps.</p>
+  <p>Second step with $g_2 = -2$: $m_2 = 0.9\cdot0.2 - 0.2 = -0.02$, $\hat m_2 = -0.02/0.19 = -0.105$, $v_2 = 0.999\cdot0.004 + 0.004 = 0.007996$, $\hat v_2 = 0.007996/0.001999 = 4$. Step $= 0.01\cdot0.105/2 \approx 0.0005$. The sign flip is mostly cancelled by momentum.</p>
+</div>
+
+<div class="figure">
+  <canvas id="fig-race" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-race"></div>
+  <div class="readout" id="out-race"></div>
+  <div class="caption"><b>Try it:</b> press <em>race</em>. <span style="color:var(--c1)">SGD</span>, <span style="color:var(--c2)">momentum</span>, <span style="color:var(--c3)">RMSProp</span> and <span style="color:var(--c4)">Adam</span> start from the same point. Click anywhere to restart from there. On the <b>ravine</b>, raise the SGD learning rate past 0.04 and watch it diverge across the steep direction, while the adaptive methods take near-equal steps in both directions. Momentum with $\beta = 0.9$ overshoots wildly across the ravine (it is badly under-damped there); lower $\beta$ to about 0.5 and it calms down. On <b>Rosenbrock</b> (a curved banana-shaped valley with its minimum at (1, 1)), SGD reaches the valley floor and then crawls. Momentum and Adam roll along it. RMSProp with a fixed rate keeps rattling near the end: that's why we decay the learning rate (§5).</div>
+</div>
+
+<div class="callout ml">
+<p>In practice: <b>AdamW</b> (Adam with "decoupled" weight decay: $\theta \leftarrow \theta - \eta\lambda\theta$ applied directly instead of adding $\lambda\theta$ to the gradient) is the default for transformers, including GPT-style models in lessons 24–25. Its memory cost is two extra numbers ($m$, $v$) per parameter. That's why training a 7B model needs far more GPU memory than running it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="minibatch">4. Minibatch noise</h2>
+<p>The full-data loss is an average, $L(\theta) = \frac1N\sum_i \ell_i(\theta)$. A minibatch gradient $\hat{\mathbf{g}} = \frac1B\sum_{i\in\text{batch}}\nabla\ell_i$ is an unbiased estimate of $\nabla L$. If the per-example gradients have covariance $\Sigma$, the estimate has covariance $\Sigma/B$ (lesson 09). So SGD is gradient descent plus noise whose size is $\propto \eta/\sqrt{B}$. Near the minimum the true gradient vanishes but the noise doesn't. With a constant learning rate, SGD ends up jittering around the minimum in a cloud whose size scales with $\eta$.</p>
+
+<div class="figure">
+  <canvas id="fig-noise" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-noise"></div>
+  <div class="readout" id="out-noise"></div>
+  <div class="caption"><b>Try it:</b> fitting $y = wx + b$ to 200 noisy points. The contours are the full-data MSE in $(w, b)$ and the star is the least-squares optimum (lesson 13). Press <em>run</em>. With batch size 200 (full batch) the path is smooth. Drop to $B = 1$ and the path becomes a random walk that never settles. Tick <em>decay lr</em> (the learning rate falls like $1/(1 + t/50)$) and the cloud shrinks onto the optimum. Noise isn't all bad: it helps escape sharp, poorly-generalizing minima.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="schedules">5. Learning-rate schedules: warmup + cosine</h2>
+<p>Nearly every large model is trained with the same shape of schedule:</p>
+$$\eta_t = \begin{cases} \eta_{\max}\cdot\dfrac{t+1}{T_w} & t \lt T_w \quad\text{(linear warmup)}\\[2mm]
+\eta_{\min} + \tfrac12(\eta_{\max} - \eta_{\min})\big(1 + \cos(\pi\,\tfrac{t - T_w}{T - T_w})\big) & t \ge T_w \quad\text{(cosine decay)}\end{cases}$$
+<ul>
+  <li><b>Why decay?</b> From §4: the noise floor scales with $\eta$. Big steps early make fast progress, and small steps late settle into the minimum. Cosine is just a smooth, hyperparameter-free way to go from big to small.</li>
+  <li><b>Why warmup?</b> At step 0 the weights are random, gradients can be large and erratic, and Adam's $\hat{\mathbf{v}}$ is estimated from only a few samples. Taking full-size steps immediately can push the network into a bad region it never recovers from. This is especially true for transformers, where early instability in attention and LayerNorm is common. A few hundred to a few thousand steps of ramp-up avoids it.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-sched" width="680" height="320"></canvas>
+  <div class="controls" id="ctl-sched"></div>
+  <div class="readout" id="out-sched"></div>
+  <div class="caption"><b>Try it:</b> adjust the warmup fraction and the floor $\eta_{\min}/\eta_{\max}$, and drag the step slider to read off $\eta_t$. Faint curves for comparison: a constant rate and the older "step decay" (÷10 at fixed milestones). The cosine spends a long time near $\eta_{\max}$, then falls fastest in the middle and flattens out at the end.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="init">6. Initialization: keeping the signal alive</h2>
+<p>Lesson 16 said "initialize randomly". The <em>scale</em> matters enormously. Consider one unit in a layer with $n$ inputs: $z = \sum_{i=1}^{n} w_i x_i$. Assume the $w_i$ and $x_i$ are independent, $\mathbb{E}[w_i] = 0$, and $\mathrm{Var}(w_i) = \sigma_w^2$. Then by lesson 09 (variances of independent terms add, and $\mathrm{Var}(wx) = \mathbb{E}[w^2]\mathbb{E}[x^2]$ when $\mathbb{E}[w]=0$):</p>
+$$\mathrm{Var}(z) = n\,\sigma_w^2\,\mathbb{E}[x^2].$$
+<p>Each layer multiplies the signal's second moment by $n\sigma_w^2$, or by $n\sigma_w^2/2$ after a ReLU (below). After $L$ layers that factor is raised to the $L$-th power. If it's 0.5, the signal shrinks by $2^{-L}$. If it's 2, it grows by $2^L$. Deep networks need the factor to be <b>exactly 1</b>.</p>
+<ul>
+  <li><b>Linear or tanh (near 0):</b> $\mathbb{E}[x^2] \approx \mathrm{Var}(z_\text{prev})$, so we need $n\sigma_w^2 = 1$: $\sigma_w^2 = 1/n_\text{in}$. The backward pass (lesson 17: $\bar X = \bar Z W^\top$) multiplies gradient variance by $n_\text{out}\sigma_w^2$, so it wants $1/n_\text{out}$. <b>Xavier/Glorot</b> init compromises: $\sigma_w^2 = \dfrac{2}{n_\text{in} + n_\text{out}}$.</li>
+  <li><b>ReLU:</b> $z$ is symmetric about 0, so $\mathrm{relu}(z)$ keeps exactly half of $z$'s second moment: $\mathbb{E}[\mathrm{relu}(z)^2] = \tfrac12\mathrm{Var}(z)$. To compensate, double the variance. That's <b>He/Kaiming</b> init: $\sigma_w^2 = \dfrac{2}{n_\text{in}}$.</li>
+</ul>
+
+<div class="example">
+  <div class="label">Worked example: He init for a 512-wide ReLU layer</div>
+  <p>$n_\text{in} = 512$: $\sigma_w = \sqrt{2/512} = 0.0625$. Suppose the incoming activations have $\mathbb{E}[x^2] = 1$. Then $\mathrm{Var}(z) = 512\cdot0.0625^2\cdot1 = 2$, and after ReLU, $\mathbb{E}[x_\text{next}^2] = 2/2 = 1$. The second moment is preserved, layer after layer.</p>
+  <p>With "standard normal" weights ($\sigma_w = 1$) instead, the factor per layer is $512/2 = 256$. After 10 layers that's $256^{10} \approx 10^{24}$, which overflows float16 in about 4 layers.</p>
+</div>
+
+<div class="figure">
+  <canvas id="fig-hist" width="680" height="230"></canvas>
+  <canvas id="fig-hist-bars" width="680" height="200" style="margin-top:.5rem"></canvas>
+  <div class="controls" id="ctl-hist"></div>
+  <div class="caption"><b>Try it:</b> a 10-layer, 128-wide network runs live in your browser on a batch of Gaussian inputs. Top: a histogram of each layer's activations. Bottom: $\log_{10}$ of the activation std (blue) and of the backward gradient std (pink) per layer. Try std 0.01 with tanh (everything collapses to 0), std 1.0 with tanh (everything saturates at ±1, so gradients die), and Xavier vs He with ReLU (only He stays flat). Then tick <em>LayerNorm</em>: even a terrible init is rescued, because every layer re-standardizes its input.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="vanishing">7. Vanishing and exploding gradients</h2>
+<p>The backward pass makes the same point from the other side. With $\mathbf{h}_\ell = \phi(\mathbf{h}_{\ell-1}W_\ell)$, the chain rule (lesson 07) gives</p>
+$$\frac{\partial L}{\partial \mathbf{h}_0} = \frac{\partial L}{\partial \mathbf{h}_L}\;J_L J_{L-1}\cdots J_1, \qquad J_\ell = \frac{\partial\mathbf{h}_\ell}{\partial\mathbf{h}_{\ell-1}} = \mathrm{diag}(\phi'(\mathbf{z}_\ell))\,W_\ell^\top.$$
+<p>A product of $L$ matrices behaves like a product of $L$ numbers. If the typical stretch factor (roughly the largest singular value, lesson 04) is below 1, the gradient decays exponentially with depth: it <b>vanishes</b>. Above 1, it <b>explodes</b>. Saturated tanh/sigmoid units make it worse, because $\phi'\approx0$ in the flat tails. The early layers then receive essentially no learning signal. Good initialization only puts the factor near 1 <em>at the start</em>. Training can push it away again. Two architectural fixes keep it there.</p>
+
+<!-- ============================================================ -->
+<h2 id="norm">8. Normalization: BatchNorm vs LayerNorm</h2>
+<p>Rather than hoping activations stay well-scaled, <b>force</b> them to. Standardize (subtract mean, divide by std), then let the network re-scale with learned parameters $\gamma, \beta$:</p>
+$$\hat x = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}}, \qquad y = \gamma\odot\hat x + \beta.$$
+<p>The only question is <b>which numbers $\mu$ and $\sigma^2$ are computed over</b>. Take an activation matrix of shape (batch $N$) × (features $D$):</p>
+<table>
+  <tr><th></th><th>BatchNorm (2015)</th><th>LayerNorm (2016)</th></tr>
+  <tr><td>Statistics over</td><td>the <b>batch</b>, per feature (each column)</td><td>the <b>features</b>, per example (each row)</td></tr>
+  <tr><td>Examples interact?</td><td>yes: your output depends on the other examples in the batch</td><td>no: each example (each token) is normalized alone</td></tr>
+  <tr><td>Train vs inference</td><td>different (uses running averages at inference)</td><td>identical</td></tr>
+  <tr><td>Batch size 1, variable-length sequences</td><td>breaks / awkward</td><td>fine</td></tr>
+  <tr><td>Used in</td><td>CNNs for vision</td><td><b>transformers</b> (every GPT), RNNs</td></tr>
+</table>
+
+<div class="figure">
+  <canvas id="fig-norm" width="680" height="290"></canvas>
+  <div class="controls" id="ctl-norm"></div>
+  <div class="readout" id="out-norm"></div>
+  <div class="caption"><b>Try it:</b> the left matrix holds raw activations: rows are examples (or tokens), columns are features. The features have very different offsets and scales. Switch between BatchNorm and LayerNorm. The outlined group is what one mean/variance is computed over. Then shrink the batch to $N = 1$ under BatchNorm: every output becomes 0, because a single example minus its own mean is zero. LayerNorm doesn't care about $N$.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: LayerNorm on one token</div>
+  <p>$\mathbf{x} = (1, 2, 3, 6)$, $\gamma = \mathbf{1}$, $\beta = \mathbf{0}$. Mean $\mu = 12/4 = 3$. Variance $\sigma^2 = \tfrac14(4 + 1 + 0 + 9) = 3.5$, so $\sigma = 1.871$. Output: $(1-3, 2-3, 3-3, 6-3)/1.871 = (-1.069, -0.535, 0, 1.604)$. It has mean 0 and variance 1 whatever the scale of $\mathbf{x}$: multiply $\mathbf{x}$ by 1000 and the output is unchanged.</p>
+</div>
+
+<p>Its backward pass is a nice exercise in lesson 07's matrix calculus (problem 6). With $\mathbf{g} = \gamma\odot\partial L/\partial\mathbf{y}$, it comes out as</p>
+$$\frac{\partial L}{\partial \mathbf{x}} = \frac{1}{\sigma}\Big(\mathbf{g} - \operatorname{mean}(\mathbf{g}) - \hat{\mathbf{x}}\,\operatorname{mean}(\mathbf{g}\odot\hat{\mathbf{x}})\Big).$$
+<p>Read it geometrically. The gradient is $\mathbf{g}$ with its component along $\mathbf{1}$ removed (shifting $\mathbf{x}$ doesn't change $\hat{\mathbf{x}}$) and its component along $\hat{\mathbf{x}}$ removed (scaling $\mathbf{x}$ doesn't either). That's two projections, straight out of lesson 01.</p>
+
+<!-- ============================================================ -->
+<h2 id="residual">9. Residual connections: gradient highways</h2>
+<p>A <b>residual</b> (skip) connection computes $\mathbf{h}_\ell = \mathbf{h}_{\ell-1} + F_\ell(\mathbf{h}_{\ell-1})$ instead of $\mathbf{h}_\ell = F_\ell(\mathbf{h}_{\ell-1})$. The layer learns a <em>correction</em> to its input rather than a whole new representation. Its Jacobian is</p>
+$$\frac{\partial\mathbf{h}_\ell}{\partial\mathbf{h}_{\ell-1}} = I + J_{F_\ell} \qquad\Longrightarrow\qquad \frac{\partial L}{\partial \mathbf{h}_0} = \frac{\partial L}{\partial \mathbf{h}_L}\prod_{\ell}(I + J_{F_\ell}).$$
+<p>Expand the product: it contains the term $I$ (the gradient flows straight from the loss to the input untouched), plus all the single $J$ terms, pairs, and so on. Even if every $J_F$ is small, the identity path delivers the gradient intact. In lesson 17's language, the <code>+</code> node <em>distributes</em> the gradient: one copy goes through $F$ and one bypasses it. This is why ResNets could reach 152 layers in 2015, and why every transformer block (lesson 23) is written $\mathbf{x} + \mathrm{Attention}(\mathrm{LN}(\mathbf{x}))$, then $\mathbf{x} + \mathrm{MLP}(\mathrm{LN}(\mathbf{x}))$.</p>
+
+<div class="figure">
+  <canvas id="fig-res" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-res"></div>
+  <div class="readout" id="out-res"></div>
+  <div class="caption"><b>Try it:</b> gradient size at each layer of a deep tanh network, measured by backprop in your browser, relative to the gradient at the output (log scale). With weight scale 0.5, the plain network's gradient (pink) decays exponentially toward the input. The residual network (blue) never drops below the output's gradient. Push the scale to 1.5: the plain net now hovers (tanh saturation keeps it bounded), while the residual sum grows. Keeping residual streams in check is one more job for LayerNorm.</div>
+</div>
+
+<div class="callout key">
+<p>The modern recipe, which you'll use for the GPT in lesson 24: residual connections around every sub-block, LayerNorm before each sub-block ("pre-norm"), small or scaled init on the layers that write into the residual stream, AdamW, and linear warmup into cosine decay.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">10. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>With momentum $\beta = 0.9$ and a constant gradient, by what factor is the terminal step larger than plain SGD's step at the same $\eta$? What about $\beta = 0.99$? Enter both.</p>
+<div class="numcheck" data-answer="10,100" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf{v}\to\mathbf{g}/(1-\beta)$: factor $1/(1-\beta)$, which is 10 and 100. This is why you usually lower $\eta$ when you raise $\beta$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Adam with default $\beta$s sees $g_1 = 1$, then $g_2 = -1$. Compute $\hat m_2$.</p>
+<div class="numcheck" data-answer="-0.0526316" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$m_1 = 0.1$, $m_2 = 0.09 - 0.1 = -0.01$, $\hat m_2 = -0.01/(1 - 0.81) = -0.0526$. And $v_2 = 0.000999 + 0.001 = 0.001999$, $\hat v_2 = 0.001999/0.001999 = 1$, so the step is $+0.0526\,\eta$. The reversal is heavily damped.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">warm-up</span>
+<p>He initialization for a ReLU layer with $n_\text{in} = 1024$: what is the weight standard deviation?</p>
+<div class="numcheck" data-answer="0.0441942" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\sqrt{2/1024} = 0.0442$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>A 10-layer <em>linear</em> network of width 100 is initialized with standard-normal weights ($\sigma_w = 1$). By what factor is the output's variance larger than the input's? Enter $\log_{10}$ of the factor.</p>
+<div class="numcheck" data-answer="20" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Each layer multiplies the variance by $n\sigma_w^2 = 100$. Ten layers give $100^{10} = 10^{20}$. Xavier ($\sigma_w^2 = 1/100$) makes the factor exactly 1.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A run uses $T = 1000$ steps, $T_w = 100$ warmup steps, $\eta_{\max} = 3\times10^{-4}$ and $\eta_{\min} = 3\times10^{-5}$. What is $\eta$ at step 550?</p>
+<div class="numcheck" data-answer="0.000165" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Progress $= (550-100)/900 = 0.5$, so $\cos(\pi/2) = 0$ and $\eta = \eta_{\min} + \tfrac12(\eta_{\max}-\eta_{\min}) = 3\times10^{-5} + 1.35\times10^{-4} = 1.65\times10^{-4}$, the midpoint.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · derivation</span>
+<p>Derive the LayerNorm backward formula in §8. Work with one row $\mathbf{x}\in\mathbb{R}^D$, $\gamma = \mathbf{1}$, $\beta = \mathbf{0}$, $\sigma = \sqrt{\mathrm{var}+\epsilon}$, and upstream gradient $\mathbf{g} = \partial L/\partial\hat{\mathbf{x}}$.</p>
+<details class="hint"><summary>Hint</summary><p>$\hat x_j = (x_j - \mu)/\sigma$ depends on $x_i$ directly (if $i=j$), through $\mu$ ($\partial\mu/\partial x_i = 1/D$), and through $\sigma$ ($\partial\sigma/\partial x_i = (x_i - \mu)/(D\sigma) = \hat x_i/D$).</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\dfrac{\partial\hat x_j}{\partial x_i} = \dfrac{\delta_{ij} - 1/D}{\sigma} - \dfrac{(x_j-\mu)}{\sigma^2}\cdot\dfrac{\hat x_i}{D} = \dfrac1\sigma\Big(\delta_{ij} - \dfrac1D - \dfrac{\hat x_j\hat x_i}{D}\Big)$.</p>
+<p>Then $\dfrac{\partial L}{\partial x_i} = \sum_j g_j\dfrac{\partial\hat x_j}{\partial x_i} = \dfrac1\sigma\Big(g_i - \dfrac1D\sum_j g_j - \hat x_i\,\dfrac1D\sum_j g_j\hat x_j\Big)$, which is the formula. As a matrix, the Jacobian is $\frac1\sigma(I - \frac1D\mathbf{1}\mathbf{1}^\top - \frac1D\hat{\mathbf{x}}\hat{\mathbf{x}}^\top)$. Since $\hat{\mathbf{x}}\perp\mathbf{1}$ and $\|\hat{\mathbf{x}}\|^2 = D$ (up to $\epsilon$), this is $\frac1\sigma$ times a projection matrix (lesson 01).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Why do transformers use LayerNorm rather than BatchNorm? Give two concrete reasons.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(1) Generation runs with a batch of one sequence, one token at a time. BatchNorm's batch statistics are meaningless there and differ from training. (2) Sequences have variable length and padding, so "the batch" of positions mixes real tokens with padding and leaks information across examples. Also, (3) BatchNorm makes one example's output depend on the others in its batch, which complicates causal masking and distributed training. LayerNorm normalizes each token's vector alone and behaves identically at training and inference.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>(a) Show that $\mathbb{E}[\mathrm{relu}(z)^2] = \tfrac12\mathrm{Var}(z)$ for any zero-mean distribution symmetric about 0. (b) A residual network has $L$ blocks, each with Jacobian $I + J_\ell$ where $\|J_\ell\| \le \delta$. Bound the smallest possible gain $\|\prod_\ell(I + J_\ell)\mathbf{u}\|$ for a unit vector $\mathbf{u}$, and compare with a plain network where each $\|J_\ell\|\le\delta \lt 1$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\mathbb{E}[\mathrm{relu}(z)^2] = \mathbb{E}[z^2\mathbb{1}[z>0]]$. By symmetry, $z^2\mathbb{1}[z>0]$ and $z^2\mathbb{1}[z \lt 0]$ have equal expectations, and they sum to $z^2$ (except at $z=0$, which contributes nothing), so each is $\frac12\mathbb{E}[z^2] = \frac12\mathrm{Var}(z)$.</p>
+<p>(b) For each factor, $\|(I+J)\mathbf{v}\| \ge \|\mathbf{v}\| - \|J\mathbf{v}\| \ge (1-\delta)\|\mathbf{v}\|$, so the gain is at least $(1-\delta)^L \approx e^{-L\delta}$. If each residual branch is small, $\delta \lesssim 1/L$, the gradient keeps at least about $e^{-1}$ of its size however deep the network is. For the plain network the gain is at most $\delta^L$: with $\delta = 0.5$ and $L = 30$, that's $10^{-9}$. This is why residual branches are initialized small (GPT-2 scales them by $1/\sqrt{L}$).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">core</span>
+<p>Show that if you multiply the loss by a constant $c > 0$, plain SGD's trajectory changes, but Adam's doesn't (ignoring $\epsilon$).</p>
+<details class="solution"><summary>Solution</summary>
+<p>Every gradient becomes $c\,\mathbf{g}$. SGD's step becomes $c\eta\mathbf{g}$, so it's effectively a different learning rate. For Adam, $\mathbf{m}\to c\mathbf{m}$ and $\mathbf{v}\to c^2\mathbf{v}$, so $\hat{\mathbf{m}}/\sqrt{\hat{\mathbf{v}}}$ is unchanged. That's why Adam learning rates transfer across losses and architectures far better than SGD's. The workbook tests this property for RMSProp.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">11. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">What does Adam's bias correction fix?</div>
+  <div class="opts">
+    <button data-k="a">Noise in minibatch gradients</button>
+    <button data-k="b">The bias parameters b of each layer, which need a different learning rate</button>
+    <button data-k="c">m and v start at 0, so their early values underestimate the gradient's moments by a factor 1 − βᵗ</button>
+    <button data-k="d">The gradient's drift toward large weights (that's weight decay)</button>
+  </div>
+  <div class="explain">E[mₜ] = (1 − β₁ᵗ)E[g]. Dividing by (1 − β₁ᵗ) removes the start-at-zero bias. It matters mostly for the first few hundred steps.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">A deep ReLU network is initialized with Xavier (σ² = 1/n for square layers). What happens to the activations?</div>
+  <div class="opts">
+    <button data-k="a">They stay at constant scale; Xavier is designed for this</button>
+    <button data-k="b">The second moment halves every layer, so they shrink exponentially with depth</button>
+    <button data-k="c">They explode, because ReLU is unbounded</button>
+    <button data-k="d">They become exactly zero after the first layer</button>
+  </div>
+  <div class="explain">ReLU discards half the second moment, so the per-layer factor is n·(1/n)/2 = 1/2. He init (2/n) restores a factor of 1.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">In a transformer, LayerNorm computes its mean and variance over…</div>
+  <div class="opts">
+    <button data-k="a">all tokens in the batch, per feature</button>
+    <button data-k="b">all tokens in the sequence, per feature</button>
+    <button data-k="c">all parameters of the layer</button>
+    <button data-k="d">the feature dimension of each token separately</button>
+  </div>
+  <div class="explain">Each token's d-dimensional vector is standardized on its own. No mixing across tokens or examples, and identical behavior in training and generation.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">Why warm up the learning rate at the start of training?</div>
+  <div class="opts">
+    <button data-k="a">Early gradients and Adam's variance estimates are unreliable; full-size steps can wreck the random initial network</button>
+    <button data-k="b">To make the loss curve look smoother</button>
+    <button data-k="c">Because the cosine schedule is undefined at step 0</button>
+    <button data-k="d">To save compute during the first steps</button>
+  </div>
+  <div class="explain">Warmup is a stability device. Once the network and optimizer statistics have settled, large steps are safe.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">12. Summary</h2>
+<table>
+  <tr><th>Tool</th><th>Formula</th><th>Fixes</th></tr>
+  <tr><td>Momentum</td><td>$\mathbf{v} \leftarrow \beta\mathbf{v} + \mathbf{g}$; $\theta \mathrel{-}= \eta\mathbf{v}$</td><td>zig-zag in ravines; crawl along valleys</td></tr>
+  <tr><td>RMSProp</td><td>$\theta \mathrel{-}= \eta\,\mathbf{g}/\sqrt{\mathbf{s}}$</td><td>per-parameter scale differences</td></tr>
+  <tr><td>Adam(W)</td><td>momentum ÷ RMS, bias-corrected</td><td>both; the default for transformers</td></tr>
+  <tr><td>Warmup + cosine</td><td>linear ramp, then $\tfrac12(1+\cos)$ decay</td><td>early instability; late noise floor</td></tr>
+  <tr><td>Xavier / He</td><td>$\sigma_w^2 = 2/(n_\text{in}+n_\text{out})$ / $2/n_\text{in}$</td><td>exponential shrink/blow-up at init</td></tr>
+  <tr><td>LayerNorm</td><td>standardize each token's features; $\gamma,\beta$</td><td>scale drift during training</td></tr>
+  <tr><td>Residual</td><td>$\mathbf{h} + F(\mathbf{h})$; Jacobian $I + J_F$</td><td>vanishing gradients in deep nets</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 18: build it</h3>
+  <p>Open <code>workbooks/18_optimizers_init_norm/exercises.py</code>. You'll write <code>SGD</code>, <code>Momentum</code>, <code>RMSProp</code> and <code>Adam</code> as in-place optimizer classes and race them on quadratics and Rosenbrock. Tests check Adam's first step is exactly $\eta$, and that RMSProp ignores loss scaling. You'll also write <code>warmup_cosine</code>, Xavier/He init with an activation-scale experiment through 30 layers, LayerNorm forward <em>and</em> backward (gradient-checked), and BatchNorm to compare. Stretch: measure residual connections as gradient highways. Grade yourself with:</p>
+  <pre><code>./course check 18</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Sebastian Ruder, "An overview of gradient descent optimization algorithms" (2016).</li>
+  <li>Kingma &amp; Ba, "Adam: A Method for Stochastic Optimization" (2014); Loshchilov &amp; Hutter, "Decoupled Weight Decay Regularization" (AdamW, 2017).</li>
+  <li>Glorot &amp; Bengio (2010) and He et al., "Delving Deep into Rectifiers" (2015): the init papers.</li>
+  <li>Ba, Kiros &amp; Hinton, "Layer Normalization" (2016); He et al., "Deep Residual Learning" (2015).</li>
+  <li>Gabriel Goh, "Why Momentum Really Works" (Distill, 2017): interactive and beautiful.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, fmt, color, withAlpha } = Course;
+  const checkbox = (host, text, onChange) => { const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.addEventListener("change", () => onChange(cb.checked)); lab.append(cb, " " + text); document.querySelector(host).appendChild(lab); return cb; };
+
+  // ---------- fig: optimizer race ----------
+  {
+    const surfaces = {
+      ravine: { f: (x, y) => 0.5 * (x * x + 50 * y * y), g: (x, y) => [x, 50 * y], view: [-4.2, 4.2, -2.2, 2.2], start: [-3.8, 1.5], lr: 0.03, alr: 0.15, min: [0, 0], steps: 200 },
+      rosen: { f: (x, y) => (1 - x) ** 2 + 100 * (y - x * x) ** 2, g: (x, y) => [-2 * (1 - x) - 400 * x * (y - x * x), 200 * (y - x * x)], view: [-2.1, 2.1, -1, 3.2], start: [-1.5, 2.2], lr: 0.0015, alr: 0.05, min: [1, 1], steps: 600 },
+    };
+    let S = surfaces.ravine, start = S.start.slice(), lr = S.lr, alr = S.alr, beta = 0.9, paths = [], t = 0;
+    const p = new Plot("#fig-race", { xmin: S.view[0], xmax: S.view[1], ymin: S.view[2], ymax: S.view[3] });
+    const out = document.getElementById("out-race");
+    const names = ["SGD", "momentum", "RMSProp", "Adam"], cols = ["c1", "c2", "c3", "c4"];
+    let st;
+    const reset = () => {
+      paths = names.map(() => [start.slice()]); t = 0;
+      st = { v: [0, 0], s: [0, 0], m: [0, 0], va: [0, 0] };
+    };
+    reset();
+    const stepAll = () => {
+      t++;
+      const upd = (k, fn) => { const P = paths[k], q = P[P.length - 1]; if (!isFinite(q[0]) || Math.abs(q[0]) > 1e6) return; P.push(fn(q, S.g(q[0], q[1]))); };
+      upd(0, (q, g) => [q[0] - lr * g[0], q[1] - lr * g[1]]);
+      upd(1, (q, g) => { st.v = st.v.map((v, i) => beta * v + g[i]); return [q[0] - lr * st.v[0], q[1] - lr * st.v[1]]; });
+      upd(2, (q, g) => { st.s = st.s.map((s, i) => 0.99 * s + 0.01 * g[i] * g[i]); return q.map((x, i) => x - alr * g[i] / (Math.sqrt(st.s[i]) + 1e-8)); });
+      upd(3, (q, g) => { st.m = st.m.map((m, i) => 0.9 * m + 0.1 * g[i]); st.va = st.va.map((v, i) => 0.999 * v + 0.001 * g[i] * g[i]);
+        return q.map((x, i) => x - alr * (st.m[i] / (1 - 0.9 ** t)) / (Math.sqrt(st.va[i] / (1 - 0.999 ** t)) + 1e-8)); });
+    };
+    const sel = select("#ctl-race", "surface ", [["ravine", "ravine ½(x² + 50y²)"], ["rosen", "Rosenbrock"]], v => {
+      S = surfaces[v]; p.setView(...S.view); start = S.start.slice(); lr = S.lr; alr = S.alr; lrS.set(Math.log10(lr)); alrS.set(Math.log10(alr)); showLr(); anim.stop(); reset(); p.render();
+    });
+    const lrS = slider("#ctl-race", { label: "log₁₀ lr (SGD, mom.) ", min: -4, max: -0.5, step: 0.05, value: Math.log10(lr), digits: 2 }, v => { lr = 10 ** v; showLr(); anim.stop(); reset(); p.render(); });
+    const alrS = slider("#ctl-race", { label: "log₁₀ lr (RMSProp, Adam) ", min: -3, max: 0, step: 0.05, value: Math.log10(alr), digits: 2 }, v => { alr = 10 ** v; showLr(); anim.stop(); reset(); p.render(); });
+    slider("#ctl-race", { label: "momentum β ", min: 0, max: 0.99, step: 0.01, value: 0.9 }, v => { beta = v; anim.stop(); reset(); p.render(); });
+    const anim = animator(() => { for (let k = 0; k < (S === surfaces.rosen ? 4 : 1); k++) stepAll(); p.render(); return t < S.steps; });
+    button("#ctl-race", "▶ race", () => { reset(); anim.start(); });
+    let lrTxt = ""; const showLr = () => { lrTxt = `lr = ${lr.toPrecision(2)} (SGD, momentum)   ${alr.toPrecision(2)} (RMSProp, Adam)`; };
+    showLr();
+    p.onClick = (x, y) => { start = [x, y]; reset(); anim.start(); };
+    p.render(p => {
+      const f = S.f, lf = (x, y) => Math.log(1 + f(x, y));
+      p.field(lf, { cmap: "seq", res: 6, alpha: .3 });
+      const lv = []; for (let k = -1; k < 12; k++) lv.push(Math.log(1 + 0.05 * 2.2 ** k));
+      p.contour(lf, lv, { color: "muted", width: 1, alpha: .6 });
+      p.point(S.min[0], S.min[1], { r: 6, color: "ok", stroke: "bg" });
+      paths.forEach((P, k) => { const vis = P.filter(q => isFinite(q[0]) && Math.abs(q[0]) < 1e3 && Math.abs(q[1]) < 1e3); p.path(vis, { color: cols[k], width: 2.2, alpha: .9 }); const q = vis[vis.length - 1]; if (q) p.point(q[0], q[1], { r: 5, color: cols[k], stroke: "bg" }); });
+      p.point(start[0], start[1], { r: 5, color: "fg" });
+      names.forEach((n, k) => p.label(12, 18 + 18 * k, "■ " + n, { px: true, color: cols[k], font: "600 12px sans-serif", bg: true }));
+      out.textContent = `step ${t}   ${lrTxt}\n` + names.map((n, k) => { const q = paths[k][paths[k].length - 1], v = f(q[0], q[1]); return `${n.padEnd(9)} loss ${isFinite(v) && v < 1e12 ? v.toExponential(2) : "diverged!"}`; }).join("   ");
+    });
+    reset(); for (let i = 0; i < 60; i++) stepAll(); p.render();
+  }
+
+  // ---------- fig: minibatch noise ----------
+  {
+    const R0 = Course.rng(4), N = 200, xs = [], ys = [];
+    for (let i = 0; i < N; i++) { const x = R0.uniform(-2, 2); xs.push(x); ys.push(1.5 * x + 0.5 + R0.normal(0, 1)); }
+    const mx = xs.reduce((a, b) => a + b) / N, my = ys.reduce((a, b) => a + b) / N;
+    let sxy = 0, sxx = 0; xs.forEach((x, i) => { sxy += (x - mx) * (ys[i] - my); sxx += (x - mx) ** 2; }); const wS = sxy / sxx, bS = my - wS * mx;
+    const loss = (w, b) => xs.reduce((s, x, i) => s + (w * x + b - ys[i]) ** 2, 0) / N;
+    const p = new Plot("#fig-noise", { xmin: -1.2, xmax: 3.6, ymin: -1.8, ymax: 2.4 });
+    const out = document.getElementById("out-noise");
+    let B = 1, lr = 0.05, decay = false, path = [], t = 0, R = Course.rng(9);
+    const reset = () => { path = [[-0.8, -1.5]]; t = 0; R = Course.rng(9); };
+    reset();
+    const step = () => {
+      const [w, b] = path[path.length - 1], eta = decay ? lr / (1 + t / 50) : lr; let gw = 0, gb = 0;
+      for (let k = 0; k < B; k++) { const i = B >= N ? k : R.int(N), r = w * xs[i] + b - ys[i]; gw += 2 * r * xs[i] / B; gb += 2 * r / B; }
+      path.push([w - eta * gw, b - eta * gb]); t++;
+    };
+    const Bs = [1, 2, 4, 8, 16, 32, 64, 200];
+    slider("#ctl-noise", { label: "batch size index ", min: 0, max: 7, step: 1, value: 0, digits: 0 }, v => { B = Bs[v]; bl.textContent = "B = " + B; anim.stop(); reset(); p.render(); });
+    const bl = document.createElement("span"); bl.className = "val"; bl.textContent = "B = 1"; document.getElementById("ctl-noise").appendChild(bl);
+    slider("#ctl-noise", { label: "lr ", min: 0.01, max: 0.2, step: 0.01, value: lr }, v => { lr = v; anim.stop(); reset(); p.render(); });
+    checkbox("#ctl-noise", "decay lr", v => { decay = v; anim.stop(); reset(); p.render(); });
+    const anim = animator(() => { for (let k = 0; k < 2; k++) step(); p.render(); return t < 400; });
+    button("#ctl-noise", "▶ run", () => { reset(); anim.start(); });
+    p.render(p => {
+      p.field((w, b) => Math.log(loss(w, b)), { cmap: "seq", res: 8, alpha: .3 });
+      const L0 = loss(wS, bS); p.contour(loss, [1.05, 1.2, 1.5, 2, 3, 5, 8, 12].map(k => L0 * k), { color: "muted", width: 1, alpha: .7 });
+      p.grid({ step: 1 }).axes({ step: 1, xlabel: "w", ylabel: "b" });
+      p.path(path, { color: "c4", width: 1.5, alpha: .85 });
+      const q = path[path.length - 1]; p.point(q[0], q[1], { r: 5, color: "c4", stroke: "bg" });
+      p.label(wS, bS, "★", { color: "ok", align: "center", font: "20px sans-serif" });
+      const tail = path.slice(-100), d = tail.reduce((s, r) => s + Math.hypot(r[0] - wS, r[1] - bS), 0) / tail.length;
+      out.textContent = `step ${t}   B = ${B}   lr ${decay ? "decaying from " : ""}${lr.toFixed(2)}   loss ${loss(q[0], q[1]).toFixed(4)} (optimum ${L0.toFixed(4)})\nmean distance from optimum over the last ${tail.length} steps: ${d.toFixed(3)}`;
+    });
+    reset(); for (let i = 0; i < 400; i++) step(); p.render();
+  }
+
+  // ---------- fig: schedules ----------
+  {
+    const p = new Plot("#fig-sched", { xmin: -40, xmax: 1060, ymin: -0.08, ymax: 1.12 });
+    const out = document.getElementById("out-sched");
+    let wf = 0.1, floor = 0.1, s = 300; const T = 1000;
+    const wc = t => { const Tw = Math.round(wf * T); if (t < Tw) return (t + 1) / Tw; const pr = (t - Tw) / Math.max(1, T - Tw); return floor + 0.5 * (1 - floor) * (1 + Math.cos(Math.PI * pr)); };
+    slider("#ctl-sched", { label: "warmup fraction ", min: 0, max: 0.4, step: 0.01, value: wf }, v => { wf = v; p.render(); });
+    slider("#ctl-sched", { label: "η_min / η_max ", min: 0, max: 0.5, step: 0.01, value: floor }, v => { floor = v; p.render(); });
+    slider("#ctl-sched", { label: "step t ", min: 0, max: 999, step: 1, value: s }, v => { s = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 100, stepY: 0.25 }).axes({ step: 200, stepY: 0.25 });
+      p.line(0, 1, T, 1, { color: "muted", width: 1.5, dash: [5, 5], alpha: .7 });
+      p.fn(t => (t < 0 || t > T ? NaN : t < 600 ? 1 : t < 850 ? 0.1 : 0.01), { color: "c3", width: 1.5, alpha: .55, samples: 1000 });
+      p.fn(t => (t < 0 || t > T ? NaN : wc(Math.floor(t))), { color: "c1", width: 3, samples: 1000 });
+      p.line(s, 0, s, wc(s), { color: "c4", dash: [3, 3], width: 1.5 }); p.point(s, wc(s), { r: 6, color: "c4" });
+      p.label(10, 16, "η_t / η_max   — warmup+cosine (blue), constant (dashed), step decay (green)", { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      out.textContent = `T = ${T}, warmup T_w = ${Math.round(wf * T)}:   η_${s} = ${wc(s).toFixed(4)} × η_max`;
+    });
+  }
+
+  // ---------- fig: activation histograms through depth ----------
+  {
+    const H = new Plot("#fig-hist", { xmin: 0, xmax: 680, ymin: 0, ymax: 230 });
+    const Bp = new Plot("#fig-hist-bars", { xmin: -0.3, xmax: 10.3, ymin: -6, ymax: 2 });
+    let init = "small", act = "tanh", ln = false; const depth = 10, width = 128, batch = 128;
+    select("#ctl-hist", "init ", [["small", "std 0.01"], ["xavier", "Xavier"], ["he", "He"], ["large", "std 1.0"]], v => { init = v; run(); });
+    select("#ctl-hist", "activation ", [["tanh", "tanh"], ["relu", "ReLU"]], v => { act = v; run(); });
+    checkbox("#ctl-hist", "LayerNorm before each activation", v => { ln = v; run(); });
+    const std = a => { let m = 0; for (const v of a) m += v; m /= a.length; let s = 0; for (const v of a) s += (v - m) ** 2; return Math.sqrt(s / a.length); };
+    const run = () => {
+      const R = Course.rng(11), sd = init === "small" ? 0.01 : init === "large" ? 1 : init === "xavier" ? Math.sqrt(1 / width) : Math.sqrt(2 / width);
+      let h = new Float64Array(batch * width).map(() => R.normal());
+      const Ws = [], Zs = [], Hs = [h], rs = [];
+      for (let l = 0; l < depth; l++) {
+        const W = new Float64Array(width * width).map(() => R.normal(0, sd)), z = new Float64Array(batch * width);
+        for (let i = 0; i < batch; i++) for (let k = 0; k < width; k++) { const hik = h[i * width + k]; if (hik === 0) continue; const row = k * width; for (let j = 0; j < width; j++) z[i * width + j] += hik * W[row + j]; }
+        let zn = z, rstd = null;
+        if (ln) { zn = new Float64Array(z.length); rstd = new Float64Array(batch); for (let i = 0; i < batch; i++) { let m = 0, v = 0; for (let j = 0; j < width; j++) m += z[i * width + j]; m /= width; for (let j = 0; j < width; j++) v += (z[i * width + j] - m) ** 2; rstd[i] = 1 / Math.sqrt(v / width + 1e-5); for (let j = 0; j < width; j++) zn[i * width + j] = (z[i * width + j] - m) * rstd[i]; } }
+        const a = zn.map(v => act === "tanh" ? Math.tanh(v) : Math.max(0, v));
+        Ws.push(W); Zs.push(zn); rs.push(rstd); Hs.push(a); h = a;
+      }
+      // backward of L = sum(h_L * r)
+      const R2 = Course.rng(12); let g = new Float64Array(batch * width).map(() => R2.normal()); const gstd = new Array(depth);
+      for (let l = depth - 1; l >= 0; l--) {
+        const zn = Zs[l], a = Hs[l + 1]; let gz = g.map((v, idx) => v * (act === "tanh" ? 1 - a[idx] * a[idx] : (zn[idx] > 0 ? 1 : 0)));
+        if (ln) { const xh = zn, out2 = new Float64Array(gz.length); for (let i = 0; i < batch; i++) { let mg = 0, mgx = 0; for (let j = 0; j < width; j++) { mg += gz[i * width + j]; mgx += gz[i * width + j] * xh[i * width + j]; } mg /= width; mgx /= width; for (let j = 0; j < width; j++) out2[i * width + j] = rs[l][i] * (gz[i * width + j] - mg - xh[i * width + j] * mgx); } gz = out2; }
+        const W = Ws[l], gh = new Float64Array(batch * width);
+        for (let i = 0; i < batch; i++) for (let k = 0; k < width; k++) { let s = 0; const row = k * width; for (let j = 0; j < width; j++) s += gz[i * width + j] * W[row + j]; gh[i * width + k] = s; }
+        gstd[l] = std(gh); g = gh;
+      }
+      const astd = Hs.slice(1).map(std);
+      H.render(H => {
+        const cw = 680 / depth, lo = act === "tanh" ? -1 : 0, hi = act === "tanh" ? 1 : 3, nb = 24;
+        for (let l = 0; l < depth; l++) {
+          const bins = new Array(nb).fill(0), a = Hs[l + 1]; for (const v of a) bins[Math.max(0, Math.min(nb - 1, Math.floor((v - lo) / (hi - lo) * nb)))]++;
+          const mxb = Math.max(...bins), x0 = l * cw + 6, w = cw - 12;
+          bins.forEach((c, k) => { const hgt = 150 * c / mxb; H.rect(x0 + k * w / nb, 30, x0 + (k + 1) * w / nb, 30 + hgt, { fill: "c1", fillAlpha: .7, color: "c1", width: .5 }); });
+          H.line(x0, 30, x0 + w, 30, { color: "axis", width: 1 });
+          H.label(x0 + w / 2, 14, `layer ${l + 1}`, { align: "center", color: "muted", font: "11px sans-serif" });
+          H.label(x0 + w / 2, 200, "σ=" + (astd[l] < 1e-3 ? astd[l].toExponential(0) : astd[l].toFixed(2)), { align: "center", color: "fg", font: "11px monospace" });
+        }
+        H.label(6, 222, `histograms of activations, x-range [${lo}, ${hi}]` + (act === "relu" ? " (the spike at 0 is the ReLU's zeros; values past 3 pile into the last bin)" : ""), { color: "muted", font: "11px sans-serif" });
+      });
+      Bp.render(Bp => {
+        const la = astd.map(v => Math.log10(Math.max(v, 1e-30))), lg = gstd.map(v => Math.log10(Math.max(v, 1e-30)));
+        const lo = Math.min(-2, ...la, ...lg), hi = Math.max(1, ...la, ...lg); Bp.setView(-0.3, 10.3, lo - (hi - lo) * .12, hi + (hi - lo) * .15);
+        Bp.line(-0.3, 0, 10.3, 0, { color: "axis", width: 1 });
+        for (let l = 0; l < depth; l++) { Bp.rect(l + 0.12, 0, l + 0.48, la[l], { fill: "c1", fillAlpha: .75, color: "c1", width: 1 }); Bp.rect(l + 0.52, 0, l + 0.88, lg[l], { fill: "c4", fillAlpha: .75, color: "c4", width: 1 }); }
+        Bp.label(8, 14, `log₁₀ std per layer: activations (blue), gradients (pink).  0 = unit scale.  range ${lo.toFixed(0)} … ${hi.toFixed(0)}`, { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      });
+    };
+    run();
+  }
+
+  // ---------- fig: BatchNorm vs LayerNorm ----------
+  {
+    const p = new Plot("#fig-norm", { xmin: 0, xmax: 680, ymin: 0, ymax: 290 });
+    const out = document.getElementById("out-norm");
+    const R = Course.rng(21), D = 6, Nmax = 6, offs = [5, -3, 0, 12, 1, -8], scl = [1, 4, 0.5, 6, 2, 1];
+    const X = Array.from({ length: Nmax }, (_, i) => Array.from({ length: D }, (_, j) => offs[j] + scl[j] * R.normal() * (1 + 0.6 * i)));
+    let mode = "ln", N = 6;
+    select("#ctl-norm", "normalization ", [["ln", "LayerNorm (rows)"], ["bn", "BatchNorm (columns)"]], v => { mode = v; p.render(); });
+    slider("#ctl-norm", { label: "batch size N ", min: 1, max: 6, step: 1, value: 6 }, v => { N = v; p.render(); });
+    const norm = (vals) => { const m = vals.reduce((a, b) => a + b, 0) / vals.length, v = vals.reduce((a, b) => a + (b - m) ** 2, 0) / vals.length; return vals.map(x => (x - m) / Math.sqrt(v + 1e-5)); };
+    p.render(p => {
+      const Xs = X.slice(0, N), Y = Xs.map(r => r.slice());
+      if (mode === "ln") Xs.forEach((r, i) => Y[i] = norm(r)); else for (let j = 0; j < D; j++) { const c = norm(Xs.map(r => r[j])); c.forEach((v, i) => Y[i][j] = v); }
+      const cell = 38, top = 256, lx = 60, rx = 390;
+      const grid = (M, x0, vmax, title) => {
+        p.heatmap(M, { x0, x1: x0 + D * cell, y0: top - M.length * cell, y1: top, cmap: "div", vmin: -vmax, vmax, values: true, digits: 1, font: "11px ", rowLabels: M.map((_, i) => "ex " + (i + 1)) });
+        p.label(x0 + D * cell / 2, top + 22, title, { align: "center", font: "600 13px sans-serif" });
+        if (mode === "ln") M.forEach((_, i) => p.rect(x0, top - (i + 1) * cell, x0 + D * cell, top - i * cell, { fill: false, stroke: true, color: "c5", width: i === 0 ? 3 : 1.2, fillAlpha: 0 }));
+        else for (let j = 0; j < D; j++) p.rect(x0 + j * cell, top - M.length * cell, x0 + (j + 1) * cell, top, { fill: false, color: "c5", width: j === 0 ? 3 : 1.2, fillAlpha: 0 });
+      };
+      const r1 = M => M.map(r => r.map(v => (Math.abs(v) < 0.05 ? 0 : v)));
+      grid(r1(Xs), lx, 20, "raw activations  (N × D)"); grid(r1(Y), rx, 2.5, mode === "ln" ? "LayerNorm output" : "BatchNorm output");
+      p.label(lx + D * cell + 18, top - N * cell / 2, "→", { align: "center", font: "600 22px sans-serif", color: "muted" });
+      const rowStats = Y.map(r => { const m = r.reduce((a, b) => a + b) / D; return [m, Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / D)]; });
+      out.textContent = (mode === "ln" ? "LayerNorm: each ROW (one example/token) is standardized by its own mean and std.\nrow stats after: " + rowStats.map(([m, s]) => `(μ ${(Math.abs(m) < 0.05 ? 0 : m).toFixed(1)}, σ ${s.toFixed(1)})`).join(" ")
+        : "BatchNorm: each COLUMN (one feature) is standardized over the batch, so every example's output depends on the others.\n" + (N === 1 ? "N = 1: each column has a single value, x − mean(x) = 0, so the output is all zeros. BatchNorm breaks." : "Columns now have mean 0, std 1. Row 1's output changes whenever you change N!"));
+    });
+  }
+
+  // ---------- fig: residual gradient highway ----------
+  {
+    const p = new Plot("#fig-res", { xmin: -2, xmax: 52, ymin: -10, ymax: 3 });
+    const out = document.getElementById("out-res");
+    let depth = 40, scale = 0.5;
+    slider("#ctl-res", { label: "depth ", min: 5, max: 50, step: 1, value: depth }, v => { depth = v; p.render(); });
+    slider("#ctl-res", { label: "weight scale ", min: 0.3, max: 2, step: 0.05, value: scale }, v => { scale = v; p.render(); });
+    const width = 32, batch = 16;
+    const curve = residual => {
+      const R = Course.rng(31), Ws = []; for (let l = 0; l < depth; l++) Ws.push(Array.from({ length: width * width }, () => R.normal(0, scale / Math.sqrt(width))));
+      let h = Array.from({ length: batch * width }, () => R.normal()); const hs = [];
+      for (const W of Ws) { hs.push(h); const t = new Array(batch * width).fill(0); for (let i = 0; i < batch; i++) for (let k = 0; k < width; k++) { const v = h[i * width + k]; for (let j = 0; j < width; j++) t[i * width + j] += v * W[k * width + j]; } h = t.map((z, idx) => (residual ? h[idx] : 0) + Math.tanh(z)); }
+      let g = new Array(batch * width).fill(1); const n0 = Math.sqrt(g.length), norms = [0];
+      for (let l = depth - 1; l >= 0; l--) {
+        const W = Ws[l], hin = hs[l], z = new Array(batch * width).fill(0);
+        for (let i = 0; i < batch; i++) for (let k = 0; k < width; k++) { const v = hin[i * width + k]; for (let j = 0; j < width; j++) z[i * width + j] += v * W[k * width + j]; }
+        const gz = z.map((zz, idx) => (1 - Math.tanh(zz) ** 2) * g[idx]), gn = new Array(batch * width).fill(0);
+        for (let i = 0; i < batch; i++) for (let k = 0; k < width; k++) { let s = 0; for (let j = 0; j < width; j++) s += gz[i * width + j] * W[k * width + j]; gn[i * width + k] = s + (residual ? g[i * width + k] : 0); }
+        g = gn; norms.push(Math.log10(Math.max(1e-30, Math.sqrt(g.reduce((a, b) => a + b * b, 0)) / n0)));
+      }
+      return norms;   // index = layers back from the output
+    };
+    p.render(p => {
+      const a = curve(false), b = curve(true), lo = Math.min(-3, ...a, ...b), hi = Math.max(1, ...a, ...b);
+      p.setView(-depth * .05, depth * 1.04, lo - (hi - lo) * .1, hi + (hi - lo) * .14);
+      p.grid({ step: depth > 25 ? 10 : 5, stepY: Math.ceil((hi - lo) / 6) }).axes({ step: depth > 25 ? 10 : 5, stepY: Math.ceil((hi - lo) / 6) });
+      p.path(a.map((v, i) => [i, v]), { color: "c4", width: 2.5 }); p.path(b.map((v, i) => [i, v]), { color: "c1", width: 2.5 });
+      p.label(10, p.H - 50, "log₁₀ ‖∂L/∂h‖ / ‖∂L/∂h_out‖  vs  layers back from the output", { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      p.label(10, p.H - 32, "■ plain  h ← tanh(hW)", { px: true, color: "c4", font: "600 12px sans-serif", bg: true });
+      p.label(10, p.H - 14, "■ residual  h ← h + tanh(hW)", { px: true, color: "c1", font: "600 12px sans-serif", bg: true });
+      out.textContent = `at the input (${depth} layers back):  plain ${(10 ** a[depth]).toExponential(2)}×   residual ${(10 ** b[depth]).toExponential(2)}×  the output gradient`;
+    });
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tokenization</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="21">
+<main>
+<style>
+  .chips { display: flex; flex-wrap: wrap; gap: 3px; font-family: var(--mono); font-size: .82rem; line-height: 1.2; margin: .4rem 0; }
+  .chip { border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; white-space: pre; display: inline-flex; flex-direction: column; align-items: center; }
+  .chip small { font-size: .62rem; color: var(--muted); }
+  .chip.unk { border-color: var(--bad); color: var(--bad); }
+  .rowlab { font-size: .8rem; color: var(--muted); margin-top: .5rem; }
+  .figure input[type=text] { font: inherit; font-family: var(--mono); font-size: .85rem; width: 100%; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  .mtable { font-family: var(--mono); font-size: .78rem; max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); padding: .4rem .6rem; }
+  .mtable div.new { color: var(--accent); font-weight: 700; }
+  .u8 { display: flex; flex-wrap: wrap; gap: 6px; margin: .5rem 0; }
+  .u8 > div { border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; text-align: center; background: var(--bg); min-width: 46px; }
+  .u8 .g { font-size: 1.3rem; line-height: 1.3; }
+  .u8 .cp { font-family: var(--mono); font-size: .62rem; color: var(--muted); }
+  .u8 .hx { font-family: var(--mono); font-size: .72rem; }
+</style>
+
+<div class="kicker">Part 6 · Transformers</div>
+<h1>Tokenization</h1>
+<p class="lede">A language model never sees text. It sees a list of integers. Tokenization is the step that turns a string into that list, and the choice of tokenizer quietly decides the model's vocabulary size, how long its sequences are, what it finds easy and what it finds bizarrely hard. Byte-pair encoding, the algorithm behind GPT, is about thirty lines of code, and you'll write it.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Compare character, word and subword tokenization by vocabulary size, sequence length and out-of-vocabulary behaviour.</li>
+    <li>Run byte-pair encoding (BPE) training by hand, and encode/decode new text with a learned merge table.</li>
+    <li>Reason about the vocabulary-size trade-off: embedding parameters versus sequence length versus attention cost.</li>
+    <li>Explain byte-level BPE, UTF-8, pre-tokenization, and the strange behaviours they cause (numbers, leading spaces, other languages, letter counting).</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="why">1. Why tokenize at all?</h2>
+<p>Everything a neural network does is arithmetic on vectors. In lesson 20 you fed a model text by giving each <em>character</em> an integer id and looking up a learned <b>embedding vector</b> for each id. That step, string → list of ids, is <b>tokenization</b>. The pieces are <b>tokens</b>, the set of possible pieces is the <b>vocabulary</b>, and its size is $V$.</p>
+<p>The model's whole interface is built around $V$:</p>
+<ul>
+  <li>The input embedding table is a $V \times d$ matrix: one row per token (lesson 20).</li>
+  <li>The output layer produces $V$ logits, turned into a next-token distribution by softmax (lesson 14) and trained with cross-entropy (lesson 11).</li>
+  <li>Everything in between (attention, lesson 22) runs on a sequence of $n$ tokens. Attention compares every token with every other token, so its cost grows like $n^2$.</li>
+</ul>
+<p>So the tokenizer controls two numbers that pull against each other. A larger vocabulary means bigger tables but shorter sequences. A smaller one means tiny tables but long sequences. The rest of this lesson is about where to sit on that dial, and how byte-pair encoding gets there automatically.</p>
+
+<div class="callout intuition">
+<p>Think of a tokenizer as a compression scheme the model has to <em>read</em> in. A good one turns frequent chunks like <code>" the"</code> or <code>"ing"</code> into single symbols, so the model spends its limited context window and compute on meaning rather than on spelling.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="granularity">2. Characters, words, or something in between</h2>
+<p>There are three natural choices.</p>
+<table>
+  <tr><th>Unit</th><th>Vocabulary</th><th>Sequence length</th><th>Unseen input</th></tr>
+  <tr><td>Characters (or bytes)</td><td>tiny: ~100 characters, or exactly 256 bytes</td><td>long: one token per character</td><td>never a problem</td></tr>
+  <tr><td>Words</td><td>huge: English alone has hundreds of thousands of word forms</td><td>short</td><td>a new word, typo or name becomes <code>[UNK]</code>, and its meaning is lost</td></tr>
+  <tr><td>Subwords</td><td>chosen: typically 30k–200k</td><td>medium: about 4 characters per token in English</td><td>rare words are spelled out of smaller known pieces</td></tr>
+</table>
+<p>Subwords get the best of both. Common words are one token. Rare words are split into a few common pieces (<code>"unbeliev" + "ably"</code>). And if the smallest pieces are single bytes, <em>nothing</em> is ever out of vocabulary.</p>
+
+<div class="figure">
+  <div class="controls" id="ctl-gran"></div>
+  <input type="text" id="in-gran" value="The citizens hungered, unbelievably, for tokenizers.">
+  <div id="out-gran"></div>
+  <div class="caption"><b>Try it:</b> pick an example or type your own text. The word tokenizer only knows the ~500 words and symbols in a short Shakespeare excerpt, so anything else becomes <span style="color:var(--bad)">[UNK]</span>. The subword tokenizer was trained on the same excerpt (byte-level BPE with 480 merges, section 3) and can still spell anything. Compare the token counts. Try a typo like "citizzens" or a word in another language.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bpe">3. Byte-pair encoding: learning the vocabulary</h2>
+<p><b>Byte-pair encoding</b> (BPE) started as a 1994 compression algorithm. Sennrich et al. adapted it for machine translation in 2016, and GPT-2 made the byte-level version standard. The idea fits in one sentence: <em>start from single bytes and repeatedly glue together the most frequent adjacent pair.</em></p>
+<p>Concretely, with the text as a list of ids (initially its UTF-8 bytes, ids 0–255):</p>
+<ol>
+  <li>Count every adjacent pair $(a, b)$ in the sequence.</li>
+  <li>Take the most frequent pair. Give it a new id: 256 for the first merge, 257 for the next, and so on. Record the rule $(a, b) \to$ new id in the <b>merge table</b>.</li>
+  <li>Replace every occurrence of $a, b$ in the sequence by the new id, scanning left to right.</li>
+  <li>Repeat until the vocabulary reaches the size you want (or no pair occurs twice).</li>
+</ol>
+<p>The vocabulary is then the 256 bytes plus one token per merge. Each token stands for a fixed byte string: the concatenation of the two tokens it was made from.</p>
+
+<div class="example">
+  <div class="label">Worked example: training</div>
+  <p>Text <code>aaabdaaabac</code>: 11 bytes, written with letters for readability (a = 97, b = 98, c = 99, d = 100).</p>
+  <p><b>Step 1.</b> Pair counts: <code>aa</code>: 4, <code>ab</code>: 2, and <code>bd da ba ac</code>: 1 each. Merge <code>aa</code> → id 256. Scanning left to right, <code>aaa</code> becomes <code>[aa] a</code>, because matches can't overlap. Sequence: <code>[aa] a b d [aa] a b a c</code>, 9 tokens.</p>
+  <p><b>Step 2.</b> Counts: <code>([aa], a)</code>: 2 and <code>(a, b)</code>: 2 tie. We break ties by first appearance, so <code>([aa], a)</code> → 257 = "aaa". Sequence: <code>[aaa] b d [aaa] b a c</code>, 7 tokens.</p>
+  <p><b>Step 3.</b> <code>([aaa], b)</code>: 2 → 258 = "aaab". Sequence: <code>[aaab] d [aaab] a c</code>, 5 tokens.</p>
+  <p><b>Step 4.</b> Every pair now occurs once. Merging a pair that occurs once saves nothing, so we stop. Result: 3 merges, 11 bytes → 5 tokens, a compression ratio of 11/5 = 2.2 bytes per token.</p>
+</div>
+
+<div class="figure">
+  <div class="controls" id="ctl-bpe"></div>
+  <div class="rowlab">Current sequence (each box is one token)</div>
+  <div id="bpe-seq" class="chips"></div>
+  <div class="row">
+    <div><div class="rowlab">Most frequent adjacent pairs</div><canvas id="fig-bpe" width="420" height="260"></canvas></div>
+    <div><div class="rowlab">Merge table (learned in this order)</div><div id="bpe-table" class="mtable"></div></div>
+  </div>
+  <div class="readout" id="out-bpe"></div>
+  <div class="caption"><b>Try it:</b> press <b>Step</b> to run one merge, or <b>Play</b>. The bar chart shows the pair counts <em>before</em> the next merge, and the winning pair is highlighted. Watch the sequence shrink and the merge table grow. In the "low / lower / newest / widest" text, notice that <code>est</code> forms before <code>low</code>: it is shared by "newest" and "widest", so it is more frequent. Each merge shortens the sequence by the number of places it fires, which equals the pair's count unless occurrences overlap (as in <code>aaa</code>).</div>
+</div>
+
+<div class="callout key">
+<p>Every merge shortens the training sequence by the number of (non-overlapping) places it fires, usually its count, which is at least 2. BPE is a greedy compressor: at each step it makes the single merge that shrinks the corpus most. It never looks ahead, and it never undoes a merge.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="encode">4. Encoding and decoding new text</h2>
+<p><b>Decoding</b> is trivial. Look up each id's byte string, concatenate, and decode the bytes as UTF-8. <b>Encoding</b> a new string has one subtlety: you must replay the merges <em>in the order they were learned</em>. Merge 258 (<code>[aaa] b</code>) was learned on a sequence where merges 256 and 257 had already happened, so it can only ever fire on their outputs. The standard procedure is:</p>
+<ol>
+  <li>Start from the bytes of the string.</li>
+  <li>Among the adjacent pairs present, find the one with the <em>lowest</em> merge id (the earliest learned). If no present pair is in the table, stop.</li>
+  <li>Merge it everywhere and go to 2.</li>
+</ol>
+
+<div class="example">
+  <div class="label">Worked example: encoding</div>
+  <p>With the merges from section 3 (256 = aa, 257 = aaa, 258 = aaab), encode <code>daaab</code>:</p>
+  <p><code>d a a a b</code> → the earliest merge present is aa (256) → <code>d [aa] a b</code> → ([aa], a) is 257 → <code>d [aaa] b</code> → ([aaa], b) is 258 → <code>d [aaab]</code>. Two tokens.</p>
+  <p>Now <code>aaaab</code>: <code>a a a a b</code> → aa merges twice, left to right → <code>[aa] [aa] b</code>. No pair of these is in the table, so we stop at three tokens, <em>even though "aaab" is in the vocabulary</em>. BPE encoding is deterministic and greedy. It doesn't search for the shortest tokenization. The same substring can therefore be tokenized differently depending on what surrounds it, which is one source of tokenizer oddities (section 7).</p>
+</div>
+
+<div class="callout warning">
+<p>Applying merges in the wrong order silently produces ids the model never saw in training. With the table (b, c) → 256 learned first and (a, b) → 257 second, the string <code>abc</code> must become <code>a [bc]</code>. Greedily merging <code>ab</code> first would give <code>[ab] c</code>, a sequence that never appeared in training. The workbook has a test for exactly this.</p>
+</div>
+
+<p>Round-tripping is guaranteed. Every merge replaces two tokens with one token whose byte string is their concatenation, so the concatenated bytes of the sequence never change. Hence $\text{decode}(\text{encode}(s)) = s$ for every string (problem 5). The reverse is <em>not</em> true. Many id sequences decode to the same string ("aa"+"a" vs "a"+"aa"), and only one of them is what <code>encode</code> produces.</p>
+
+<!-- ============================================================ -->
+<h2 id="vocab">5. Choosing the vocabulary size</h2>
+<p>More merges means more compression, but with diminishing returns. The first merges capture <code>" t"</code>, <code>"he"</code>, <code>" the"</code> and save a lot. Late merges capture rare words and save little. Meanwhile each extra token costs a row in the embedding table and a column in the output layer.</p>
+
+<div class="figure">
+  <canvas id="fig-vocab" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-vocab"></div>
+  <div class="readout" id="out-vocab"></div>
+  <div id="chips-vocab" class="chips"></div>
+  <div class="caption"><b>Try it:</b> slide the vocabulary size. The <span style="color:var(--c1)">blue</span> curve is compression (UTF-8 bytes per token) on the 6,500 characters the tokenizer was trained on. The <span style="color:var(--c2)">orange</span> curve is the same measure on 1,500 characters it never saw. The gap widens as merges get more specific to the training text: late merges memorize rare words. The sentence below is re-tokenized live, so you can watch pieces fuse into words.</div>
+</div>
+
+<p>The trade-off, with $N$ the number of bytes of text, $r$ the compression ratio (bytes per token) and $d$ the model width:</p>
+$$n = N / r \;\text{tokens}, \qquad \text{embedding params} = V d, \qquad \text{attention cost} \propto n^2 = N^2 / r^2.$$
+<p>Doubling $r$ halves the sequence. That halves the cost of every per-token layer, quarters the attention cost, and doubles how much text fits in a fixed context window. Real models sit at $V$ = 50,257 (GPT-2), about 100k (GPT-4) and about 128k (Llama 3), and get about 4 bytes per token on English. A larger $V$ also makes each softmax over the vocabulary more expensive, and leaves many rare tokens with too few training examples to learn good embeddings.</p>
+
+<div class="example">
+  <div class="label">Worked example: what the embedding table costs</div>
+  <p>GPT-2 small: $V$ = 50,257 and $d$ = 768. The embedding table has $50{,}257 \times 768 = 38{,}597{,}376$ parameters, about 31% of the model's 124M. (GPT-2 reuses the same matrix for the output layer, called <em>weight tying</em>, otherwise it would be 62%.) A byte-level model with $V$ = 256 would need only 196,608 embedding parameters, but its sequences would be about 4× longer, so each context window would hold a quarter of the text.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bytes">6. Byte-level BPE and UTF-8</h2>
+<p>Unicode has about 150,000 assigned characters. If BPE started from characters, its base alphabet would be enormous, or rare characters would become <code>[UNK]</code>. GPT-2's trick is to start from <b>bytes</b>. Any string is first encoded as UTF-8, a variable-length code that uses:</p>
+<table>
+  <tr><th>Code points</th><th>Bytes</th><th>Examples</th></tr>
+  <tr><td>U+0000 – U+007F</td><td>1</td><td>ASCII: <code>a Z 0 ! space newline</code></td></tr>
+  <tr><td>U+0080 – U+07FF</td><td>2</td><td>é, ß, ñ, Cyrillic, Greek, Arabic, Hebrew</td></tr>
+  <tr><td>U+0800 – U+FFFF</td><td>3</td><td>Chinese, Japanese, Hindi (Devanagari), most other scripts</td></tr>
+  <tr><td>U+10000 and up</td><td>4</td><td>emoji, rare CJK, historic scripts</td></tr>
+</table>
+<p>The base vocabulary is exactly the 256 byte values, so every possible string is representable and there is no <code>[UNK]</code> ever. The cost: text that BPE rarely saw in training stays close to raw bytes. A Chinese character is 3 tokens before any merges.</p>
+
+<div class="figure">
+  <div class="controls" id="ctl-u8"></div>
+  <input type="text" id="in-u8" value="naïve café 你好 🙂">
+  <div id="out-u8" class="u8"></div>
+  <div class="readout" id="sum-u8"></div>
+  <div class="caption"><b>Try it:</b> type anything, or pick an example. Each box is one Unicode character: its code point, then its UTF-8 bytes in hex. Box colour shows the byte count (1 = blue, 2 = green, 3 = orange, 4 = pink). Note that 👍🏽 is <em>two</em> code points (thumbs-up plus a skin-tone modifier), 8 bytes in total. A string's "length" depends on whether you count characters, code points, bytes or tokens.</div>
+</div>
+
+<div class="callout warning">
+<p>Because tokens are byte strings, a token boundary can fall in the middle of a multi-byte character. Decoding a <em>single</em> such token gives an invalid byte sequence. That's why <code>decode</code> must use <code>errors="replace"</code> (it shows �), and why streaming chat interfaces sometimes buffer a token or two before printing.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="pretok">7. Pre-tokenization and tokenizer oddities</h2>
+<p>Run plain BPE on raw text and it happily learns tokens like <code>"e "</code> (the end of one word plus the space before the next) or <code>":\n"</code> that straddle words, spaces and punctuation. That wastes vocabulary on accidents. GPT-2 therefore first <b>pre-tokenizes</b>: a regular expression splits the text into chunks (a word with its leading space, a run of digits, a run of punctuation, whitespace), and merges are only allowed <em>inside</em> a chunk. The workbook uses a simplified version of GPT-2's pattern:</p>
+<pre><code>'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+</code></pre>
+<p class="nomath">The <code>" ?"</code> in front of letters is why the space belongs to the <em>following</em> word. The result is one of the most visible quirks of modern tokenizers:</p>
+
+<div class="figure">
+  <div class="controls" id="ctl-odd"></div>
+  <input type="text" id="in-odd" value="the The THE  the">
+  <div id="out-odd"></div>
+  <div class="readout" id="sum-odd"></div>
+  <div class="caption"><b>Try it:</b> click through the examples. Each box is a token, with its id underneath (␣ marks a space, ↵ a newline). This tokenizer is tiny (480 merges on a Shakespeare excerpt), but real tokenizers show the same effects. <code>the</code>, <code>␣the</code>, <code>The</code> and <code>THE</code> get unrelated ids. Numbers are split into arbitrary chunks. Non-English text costs several times more tokens per character.</div>
+</div>
+
+<p>Real tokenizers show the same quirks at scale, and each one leaks into model behaviour:</p>
+<ul>
+  <li><b>Leading spaces and case.</b> <code>"the"</code>, <code>" the"</code>, <code>"The"</code> and <code>" The"</code> are four unrelated ids. The model must learn separately that they mean the same thing. A prompt ending in a trailing space leaves the model in an unusual state, because in training the space was almost always glued to the next word.</li>
+  <li><b>Numbers.</b> GPT-2 tokenized digit strings by frequency, so <code>"1234"</code> and <code>"1235"</code> might split as <code>12|34</code> and <code>123|5</code>. Digit columns then don't line up, which makes arithmetic harder. Newer tokenizers split numbers into single digits or into groups of three.</li>
+  <li><b>Spelling.</b> The model sees <code>" strawberry"</code> as one or two ids, not ten letters. "How many r's are in strawberry?" asks about information the model never directly saw. It has to have memorized each token's spelling.</li>
+  <li><b>Other languages.</b> A tokenizer trained mostly on English compresses other languages poorly. The same sentence can take 2–10× more tokens in Hindi or Burmese than in English. That means a shorter effective context, slower generation and a higher price per word, sometimes called the "token tax".</li>
+  <li><b>Glitch tokens.</b> If the tokenizer's training data differs from the model's, some tokens (GPT-2's famous <code>" SolidGoldMagikarp"</code>, a Reddit username) almost never appear in model training. Their embeddings stay near random, and prompting with them produced bizarre output.</li>
+</ul>
+
+<div class="callout ml">
+<p>In lesson 24 you'll train a GPT at character level ($V$ = 65) because it's simple and the vocabulary is tiny. Every production LLM uses byte-level BPE or a close cousin (SentencePiece's BPE/unigram). Tokenization also matters for RL fine-tuning (lessons 28–29). Rewards, KL penalties and log-probabilities are all computed per token. So "the policy's probability of this answer" means a product over the tokenizer's pieces, not over words.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+<p>Use pencil and paper for the hand-simulations. That is where BPE stops being magic.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>How many bytes does the string <code>naïve 🙂</code> take in UTF-8? (There is one space.)</p>
+<div class="numcheck" data-answer="11"></div>
+<details class="solution"><summary>Solution</summary>
+<p>n, a, v, e and the space are ASCII, 1 byte each: 5 bytes. ï is U+00EF, in the 2-byte range. 🙂 is U+1F642, above U+FFFF, so 4 bytes. Total 5 + 2 + 4 = 11 bytes for 7 characters.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Run two BPE merges (no pre-tokenization, ties broken by first appearance) on <code>abababcab</code>. Which two merges are learned, and how many tokens remain?</p>
+<div class="numcheck" data-answer="4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Pairs: <code>ab</code> ×4, <code>ba</code> ×2, <code>bc</code>, <code>ca</code> ×1. Merge ab → X: <code>X X X c X</code> (5 tokens). Now <code>XX</code> occurs twice (overlapping, counted at positions 1–2 and 2–3), and <code>Xc</code>, <code>cX</code> once. Merge XX → Y. Scanning left to right, the first two X's fuse and the third has no partner: <code>Y X c X</code>, which is <b>4 tokens</b>. Note that a pair's <em>count</em> (2, overlapping) can exceed the number of merges actually made (1, non-overlapping).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Using the merge table from the worked example (256 = aa, 257 = aaa, 258 = aaab), encode <code>baaabaaaab</code>. How many tokens do you get?</p>
+<div class="numcheck" data-answer="5"></div>
+<details class="hint"><summary>Hint</summary><p>Always apply the earliest-learned merge that is present, everywhere at once, left to right. Then look again.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p><code>b a a a b a a a a b</code>. Merge aa everywhere (left to right): <code>b [aa] a b [aa] [aa] b</code>. Now ([aa], a) is present once: <code>b [aaa] b [aa] [aa] b</code>. Then ([aaa], b): <code>b [aaab] [aa] [aa] b</code>. No pair left is in the table, so we have <b>5 tokens</b>. The second "aaaab" didn't become "a" + "aaab", because aa was already glued from the left.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>A model has vocabulary $V$ = 50,257 and width $d$ = 768. How many parameters are in its token-embedding table? If the output layer is a separate (untied) $d \times V$ matrix, how many parameters do the two together have?</p>
+<p>Enter both, comma-separated:</p>
+<div class="numcheck" data-answer="38597376,77194752"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$50{,}257 \times 768 = 38{,}597{,}376$, and twice that is $77{,}194{,}752$. For a 124M-parameter model, an untied output layer would make the vocabulary account for about 62% of all parameters. That's why small models tie the two matrices.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · proof</span>
+<p>Prove that $\text{decode}(\text{encode}(s)) = s$ for every string $s$ and every merge table produced by training.</p>
+<details class="hint"><summary>Hint</summary><p>Find a quantity that no merge changes: an <em>invariant</em>.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Let $B(t)$ be the byte string a token $t$ stands for, and for a sequence define $B(t_1 \dots t_n) = B(t_1)\Vert\cdots\Vert B(t_n)$ (concatenation). Initially the sequence is the bytes of $s$, so $B = \text{utf8}(s)$. A merge replaces adjacent $a, b$ by $c$ with $B(c) = B(a)\Vert B(b)$ by construction of the vocabulary. Concatenation is associative, so $B$ of the whole sequence is unchanged. By induction over the merges, $B(\text{encode}(s)) = \text{utf8}(s)$. Decoding computes $B$ and then UTF-8-decodes it, which recovers $s$ exactly because $\text{utf8}(s)$ is valid UTF-8. $\blacksquare$</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>You switch a model from byte-level input (1 byte per token) to a BPE tokenizer averaging 4 bytes per token, with the same context window in bytes. By what factor does the cost of computing all attention scores (proportional to $n^2$) fall?</p>
+<div class="numcheck" data-answer="16"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$n$ falls by a factor of 4, so $n^2$ falls by $4^2 = 16$. Per-token costs (embeddings, MLPs) fall by 4. Equivalently, at fixed compute the model can read about 4× more text per window. That is the main reason byte-level LLMs remain a research topic rather than the default.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">stretch · proof</span>
+<p>Show that after $k$ merges no token is longer than $2^k$ bytes, and that this bound is tight. What is the bound for $k = 10$?</p>
+<div class="numcheck" data-answer="1024"></div>
+<details class="hint"><summary>Hint</summary><p>Induction: every new token is two existing tokens glued together. For tightness, try a text made of a single repeated letter.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Let $L_k$ be the longest token length after $k$ merges, with $L_0 = 1$ (single bytes). Merge $k+1$ creates a token $B(a)\Vert B(b)$ whose two parts are each at most $L_k$ long, so $L_{k+1} \le 2L_k$ and therefore $L_k \le 2^k$. For $k = 10$: 1024 bytes.</p>
+<p>Tightness: train on $\texttt{a}$ repeated $2^{k+1}$ times. The first merge is aa (count $2^{k+1}-1$), leaving $2^k$ copies of [aa]. The next merge is [aa][aa], leaving $2^{k-1}$ copies of a 4-byte token, and so on. Each round halves the number of copies and doubles the token length, and after $k$ rounds two copies of a $2^k$-byte token remain. In practice, long tokens come from long repeated strings in the training data: runs of spaces in code, separator lines like <code>----------</code>, boilerplate licences.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · conceptual</span>
+<p>Explain, in terms of tokens, why an LLM that writes fluent essays may fail to (a) count the r's in "strawberry", (b) reverse the string "tokenization", and (c) add two 12-digit numbers reliably. For each, suggest a prompt or tokenizer change that helps.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) "strawberry" arrives as one or a few ids. The letters are not in the input; the model must have learned each token's spelling as a fact. Fix: ask it to spell the word letter by letter first. Then each letter becomes its own token, and the counting runs over visible tokens. (b) Same issue. Reversal has to happen at the character level, while the model's units are multi-character chunks whose internal order it can't see. Spelling it out first also helps. (c) Multi-digit numbers are chunked by frequency, so place values don't line up between operands and the chunking changes with the digits. Fix: tokenizers that split numbers into single digits (or right-aligned groups of three), or prompting the model to write digits with separators.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">Why can a byte-level BPE tokenizer never produce an out-of-vocabulary token?</div>
+  <div class="opts">
+    <button data-k="a">Because its vocabulary includes every word in the training corpus.</button>
+    <button data-k="b">Because unknown words are mapped to a special [UNK] token.</button>
+    <button data-k="c">Because all 256 byte values are in the base vocabulary, and every string is a sequence of bytes.</button>
+    <button data-k="d">Because it falls back to whole-word tokens when merges fail.</button>
+  </div>
+  <div class="explain">In the worst case, a string never seen in training is encoded as raw bytes, one token each. Inefficient, but always representable.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">You double a tokenizer's vocabulary size (retraining BPE with more merges). What is most likely to happen?</div>
+  <div class="opts">
+    <button data-k="a">Sequences get about half as long.</button>
+    <button data-k="b">Sequences get somewhat shorter, the embedding and output layers get twice as big, and rare tokens get fewer training examples each.</button>
+    <button data-k="c">Nothing changes for text the tokenizer has seen before.</button>
+    <button data-k="d">Sequences get longer because there are more tokens to choose from.</button>
+  </div>
+  <div class="explain">Compression has diminishing returns (the curve in section 5 flattens), so the sequence shrinks by much less than half. The table costs, though, scale linearly in $V$.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">In a GPT-2-style tokenizer, why do "dog" and " dog" usually have different ids?</div>
+  <div class="opts">
+    <button data-k="a">Pre-tokenization attaches the leading space to the word, so " dog" is a different byte string that got its own merge.</button>
+    <button data-k="b">Because the model learns case-sensitive embeddings.</button>
+    <button data-k="c">They don't. The tokenizer strips whitespace first.</button>
+    <button data-k="d">Because spaces are encoded as a separate [SPACE] token before each word.</button>
+  </div>
+  <div class="explain">Tokens are byte strings, and the space is byte 32. Mid-sentence words almost always follow a space, so " dog" is the common form and "dog" (sentence start, after a quote or newline) is a separate, rarer token.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Your encoder applies whichever merge appears <em>most often</em> in the new string first, instead of the earliest-learned merge. What goes wrong?</div>
+  <div class="opts">
+    <button data-k="a">Nothing. Merge order only matters during training.</button>
+    <button data-k="b">Decoding fails because some ids are missing from the vocabulary.</button>
+    <button data-k="c">The output is always longer than the input.</button>
+    <button data-k="d">It can produce valid-looking id sequences the model never saw in training, for the same text.</button>
+  </div>
+  <div class="explain">Decoding still round-trips: any merge sequence preserves the bytes. But the model was trained on the canonical tokenization. A different segmentation of the same text is out-of-distribution input.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>What to remember</th></tr>
+  <tr><td>Tokenization</td><td>string → list of ids from a vocabulary of size $V$. It fixes the embedding and output layers' size.</td></tr>
+  <tr><td>BPE training</td><td>start from bytes; repeatedly merge the most frequent adjacent pair into a new id</td></tr>
+  <tr><td>BPE encoding</td><td>replay merges, earliest-learned first; greedy and deterministic</td></tr>
+  <tr><td>Round trip</td><td>$\text{decode}(\text{encode}(s)) = s$, because merges preserve the concatenated bytes</td></tr>
+  <tr><td>Vocab trade-off</td><td>tokens $n = N/r$; embedding params $Vd$; attention $\propto n^2$; compression has diminishing returns</td></tr>
+  <tr><td>Byte-level</td><td>256-byte base alphabet means no [UNK]; UTF-8 uses 1–4 bytes per character</td></tr>
+  <tr><td>Pre-tokenization</td><td>a regex split so merges stay inside words; the source of the leading-space tokens</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 21: build a tokenizer</h3>
+  <p>Open <code>workbooks/21_tokenization/exercises.py</code>. In pure Python you'll write <code>get_pair_counts</code>, <code>merge</code>, <code>train_bpe</code>, <code>build_vocab</code>, <code>encode</code> and <code>decode</code>. Then you'll add GPT-style <code>pretokenize</code> with <code>train_bpe_chunked</code>/<code>encode_chunked</code>, and measure <code>compression_ratio</code>. The tests check the worked example from this page, the round-trip property on random Unicode strings (emoji included), that learned tokens never cross word boundaries, and that compression grows with vocabulary size on Shakespeare.</p>
+  <pre><code>./course check 21</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Sennrich, Haddow &amp; Birch (2016), <em>Neural Machine Translation of Rare Words with Subword Units</em>: BPE for NLP.</li>
+  <li>Radford et al. (2019), <em>Language Models are Unsupervised Multitask Learners</em> (GPT-2): byte-level BPE, section 2.2.</li>
+  <li>Kudo &amp; Richardson (2018), <em>SentencePiece</em>: the tokenizer library behind T5 and Llama.</li>
+  <li>Andrej Karpathy, <em>Let's build the GPT Tokenizer</em> (video) and the <code>minbpe</code> repository.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, fmt, withAlpha } = Course;
+  const CORPUS = "First Citizen:\nBefore we proceed any further, hear me speak.\n\nAll:\nSpeak, speak.\n\nFirst Citizen:\nYou are all resolved rather to die than to famish?\n\nAll:\nResolved. resolved.\n\nFirst Citizen:\nFirst, you know Caius Marcius is chief enemy to the people.\n\nAll:\nWe know't, we know't.\n\nFirst Citizen:\nLet us kill him, and we'll have corn at our own price.\nIs't a verdict?\n\nAll:\nNo more talking on't; let it be done: away, away!\n\nSecond Citizen:\nOne word, good citizens.\n\nFirst Citizen:\nWe are accounted poor citizens, the patricians good.\nWhat authority surfeits on would relieve us: if they\nwould yield us but the superfluity, while it were\nwholesome, we might guess they relieved us humanely;\nbut they think we are too dear: the leanness that\nafflicts us, the object of our misery, is as an\ninventory to particularise their abundance; our\nsufferance is a gain to them Let us revenge this with\nour pikes, ere we become rakes: for the gods know I\nspeak this in hunger for bread, not in thirst for revenge.\n\nSecond Citizen:\nWould you proceed especially against Caius Marcius?\n\nAll:\nAgainst him first: he's a very dog to the commonalty.\n\nSecond Citizen:\nConsider you what services he has done for his country?\n\nFirst Citizen:\nVery well; and could be content to give him good\nreport fort, but that he pays himself with being proud.\n\nSecond Citizen:\nNay, but speak not maliciously.\n\nFirst Citizen:\nI say unto you, what he hath done famously, he did\nit to that end: though soft-conscienced men can be\ncontent to say it was for his country he did it to\nplease his mother and to be partly proud; which he\nis, even till the altitude of his virtue.\n\nSecond Citizen:\nWhat he cannot help in his nature, you account a\nvice in him. You must in no way say he is covetous.\n\nFirst Citizen:\nIf I must not, I need not be barren of accusations;\nhe hath faults, with surplus, to tire in repetition.\nWhat shouts are these? The other side o' the city\nis risen: why stay we prating here? to the Capitol!\n\nAll:\nCome, come.\n\nFirst Citizen:\nSoft! who comes here?\n\nSecond Citizen:\nWorthy Menenius Agrippa; one that hath always loved\nthe people.\n\nFirst Citizen:\nHe's one honest enough: would all the rest were so!\n\nMENENIUS:\nWhat work's, my countrymen, in hand? where go you\nWith bats and clubs? The matter? speak, I pray you.\n\nFirst Citizen:\nOur business is not unknown to the senate; they have\nhad inkling this fortnight what we intend to do,\nwhich now we'll show 'em in deeds. They say poor\nsuitors have strong breaths: they shall know we\nhave strong arms too.\n\nMENENIUS:\nWhy, masters, my good friends, mine honest neighbours,\nWill you undo yourselves?\n\nFirst Citizen:\nWe cannot, sir, we are undone already.\n\nMENENIUS:\nI tell you, friends, most charitable care\nHave the patricians of you. For your wants,\nYour suffering in this dearth, you may as well\nStrike at the heaven with your staves as lift them\nAgainst the Roman state, whose course will on\nThe way it takes, cracking ten thousand curbs\nOf more strong link asunder than can ever\nAppear in your impediment. For the dearth,\nThe gods, not the patricians, make it, and\nYour knees to them, not arms, must help. Alack,\nYou are transported by calamity\nThither where more attends you, and you slander\nThe helms o' the state, who care for you like fathers,\nWhen you curse them as enemies.\n\nFirst Citizen:\nCare for us! True, indeed! They ne'er cared for us\nyet: suffer us to famish, and their store-houses\ncrammed with grain; make edicts for usury, to\nsupport usurers; repeal daily any wholesome act\nestablished against the rich, and provide more\npiercing statutes daily, to chain up and restrain\nthe poor. If the wars eat us not up, they will; and\nthere's all the love they bear us.\n\nMENENIUS:\nEither you must\nConfess yourselves wondrous malicious,\nOr be accused of folly. I shall tell you\nA pretty tale: it may be you have heard it;\nBut, since it serves my purpose, I will venture\nTo stale 't a little more.\n\nFirst Citizen:\nWell, I'll hear it, sir: yet you must not think to\nfob off our disgrace with a tale: but, an 't please\nyou, deliver.\n\nMENENIUS:\nThere was a time when all the body's members\nRebell'd against the belly, thus accused it:\nThat only like a gulf it did remain\nI' the midst o' the body, idle and unactive,\nStill cupboarding the viand, never bearing\nLike labour with the rest, where the other instruments\nDid see and hear, devise, instruct, walk, feel,\nAnd, mutually participate, did minister\nUnto the appetite and affection common\nOf the whole body. The belly answer'd--\n\nFirst Citizen:\nWell, sir, what answer made the belly?\n\nMENENIUS:\nSir, I shall tell you. With a kind of smile,\nWhich ne'er came from the lungs, but even thus--\nFor, look you, I may make the belly smile\nAs well as speak--it tauntingly replied\nTo the discontented members, the mutinous parts\nThat envied his receipt; even so most fitly\nAs you malign our senators for that\nThey are not such as you.\n\nFirst Citizen:\nYour belly's answer? What!\nThe kingly-crowned head, the vigilant eye,\nThe counsellor heart, the arm our soldier,\nOur steed the leg, the tongue our trumpeter.\nWith other muniments and petty helps\nIn this our fabric, if that they--\n\nMENENIUS:\nWhat then?\n'Fore me, this fellow speaks! What then? what then?\n\nFirst Citizen:\nShould by the cormorant belly be restrain'd,\nWho is the sink o' the body,--\n\nMENENIUS:\nWell, what then?\n\nFirst Citizen:\nThe former agents, if they did complain,\nWhat could the belly answer?\n\nMENENIUS:\nI will tell you\nIf you'll bestow a small--of what you have little--\nPatience awhile, you'll hear the belly's answer.\n\nFirst Citizen:\nYe're long about it.\n\nMENENIUS:\nNote me this, good friend;\nYour most grave belly was deliberate,\nNot rash like his accusers, and thus answer'd:\n'True is it, my incorporate friends,' quoth he,\n'That I receive the general food at first,\nWhich you do live upon; and fit it is,\nBecause I am the store-house and the shop\nOf the whole body: but, if you do remember,\nI send it through the rivers of your blood,\nEven to the court, the heart, to the seat o' the brain;\nAnd, through the cranks and offices of man,\nThe strongest nerves and small inferior veins\nFrom me receive that natural competency\nWhereby they live: and though that all at once,\nYou, my good friends,'--this says the belly, mark me,--\n\nFirst Citizen:\nAy, sir; well, well.\n\nMENENIUS:\n'Though all at once cannot\nSee what I do deliver out to each,\nYet I can make my audit up, that all\nFrom me do back receive the flour of all,\nAnd leave me but the bran.' What say you to't?\n\nFirst Citizen:\nIt was an answer: how apply you this?\n\nMENENIUS:\nThe senators of Rome are this good belly,\nAnd you the mutinous members; for examine\nTheir counsels and their cares, digest things rightly\nTouching the weal o' the common, you shall find\nNo public benefit which you receive\nBut it proceeds or comes from them to you\nAnd no way from yourselves. What do you think,\nYou, the great toe of this assembly?\n\nFirst Citizen:\nI the great toe! why the great toe?\n\nMENENIUS:\nFor that, being one o' the lowest, basest, poorest,\nOf this most wise rebellion, thou go'st foremost:\nThou rascal, that art worst in blood to run,\nLead'st first to win some vantage.\nBut make you ready your stiff bats and clubs:\nRome and her rats are at the point of battle;\nThe one side must have bale.\nHail, noble Marcius!\n\nMARCIUS:\nThanks. What's the matter, you dissentious rogues,\nThat, rubbing the poor itch of your opinion,\nMake yourselves scabs?\n\nFirst Citizen:\nWe have ever your good word.\n\nMARCIUS:\nHe that will give good words to thee will flatter\nBeneath abhorring. What would you have, you curs,\nThat like nor peace nor war? the one affrights you,\nThe other makes you proud. He that trusts to you,\nWhere he should find you lions, finds you hares;\nWhere foxes, geese: you are no surer, no,\nThan is the coal of fire upon the ice,\nOr hailstone in the sun. Your virtue is\nTo make him worthy whose offence subdues him\nAnd curse that justice did it.\nWho deserves greatness\nDeserves your hate; and your affections are";
+  const TRAIN = CORPUS.slice(0, 6500), HELD = CORPUS.slice(6500);
+
+  // ---------- local BPE helpers (mirror workbooks/21_tokenization/solutions.py) ----------
+  const enc = new TextEncoder(), dec = new TextDecoder("utf-8");
+  const bytesOf = s => Array.from(enc.encode(s));
+  const SPLIT = /'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
+  const pretok = s => s.match(SPLIT) || [];
+  const shown = bs => dec.decode(new Uint8Array(bs)).replace(/ /g, "␣").replace(/\n/g, "↵").replace(/\t/g, "⇥");
+  const K = (a, b) => a * 65536 + b;
+  function countPairs(chunks) {
+    const m = new Map();
+    for (const ch of chunks) for (let i = 0; i + 1 < ch.length; i++) { const k = K(ch[i], ch[i + 1]); m.set(k, (m.get(k) || 0) + 1); }
+    return m;
+  }
+  function mergeIds(ids, a, b, c) {
+    const o = [];
+    for (let i = 0; i < ids.length; i++) { if (i + 1 < ids.length && ids[i] === a && ids[i + 1] === b) { o.push(c); i++; } else o.push(ids[i]); }
+    return o;
+  }
+  function bestPair(cnt) { let best = -1, bc = 1; for (const [k, v] of cnt) if (v > bc) { bc = v; best = k; } return [best, bc]; }
+  function train(text, nMerges, chunked = true) {
+    let chunks = (chunked ? pretok(text) : [text]).map(bytesOf);
+    const vocab = []; for (let i = 0; i < 256; i++) vocab.push([i]);
+    const merges = [], rank = new Map(), lens = [chunks.reduce((s, c) => s + c.length, 0)];
+    for (let k = 0; k < nMerges; k++) {
+      const [best, bc] = bestPair(countPairs(chunks)); if (best < 0) break;
+      const a = Math.floor(best / 65536), b = best % 65536, c = 256 + k;
+      merges.push([a, b, bc]); rank.set(best, c); vocab.push(vocab[a].concat(vocab[b]));
+      chunks = chunks.map(ch => mergeIds(ch, a, b, c));
+      lens.push(chunks.reduce((s, ch) => s + ch.length, 0));
+    }
+    return { merges, rank, vocab, lens };
+  }
+  function encodeChunk(s, tok, maxId = Infinity) {
+    let ids = bytesOf(s);
+    while (ids.length >= 2) {
+      let best = -1, br = Infinity;
+      for (let i = 0; i + 1 < ids.length; i++) { const r = tok.rank.get(K(ids[i], ids[i + 1])); if (r !== undefined && r < br && r < maxId) { br = r; best = i; } }
+      if (best < 0) break;
+      ids = mergeIds(ids, ids[best], ids[best + 1], br);
+    }
+    return ids;
+  }
+  const encodeText = (s, tok, maxId) => pretok(s).flatMap(c => encodeChunk(c, tok, maxId));
+  const TOK = train(TRAIN, 480);
+  const PAL = ["c1", "c2", "c3", "c4", "c5", "c6"];
+  function chip(text, i, sub, cls) {
+    const d = document.createElement("span"); d.className = "chip" + (cls ? " " + cls : "");
+    if (!cls) { d.style.background = withAlpha(PAL[i % 6], .16); d.style.borderColor = withAlpha(PAL[i % 6], .55); }
+    d.textContent = text; if (sub !== undefined) { const s = document.createElement("small"); s.textContent = sub; d.appendChild(s); }
+    return d;
+  }
+  function chipRow(host, label, toks) {
+    const l = document.createElement("div"); l.className = "rowlab"; l.textContent = label; host.appendChild(l);
+    const r = document.createElement("div"); r.className = "chips"; toks.forEach(t => r.appendChild(t)); host.appendChild(r);
+  }
+
+  // ---------- fig: granularity ----------
+  {
+    const inp = document.getElementById("in-gran"), out = document.getElementById("out-gran");
+    const WORD = /[\p{L}\p{N}']+|[^\s\p{L}\p{N}']/gu;
+    const known = new Set((TRAIN.match(WORD) || []));
+    const ex = [["The citizens hungered, unbelievably, for tokenizers.", "made-up words"], ["First Citizen: speak, speak!", "in-corpus"], ["The citizzens are hungry", "typo"], ["Les citoyens ont faim.", "French"], ["Price: 1,234,567 pounds", "numbers"]];
+    ex.forEach(([s, t]) => button("#ctl-gran", t, () => { inp.value = s; draw(); }));
+    function draw() {
+      const s = inp.value; out.innerHTML = "";
+      const chars = Array.from(s);
+      chipRow(out, `Characters: ${chars.length} tokens (vocabulary: every character, ~100 for English, 150k for all of Unicode)`, chars.map((c, i) => chip(c === " " ? "␣" : c, i)));
+      const words = s.match(WORD) || []; let unk = 0;
+      chipRow(out, "", words.map((w, i) => known.has(w) ? chip(w, i) : (unk++, chip("[UNK]", i, w, "unk"))));
+      out.children[2].textContent = `Words: ${words.length} tokens, ${unk} unknown (vocabulary: the ${known.size} distinct words and symbols in the excerpt)`;
+      const ids = encodeText(s, TOK);
+      chipRow(out, `Byte-level BPE: ${ids.length} tokens (vocabulary: 256 bytes + ${TOK.merges.length} merges = ${TOK.vocab.length})`, ids.map((id, i) => chip(shown(TOK.vocab[id]), i)));
+    }
+    inp.addEventListener("input", draw); draw();
+  }
+
+  // ---------- fig: BPE step-through ----------
+  {
+    const TEXTS = {
+      classic: ["low low low low low lower lower newest newest newest newest newest newest widest widest widest", true],
+      tiny: ["aaabdaaabac", false],
+      shakes: [CORPUS.slice(0, 230), true],
+    };
+    const seqHost = document.getElementById("bpe-seq"), table = document.getElementById("bpe-table"), out = document.getElementById("out-bpe");
+    const p = new Plot("#fig-bpe", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    let st;
+    function reset(name) {
+      const [text, chunked] = TEXTS[name];
+      st = { chunks: (chunked ? pretok(text) : [text]).map(bytesOf), vocab: Array.from({ length: 256 }, (_, i) => [i]), merges: [], n0: bytesOf(text).length, chunked };
+      draw();
+    }
+    function step() {
+      const [best, bc] = bestPair(countPairs(st.chunks)); if (best < 0) return false;
+      const a = Math.floor(best / 65536), b = best % 65536, c = st.vocab.length;
+      st.vocab.push(st.vocab[a].concat(st.vocab[b])); st.merges.push([a, b, c, bc]);
+      st.chunks = st.chunks.map(ch => mergeIds(ch, a, b, c)); draw(); return true;
+    }
+    function draw() {
+      seqHost.innerHTML = ""; let k = 0;
+      st.chunks.forEach(ch => ch.forEach(id => { const d = chip(shown(st.vocab[id]), id >= 256 ? id : 0); if (id < 256) { d.style.background = "transparent"; d.style.borderColor = "var(--line)"; } seqHost.appendChild(d); k++; }));
+      table.innerHTML = st.merges.length ? "" : "<div style='color:var(--muted)'>(no merges yet)</div>";
+      st.merges.forEach(([a, b, c, n], i) => { const d = document.createElement("div"); d.textContent = `${c}: ${shown(st.vocab[a])} + ${shown(st.vocab[b])} → ${shown(st.vocab[c])}   (×${n})`; if (i === st.merges.length - 1) d.className = "new"; table.appendChild(d); });
+      table.scrollTop = table.scrollHeight;
+      const cnt = [...countPairs(st.chunks)].map(([key, v], order) => [key, v, order]).sort((x, y) => y[1] - x[1] || x[2] - y[2]).slice(0, 8);
+      const [best, bc] = bestPair(countPairs(st.chunks));
+      p.render(p => {
+        const mx = Math.max(2, ...cnt.map(c => c[1])), W = p.W, H = p.H, rowH = (H - 20) / 8;
+        const c = p.ctx;
+        cnt.forEach(([key, v], i) => {
+          const a = Math.floor(key / 65536), b = key % 65536, y = 10 + i * rowH, x0 = 130, w = (W - x0 - 40) * v / mx;
+          const win = key === best;
+          c.fillStyle = withAlpha(win ? "c2" : "c1", win ? .85 : .45); c.fillRect(x0, y + 3, w, rowH - 6);
+          p.label(x0 - 8, y + rowH / 2, `${shown(st.vocab[a])} + ${shown(st.vocab[b])}`, { px: true, align: "right", font: "12px " + getComputedStyle(document.body).getPropertyValue("--mono"), color: win ? "c2" : "fg" });
+          p.label(x0 + w + 6, y + rowH / 2, String(v), { px: true, font: "12px sans-serif", color: "muted" });
+        });
+        if (!cnt.length || bc < 2) p.label(W / 2, H / 2, "no pair occurs twice: training stops", { px: true, align: "center", color: "muted", font: "13px sans-serif" });
+      });
+      const n = st.chunks.reduce((s, ch) => s + ch.length, 0);
+      out.textContent = `merges: ${st.merges.length}   vocabulary: ${256 + st.merges.length}   sequence: ${st.n0} bytes → ${n} tokens   (${fmt(st.n0 / n, 2)} bytes/token)` +
+        (st.merges.length ? `\nlast merge saved ${st.merges[st.merges.length - 1][3]} tokens` : "") + (st.chunked ? "" : "   (no pre-tokenization)");
+    }
+    let cur = "classic";
+    Course.select("#ctl-bpe", "text ", [["classic", "low / lower / newest / widest"], ["tiny", "aaabdaaabac"], ["shakes", "Shakespeare (230 chars)"]], v => { cur = v; anim.stop(); reset(v); });
+    const anim = Course.animator((() => { let t = 0; return () => { if (++t % 30) return true; return step(); }; })());
+    button("#ctl-bpe", "Step", () => { anim.stop(); step(); });
+    button("#ctl-bpe", "Play / pause", () => anim.running ? anim.stop() : anim.start());
+    button("#ctl-bpe", "Reset", () => { anim.stop(); reset(cur); });
+    reset("classic");
+  }
+
+  // ---------- fig: vocab size trade-off ----------
+  {
+    const M = TOK.merges.length, nTrain = bytesOf(TRAIN).length, nHeld = bytesOf(HELD).length;
+    const trainR = TOK.lens.map(L => nTrain / L);
+    const heldR = []; for (let k = 0; k <= M; k += 10) heldR.push([256 + k, nHeld / encodeText(HELD, TOK, 256 + k).length]);
+    if ((M % 10) !== 0) heldR.push([256 + M, nHeld / encodeText(HELD, TOK, 256 + M).length]);
+    const SENT = "Our citizens shall speak against the patricians.";
+    const p = new Plot("#fig-vocab", { xmin: 200, xmax: 256 + M + 30, ymin: 0.55, ymax: 3.2 });
+    let V = 256 + 200;
+    const out = document.getElementById("out-vocab"), chipsHost = document.getElementById("chips-vocab");
+    slider("#ctl-vocab", { label: "vocabulary size V ", min: 256, max: 256 + M, step: 1, value: V, digits: 0 }, v => { V = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 50, stepY: 0.5 });
+      p.line(256, 0.55, 256, 3.2, { color: "axis", width: 1 }); p.line(200, 1, 256 + M + 30, 1, { color: "axis", width: 1, dash: [3, 3] });
+      for (let x = 300; x <= 256 + M; x += 100) p.label(x, 0.55, String(x), { align: "center", dy: -9, color: "muted", font: "11px sans-serif" });
+      for (let y = 1; y <= 3; y += 0.5) p.label(256, y, String(y), { align: "right", dx: -6, color: "muted", font: "11px sans-serif" });
+      p.path(trainR.map((r, k) => [256 + k, r]), { color: "c1", width: 2.5 });
+      p.path(heldR, { color: "c2", width: 2.5 });
+      p.line(V, 0.55, V, 3.2, { color: "muted", dash: [4, 4], width: 1.2 });
+      const tr = trainR[V - 256], ho = nHeld / encodeText(HELD, TOK, V).length;
+      p.point(V, tr, { color: "c1", r: 5 }); p.point(V, ho, { color: "c2", r: 5 });
+      p.label(256 + M, trainR[M], "training text", { color: "c1", align: "right", dy: -14 });
+      p.label(256 + M, heldR[heldR.length - 1][1], "held-out text", { color: "c2", align: "right", dy: 16 });
+      p.label(262, 3.05, "bytes per token (higher = more compression)", { color: "muted", font: "12px sans-serif" });
+      p.label(256 + M + 25, 0.72, "V →", { color: "muted", align: "right", font: "12px sans-serif" });
+      const n = Math.round(nHeld / ho);
+      out.textContent = `V = ${V}: held-out ${nHeld} bytes → ${n} tokens (${fmt(ho, 2)} bytes/token; train ${fmt(tr, 2)})\n` +
+        `embedding table at d = 768: ${(V * 768).toLocaleString()} params    attention cost vs bytes: (1/${fmt(ho, 2)})² = ${fmt(100 / ho / ho, 1)}%`;
+      chipsHost.innerHTML = ""; encodeText(SENT, TOK, V).forEach((id, i) => chipsHost.appendChild(chip(shown(TOK.vocab[id]), i)));
+    });
+  }
+
+  // ---------- fig: UTF-8 ----------
+  {
+    const inp = document.getElementById("in-u8"), out = document.getElementById("out-u8"), sum = document.getElementById("sum-u8");
+    [["naïve café 你好 🙂", "mixed"], ["hello", "ASCII"], ["Привет мир", "Russian"], ["नमस्ते", "Hindi"], ["你好世界", "Chinese"], ["👍🏽🚀", "emoji"]].forEach(([s, t]) => button("#ctl-u8", t, () => { inp.value = s; draw(); }));
+    const col = ["", "c1", "c3", "c2", "c4"];
+    function draw() {
+      out.innerHTML = ""; let nb = 0; const cps = Array.from(inp.value);
+      cps.forEach(ch => {
+        const b = bytesOf(ch); nb += b.length;
+        const d = document.createElement("div"); d.style.borderColor = withAlpha(col[b.length], .9); d.style.background = withAlpha(col[b.length], .1);
+        d.innerHTML = `<div class="g"></div><div class="cp"></div><div class="hx"></div>`;
+        d.children[0].textContent = ch === " " ? "␣" : ch;
+        d.children[1].textContent = "U+" + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+        d.children[2].textContent = b.map(x => x.toString(16).toUpperCase().padStart(2, "0")).join(" ");
+        out.appendChild(d);
+      });
+      const ids = encodeText(inp.value, TOK);
+      sum.textContent = `${cps.length} code points · ${nb} UTF-8 bytes · ${ids.length} tokens with the Shakespeare BPE`;
+    }
+    inp.addEventListener("input", draw); draw();
+  }
+
+  // ---------- fig: oddities ----------
+  {
+    const inp = document.getElementById("in-odd"), out = document.getElementById("out-odd"), sum = document.getElementById("sum-odd");
+    const ex = [["the The THE  the", "case & spaces"], ["1234 1235 2024 12345678", "numbers"], ["strawberry", "spelling"], ["citizen citizens Citizen", "word forms"],
+      ["The people are hungry.", "English"], ["Le peuple a faim.", "French"], ["Народ голоден.", "Russian"], ["लोग भूखे हैं।", "Hindi"]];
+    ex.forEach(([s, t]) => button("#ctl-odd", t, () => { inp.value = s; draw(); }));
+    function draw() {
+      out.innerHTML = ""; const s = inp.value, ids = encodeText(s, TOK), r = document.createElement("div"); r.className = "chips";
+      ids.forEach((id, i) => r.appendChild(chip(shown(TOK.vocab[id]), i, String(id))));
+      out.appendChild(r);
+      const nc = Array.from(s).length;
+      sum.textContent = `${nc} characters · ${bytesOf(s).length} bytes · ${ids.length} tokens · ${nc ? fmt(nc / Math.max(1, ids.length), 2) : 0} characters per token`;
+    }
+    inp.addEventListener("input", draw); draw();
+  }
+});
+</script>
+</body>
+</html>

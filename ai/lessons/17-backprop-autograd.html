@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backprop & building micro-autograd</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="17">
+<main>
+
+<div class="kicker">Part 5 · Deep learning</div>
+<h1>Backprop &amp; building micro-autograd</h1>
+<p class="lede">In lesson 16 you derived a backward pass by hand for one specific network. Do that for a transformer and you'll be at it for weeks, and you'll get it wrong. Backpropagation is the observation that you never have to. Break any computation into tiny pieces whose derivatives you know, then let the chain rule run backwards through the pieces automatically. In this lesson you build the engine that does it: about 100 lines of Python, and the same idea that powers PyTorch.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Draw the computation graph of an expression and run its forward and backward passes by hand.</li>
+    <li>Explain why every node only needs its <em>local</em> derivative, and why the order of the backward pass must be reverse topological.</li>
+    <li>Explain why gradients <em>accumulate</em> (+=) when a value is used more than once.</li>
+    <li>Implement a scalar autograd engine (<code>Value</code>) and train a small neural net with it.</li>
+    <li>Generalize from scalars to tensors using vector–Jacobian products, the way real frameworks do.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="why">1. Why automate the chain rule?</h2>
+<p>Training needs $\nabla_\theta L$, the derivative of one scalar loss with respect to every parameter. There are three ways to get it:</p>
+<table>
+  <tr><th>Method</th><th>How</th><th>Cost for $P$ parameters</th><th>Verdict</th></tr>
+  <tr><td>By hand</td><td>Derive formulas like lesson 16 §7</td><td>your time, for every new architecture</td><td>error-prone, doesn't scale</td></tr>
+  <tr><td>Numerical</td><td>$\frac{L(\theta + h e_i) - L(\theta - he_i)}{2h}$ for each $i$ (lesson 06)</td><td>$2P$ forward passes</td><td>GPT-2 small: 248 million forward passes per step. Only good for <em>testing</em>.</td></tr>
+  <tr><td><b>Reverse-mode autodiff</b> (backprop)</td><td>Chain rule over the computation graph, output to inputs</td><td>about 2–3 forward passes, <em>whatever $P$ is</em></td><td>what everyone uses</td></tr>
+</table>
+<p>The last row looks too good to be true. By the end of §4 you'll see exactly why it works. Every intermediate result's gradient is computed once and reused by everything upstream of it.</p>
+
+<!-- ============================================================ -->
+<h2 id="graphs">2. Computation graphs</h2>
+<p>Any program that computes a number from inputs using arithmetic and elementary functions can be drawn as a <b>directed acyclic graph</b> (DAG). Leaves are inputs and parameters. Every other node is one primitive operation applied to the nodes that point into it. Take</p>
+$$L = (a\cdot b + c)\cdot f, \qquad a = 2,\; b = -3,\; c = 10,\; f = -2.$$
+<p>Name the intermediates: $e = a\cdot b$, $d = e + c$, $L = d\cdot f$. The <b>forward pass</b> evaluates nodes in an order where every node comes after its inputs: $e = -6$, $d = 4$, $L = -8$.</p>
+<p>The <b>backward pass</b> asks, for every node $v$: if I nudged $v$, how much would $L$ move? That's $\partial L/\partial v$, which we'll call $v$'s <b>gradient</b> (written <code>v.grad</code>). Start at the output with $\partial L/\partial L = 1$ and walk backwards:</p>
+
+<div class="figure">
+  <canvas id="fig-step" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-step"></div>
+  <div class="readout" id="out-step"></div>
+  <div class="caption"><b>Try it:</b> press <em>step</em> repeatedly. First the forward pass fills in each node's <span style="color:var(--c3)">data</span> in topological order. Then the backward pass fills in each <span style="color:var(--c4)">grad</span>, from the output back to the leaves. At every backward step the readout shows the one rule being applied: <em>input.grad += local derivative × output.grad</em>. Switch to the "neuron" graph: that's $\tanh(x_1w_1 + x_2w_2 + b)$, one unit of lesson 16. Then try the "reuse" graph (§5).</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: backprop by hand</div>
+  <p>Forward: $e = ab = -6$, $d = e + c = 4$, $L = df = -8$.</p>
+  <p>Backward, one node at a time, always "local derivative × gradient arriving from above":</p>
+  <ul>
+    <li>$\partial L/\partial L = 1$.</li>
+    <li>$L = d\cdot f$: $\;\partial L/\partial d = f\cdot 1 = -2$, $\;\partial L/\partial f = d \cdot 1 = 4$.</li>
+    <li>$d = e + c$: local derivatives are both 1, so $\partial L/\partial e = 1\cdot(-2) = -2$ and $\partial L/\partial c = -2$.</li>
+    <li>$e = a\cdot b$: $\;\partial L/\partial a = b\cdot(-2) = 6$, $\;\partial L/\partial b = a\cdot(-2) = -4$.</li>
+  </ul>
+  <p>Sanity check: $L = (ab+c)f$, so $\partial L/\partial a = bf = (-3)(-2) = 6$. ✓ Nudge $a$ up by $0.01$ and $L$ goes from $-8$ to about $-7.94$.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="local">3. Local gradients: each node knows only itself</h2>
+<p>Notice what each backward step needed: the node's own inputs, and the gradient of $L$ with respect to the node's output. It didn't need to know anything about the rest of the graph. This is just the chain rule (lesson 05): if $L$ depends on $x$ only through $z = g(x, y)$, then</p>
+$$\frac{\partial L}{\partial x} = \underbrace{\frac{\partial L}{\partial z}}_{\text{upstream (from above)}}\cdot\underbrace{\frac{\partial z}{\partial x}}_{\text{local}}.$$
+<p>So an autograd engine only needs a short table of primitive operations, each with its local derivative:</p>
+<table>
+  <tr><th>Op $z =$</th><th>Local derivatives</th><th>Backward rule ("gate" behavior)</th></tr>
+  <tr><td>$x + y$</td><td>$1,\;1$</td><td><b>distributes</b>: both inputs get $\bar z$ unchanged</td></tr>
+  <tr><td>$x\cdot y$</td><td>$y,\;x$</td><td><b>swaps</b>: $\bar x \mathrel{+}= y\,\bar z$, $\bar y \mathrel{+}= x\,\bar z$</td></tr>
+  <tr><td>$x^k$ ($k$ constant)</td><td>$kx^{k-1}$</td><td>$\bar x \mathrel{+}= kx^{k-1}\bar z$</td></tr>
+  <tr><td>$e^x$</td><td>$e^x = z$</td><td>reuses the output: $\bar x \mathrel{+}= z\,\bar z$</td></tr>
+  <tr><td>$\log x$</td><td>$1/x$</td><td>$\bar x \mathrel{+}= \bar z / x$</td></tr>
+  <tr><td>$\tanh x$</td><td>$1 - z^2$</td><td>$\bar x \mathrel{+}= (1-z^2)\bar z$</td></tr>
+  <tr><td>$\mathrm{relu}(x)$</td><td>$\mathbb{1}[x>0]$</td><td><b>routes</b>: passes $\bar z$ if the unit was on, else blocks</td></tr>
+  <tr><td>$\max(x, y)$</td><td>$\mathbb{1}[x>y],\;\mathbb{1}[y\ge x]$</td><td><b>routes</b> the whole gradient to the winner</td></tr>
+</table>
+<p>Here $\bar v$ is shorthand for $\partial L/\partial v$. Subtraction, division and so on don't need entries. $x - y = x + (-1)\cdot y$ and $x / y = x\cdot y^{-1}$ are built from the table, and their gradients come out right automatically. You'll do exactly this in the workbook.</p>
+
+<div class="callout intuition">
+<p>Think of the gradient as "blame" flowing backwards. A <code>+</code> node passes the full blame to both inputs. A <code>×</code> node gives each input blame in proportion to the <em>other</em> input: if $a$ was multiplied by a big $b$, then $a$ had a big effect. A ReLU node that was off blocks blame completely. That is how dead units stop learning.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="topo">4. Order matters: reverse topological order</h2>
+<p>A node may only push its gradient down to its inputs once its <em>own</em> gradient is complete. That means once every node that <em>uses</em> it has already been processed. An ordering where each node comes after all of its inputs is a <b>topological order</b>. Run the backward pass in <b>reverse</b> topological order and every node is finished before it's needed.</p>
+<p>Finding one is a depth-first search. Visit a node's inputs first, then append the node (a "post-order" traversal):</p>
+<pre><code>def topo_order(root):
+    order, visited = [], set()
+    def visit(v):
+        if v not in visited:
+            visited.add(v)
+            for child in v._prev:     # the inputs v was computed from
+                visit(child)
+            order.append(v)           # after all of its inputs
+    visit(root)
+    return order                       # backward: for v in reversed(order): v._backward()</code></pre>
+
+<div class="figure">
+  <canvas id="fig-topo" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-topo"></div>
+  <div class="readout" id="out-topo"></div>
+  <div class="caption"><b>Try it:</b> you are the autograd engine. Click the operation nodes in the order you'd run their <code>_backward()</code>. The graph is $L = m\cdot\tanh(m + c)$ with $m = a\cdot b$. The value $m$ is used <em>twice</em>, by the <code>+</code> node and by the final <code>×</code>. A breadth-first walk from $L$ would reach $m$ too early, before its gradient has arrived from both consumers. Try clicking $m$ second and see why that's rejected.</div>
+</div>
+
+<h3>Why reverse mode is so cheap</h3>
+<p>In Jacobian language (lesson 07), a chain of layers $\mathbf{x}\to\mathbf{h}_1\to\mathbf{h}_2\to L$ has gradient</p>
+$$\underbrace{\nabla_\mathbf{x}L^\top}_{1\times n} = \underbrace{\frac{\partial L}{\partial\mathbf{h}_2}}_{1\times n}\;\underbrace{\frac{\partial\mathbf{h}_2}{\partial\mathbf{h}_1}}_{n\times n}\;\underbrace{\frac{\partial\mathbf{h}_1}{\partial\mathbf{x}}}_{n\times n}.$$
+<p>Matrix multiplication is associative, so you can evaluate this product in either order. <b>Forward mode</b> goes right to left: matrix × matrix products of cost $n^3$, or $n$ passes, one per input direction. <b>Reverse mode</b> goes left to right, and the running product is always a single <em>row vector</em>. Each step is a vector–Jacobian product of cost $n^2$, often much less. Because the loss is a scalar, one backward sweep gives the gradient for all inputs at once. That's the whole trick, and it's why backprop costs about the same as a couple of forward passes.</p>
+
+<!-- ============================================================ -->
+<h2 id="accumulate">5. A node used twice: gradients add up</h2>
+<p>When a value feeds into several places, nudging it changes $L$ along <em>every</em> path. The multivariable chain rule (lesson 06) says the effects add. If $L$ depends on $x$ through $u_1(x), \dots, u_k(x)$, then</p>
+$$\frac{\partial L}{\partial x} = \sum_{j=1}^{k}\frac{\partial L}{\partial u_j}\,\frac{\partial u_j}{\partial x}.$$
+<p>In code, each consumer's <code>_backward</code> <em>adds</em> its contribution: <code>x.grad += ...</code>. Use <code>=</code> instead and the last consumer silently overwrites the others. This is the most common bug in hand-written autograd.</p>
+
+<div class="example">
+  <div class="label">Worked example: a value used four times</div>
+  <p>Graph: $s = x\cdot x$, $y = s + x$, $L = y\cdot x$. So $x$ feeds the graph through four edges. Forward: $s = 9$, $y = 12$, $L = 36$.</p>
+  <p>Backward: $\bar L = 1$. Through $L = y\cdot x$: $\bar y = x\cdot1 = 3$, and $\bar x \mathrel{+}= y\cdot 1 = 12$. Through $y = s + x$: $\bar s = 3$ and $\bar x \mathrel{+}= 3$, so now $\bar x = 15$. Through $s = x\cdot x$: both inputs are $x$, so $\bar x \mathrel{+}= x\cdot\bar s = 9$ <em>twice</em>, giving $\bar x = 33$.</p>
+  <p>Check: $L = x^3 + x^2$, so $L' = 3x^2 + 2x = 27 + 6 = 33$. ✓ With <code>=</code> instead of <code>+=</code>, you'd get 9.</p>
+</div>
+<p>Pick "reuse" in the step-through figure above and tick "buggy" to watch the wrong answer appear. The same rule explains lesson 16 problem 6. A broadcast bias is one value used by every row of the batch, so its gradient is a <em>sum</em> over the batch.</p>
+
+<div class="callout warning">
+<p>Accumulation is also why PyTorch makes you call <code>optimizer.zero_grad()</code> every step. <code>.grad</code> keeps adding across <code>backward()</code> calls, so if you forget to zero it you train on the sum of all past gradients. (Sometimes that's deliberate: "gradient accumulation" sums over several small batches to simulate one big one.)</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="value">6. The <code>Value</code> class</h2>
+<p>Here's the whole design. Each <code>Value</code> stores a number, its gradient, the Values it was made from, and a closure that knows how to push gradient to them. Operator overloading builds the graph as a side effect of ordinary arithmetic:</p>
+<pre><code>class Value:
+    def __init__(self, data, _children=(), _op=""):
+        self.data, self.grad = float(data), 0.0
+        self._prev, self._op = tuple(_children), _op
+        self._backward = lambda: None
+
+    def __mul__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        out = Value(self.data * other.data, (self, other), "*")
+        def _backward():                       # runs later, during backward()
+            self.grad  += other.data * out.grad   # local derivative x upstream
+            other.grad += self.data  * out.grad
+        out._backward = _backward
+        return out
+
+    def backward(self):
+        order = topo_order(self)
+        self.grad = 1.0
+        for v in reversed(order):
+            v._backward()</code></pre>
+<p>Each <code>_backward</code> closure captures <code>self</code>, <code>other</code> and <code>out</code>. When it runs, <code>out.grad</code> is already final, because of the reverse topological order. A neuron is then <code>sum(w_i * x_i) + b</code> followed by <code>.tanh()</code>, a layer is a list of neurons, and an MLP is a list of layers. Calling <code>loss.backward()</code> fills in <code>p.grad</code> for every parameter, and gradient descent is <code>p.data -= lr * p.grad</code>.</p>
+
+<div class="figure wide">
+  <div class="row">
+    <div style="flex:1.5 1 360px"><canvas id="fig-micro" width="440" height="400"></canvas></div>
+    <div><canvas id="fig-micro-loss" width="300" height="400"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-micro"></div>
+  <div class="readout" id="out-micro"></div>
+  <div class="caption"><b>Try it:</b> this is a JavaScript port of the <code>Value</code> engine above training a 2→16→16→1 ReLU MLP (337 parameters) on 60 points with a margin loss. Press <em>play</em>. Every step builds a fresh graph and backpropagates through it. Watch the node count: <b>tens of thousands of scalar nodes</b> to compute one loss. Press <em>gradient check</em> to compare the engine's gradient for three random parameters with central differences.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="tensors">7. From scalars to tensors</h2>
+<p>The scalar engine is perfect for understanding and hopeless for speed. Every multiply is a Python object with a closure. Real frameworks use the <em>same algorithm</em> with nodes that hold whole arrays. A layer becomes one <code>matmul</code> node instead of $d_\text{in}\times d_\text{out}$ multiply nodes, and the local work runs as optimized vectorized code.</p>
+<p>For array-valued nodes the "local derivative" is a Jacobian, which can be enormous. A $1000\times1000$ matmul has a Jacobian with $10^{12}$ entries. Frameworks <b>never build it</b>. Each op instead implements a <b>vector–Jacobian product</b> (VJP): given the upstream gradient $\bar Z$ (same shape as $Z$), return $\bar X$ (same shape as $X$) directly. The rules you need are mostly from lessons 07 and 16:</p>
+<table>
+  <tr><th>Forward</th><th>Backward (VJP)</th></tr>
+  <tr><td>$Z = X + Y$ (same shape)</td><td>$\bar X \mathrel{+}= \bar Z$, $\bar Y \mathrel{+}= \bar Z$</td></tr>
+  <tr><td>$Z = X + \mathbf{b}$ (broadcast)</td><td>$\bar{\mathbf{b}} \mathrel{+}= \sum_\text{broadcast axes}\bar Z$ (the "reuse" rule!)</td></tr>
+  <tr><td>$Z = X\odot Y$</td><td>$\bar X \mathrel{+}= Y\odot\bar Z$</td></tr>
+  <tr><td>$Z = XW$</td><td>$\bar X \mathrel{+}= \bar Z W^\top$, $\;\bar W \mathrel{+}= X^\top\bar Z$</td></tr>
+  <tr><td>$s = \sum_{ij} X_{ij}$</td><td>$\bar X \mathrel{+}= \bar s\cdot\mathbf{1}$ (broadcast back)</td></tr>
+  <tr><td>$Z = \mathrm{relu}(X)$</td><td>$\bar X \mathrel{+}= \mathbb{1}[X>0]\odot\bar Z$</td></tr>
+</table>
+
+<div class="example">
+  <div class="label">Worked example: deriving the matmul VJP</div>
+  <p>$Z_{ik} = \sum_j X_{ij}W_{jk}$. The entry $X_{ij}$ appears in every $Z_{ik}$ of row $i$ (for all $k$), with local derivative $W_{jk}$. Sum over those uses (§5):</p>
+  $$\bar X_{ij} = \sum_k \bar Z_{ik}\,W_{jk} = (\bar Z W^\top)_{ij}.$$
+  <p>Likewise $W_{jk}$ appears in $Z_{ik}$ for every row $i$: $\bar W_{jk} = \sum_i X_{ij}\bar Z_{ik} = (X^\top\bar Z)_{jk}$. The shapes check out: $\bar X$ is $(N\times d)$ from $(N\times h)(h\times d)$. ✓ Notice that the sum over the batch in $\bar W$ is the reuse rule again: the same weights are used for every example.</p>
+</div>
+
+<div class="callout ml">
+<p>This is literally what <code>loss.backward()</code> does in PyTorch (lesson 19). It records a graph of tensor ops during the forward pass (<code>tensor.grad_fn</code> is the <code>_backward</code> of the node that made it), topologically sorts it, and calls each op's VJP. Every model from here to GPT (lessons 22–24) is trained by this algorithm and nothing else. Workbook part C has you build the tensor version on numpy.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>For $L = (ab + c)f$ at $a=2, b=-3, c=10, f=-2$, enter $\partial L/\partial a,\ \partial L/\partial b,\ \partial L/\partial c,\ \partial L/\partial f$.</p>
+<div class="numcheck" data-answer="6,-4,-2,4" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>From the worked example in §2: $\bar a = bf = 6$, $\bar b = af = -4$, $\bar c = f = -2$, $\bar f = ab + c = 4$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Draw the graph for $f(x, y) = (x + y)\cdot(x\cdot y)$ and backprop at $(x, y) = (1, 2)$. Enter $\partial f/\partial x,\ \partial f/\partial y$.</p>
+<div class="numcheck" data-answer="8,5" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$p = x + y = 3$, $q = xy = 2$, $f = pq = 6$. $\bar p = q = 2$, $\bar q = p = 3$. Through $p$: $\bar x \mathrel{+}= 2$, $\bar y \mathrel{+}= 2$. Through $q$: $\bar x \mathrel{+}= y\bar q = 6$, $\bar y \mathrel{+}= x\bar q = 3$. Total $\bar x = 8$, $\bar y = 5$. Check: $f = x^2y + xy^2$, $f_x = 2xy + y^2 = 8$, $f_y = x^2 + 2xy = 5$. ✓</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Build $\sigma(z) = 1/(1 + e^{-z})$ only from the primitives in §3: negate, <code>exp</code>, <code>+ 1</code>, <code>** -1</code>. Backprop through those four nodes at $z = 0.5$ and confirm that the result equals $\sigma(z)(1 - \sigma(z))$. Enter the gradient.</p>
+<div class="numcheck" data-answer="0.235004" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$u = -z = -0.5$, $v = e^u = 0.6065$, $w = 1 + v = 1.6065$, $s = w^{-1} = 0.6225$. Backward: $\bar w = -w^{-2} = -0.3875$; $\bar v = \bar w = -0.3875$; $\bar u = v\bar v = -0.2350$; $\bar z = -\bar u = 0.2350$. And $\sigma(1-\sigma) = 0.6225\cdot0.3775 = 0.2350$. ✓ Composites get correct gradients for free. Frameworks still often fuse them into one node with a hand-written backward because it's faster and more numerically stable (lesson 19's custom <code>autograd.Function</code>).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>$L = (x\cdot x)\cdot x$ built as two multiply nodes. At $x = 2$, list every contribution that gets added into <code>x.grad</code>, and the total.</p>
+<div class="numcheck" data-answer="12" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$s = x\cdot x = 4$, $L = s\cdot x = 8$. Through $L$: $\bar s = x = 2$, $\bar x \mathrel{+}= s = 4$. Through $s$ (both inputs are $x$): $\bar x \mathrel{+}= x\bar s = 4$, twice. Total $4 + 4 + 4 = 12 = 3x^2$. ✓ Three uses, three contributions.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Using numerical (central-difference) gradients, how many forward passes does one gradient of GPT-2 small (124 million parameters) cost? Compare with backprop.</p>
+<div class="numcheck" data-answer="248000000" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Two per parameter: $2.48\times10^8$. Backprop costs about one forward plus one backward, roughly 3 forward-pass equivalents. That's a speed-up of nearly $10^8$. Numerical gradients are still valuable as a <em>test</em> on tiny inputs, which is exactly how the workbook checks your engine.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · derivation</span>
+<p>Derive the VJP for $s = \sum_i X_i$ (to a scalar) and for $Z = X + \mathbf{b}$ where $X$ is $N\times d$ and $\mathbf{b}$ is a length-$d$ vector broadcast over rows. Explain how both are the same rule.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\partial s/\partial X_i = 1$, so $\bar X = \bar s\,\mathbf{1}$: the sum's gradient <em>copies</em> the upstream value back to every input. For the broadcast, $b_j$ is used in $Z_{ij}$ for every $i$ with local derivative 1, so $\bar b_j = \sum_i \bar Z_{ij}$. Sum forward ⇔ broadcast backward, and broadcast forward ⇔ sum backward. They are each other's transpose, and both are the reuse rule of §5.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">stretch</span>
+<p>Someone implements <code>backward()</code> with a breadth-first queue from the output instead of a topological sort. Give a graph where this computes a wrong gradient, and say exactly what goes wrong.</p>
+<details class="hint"><summary>Hint</summary><p>Use a node that is consumed both near the output and deep in the graph, like $m$ in §4's figure.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Take $m = ab$, $n = m + c$, $t = \tanh(n)$, $L = t\cdot m$. BFS from $L$ visits $L$, then $t$ and $m$ (both inputs of $L$), so it runs $m$'s <code>_backward</code> after only the contribution from $L$ has arrived. Later $n$'s backward adds the second contribution to <code>m.grad</code>, but $m$ has already pushed its incomplete gradient to $a$ and $b$, so $\bar a$ and $\bar b$ are wrong. A topological order guarantees every consumer of $m$ runs before $m$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>Count the nodes. A <code>Value</code>-based neuron with $n$ inputs computes $\tanh\!\big(\sum_i w_ix_i + b\big)$ as $n$ multiplies, $n$ additions (starting from $b$), and one tanh. How many <em>non-leaf</em> nodes does a 2→16→16→1 MLP (tanh everywhere, for simplicity) create for <em>one</em> input example?</p>
+<div class="numcheck" data-answer="641" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>A neuron with $n$ inputs makes $2n + 1$ nodes. Layer 1: $16(2\cdot2+1) = 80$. Layer 2: $16(2\cdot16+1) = 528$. Layer 3: $1\cdot(2\cdot16+1) = 33$. Total 641 per example, so about 38,000 for a batch of 60 before you even add the loss. A tensor engine needs about 10 nodes for the same batch. That's the motivation for §7.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">A model has 1 billion parameters. Roughly how does the cost of one backprop gradient compare to one forward pass?</div>
+  <div class="opts">
+    <button data-k="a">About a billion times more, one pass per parameter</button>
+    <button data-k="b">A small constant factor (about 2–3×), independent of the parameter count</button>
+    <button data-k="c">About √(10⁹) times more</button>
+    <button data-k="d">The same, since backward reuses the forward computation exactly</button>
+  </div>
+  <div class="explain">Reverse mode visits each node once and does work proportional to that node's forward work. The scalar output is what makes one sweep enough.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Why does every <code>_backward</code> use <code>+=</code> rather than <code>=</code>?</div>
+  <div class="opts">
+    <button data-k="a">To make the gradient numerically more stable</button>
+    <button data-k="b">Because Python closures can't assign to outer variables</button>
+    <button data-k="c">A node used by several consumers must receive the sum of all their contributions</button>
+    <button data-k="d">So that zero_grad isn't needed</button>
+  </div>
+  <div class="explain">Multivariable chain rule: the effects along every path add up. (And because of +=, you <em>do</em> need zero_grad between steps.)</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">In the backward pass, a <code>+</code> node with upstream gradient 5 sends to its two inputs…</div>
+  <div class="opts">
+    <button data-k="a">5 and 5</button>
+    <button data-k="b">2.5 and 2.5</button>
+    <button data-k="c">5 to the larger input, 0 to the other</button>
+    <button data-k="d">each input's value times 5</button>
+  </div>
+  <div class="explain">Both local derivatives of $x+y$ are 1, so the gradient is copied unchanged. Option (c) is <code>max</code>; option (d) is the swap rule of <code>×</code>.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Real frameworks implement backward for <code>Z = X @ W</code> (1000×1000 each) by…</div>
+  <div class="opts">
+    <button data-k="a">building the 10⁶×10⁶ Jacobian and multiplying by it</button>
+    <button data-k="b">one scalar Value node per multiply</button>
+    <button data-k="c">finite differences on each entry of W</button>
+    <button data-k="d">two matmuls: dX = dZ Wᵀ and dW = Xᵀ dZ</button>
+  </div>
+  <div class="explain">Vector–Jacobian products: the Jacobian is never formed. Backward of a matmul is two matmuls of the same size, which is why backward costs about 2× forward.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Idea</th><th>Rule</th></tr>
+  <tr><td>Computation graph</td><td>DAG of primitive ops; leaves = inputs &amp; parameters</td></tr>
+  <tr><td>Backward step</td><td><code>input.grad += local_derivative * output.grad</code></td></tr>
+  <tr><td>Order</td><td>reverse topological (DFS post-order, reversed); seed <code>L.grad = 1</code></td></tr>
+  <tr><td>Reuse</td><td>gradients from all consumers <b>add</b>; broadcast forward ⇔ sum backward</td></tr>
+  <tr><td>Gates</td><td>+ distributes, × swaps, relu/max route</td></tr>
+  <tr><td>Tensors</td><td>each op supplies a VJP; never materialize Jacobians</td></tr>
+  <tr><td>Cost</td><td>backward ≈ 2× forward, independent of #parameters</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 17: build it</h3>
+  <p>Open <code>workbooks/17_backprop_autograd/exercises.py</code>. You'll implement <code>Value</code> with <code>+ * ** exp log tanh relu</code> (plus <code>- /</code> and the reflected operators built from them), an iterative <code>topo_order</code> that survives a 5000-node chain, and <code>backward</code>. Tests compare every op to numerical gradients. Then you build <code>Neuron</code>, <code>Layer</code>, <code>MLP</code> and <code>train</code> on top and fit a tiny dataset. Stretch: a numpy <code>Tensor</code> with matmul, broadcasting add and sum, which is a 60-line PyTorch. Grade yourself with:</p>
+  <pre><code>./course check 17</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Andrej Karpathy, "The spelled-out intro to neural networks and backpropagation: building micrograd" (video), and the <code>micrograd</code> repository.</li>
+  <li>Stanford CS231n notes, "Backpropagation, Intuitions" (the gate view).</li>
+  <li>Baydin et al., "Automatic Differentiation in Machine Learning: a Survey" (JMLR 2018): forward vs reverse mode.</li>
+  <li>Christopher Olah, "Calculus on Computational Graphs: Backpropagation" (blog post).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, fmt, color, withAlpha } = Course;
+  const f3 = v => String(+(Math.abs(v) < 5e-4 ? 0 : v).toFixed(3));
+
+  // ---------- generic graph drawing (world coords 0..10 x 0..6) ----------
+  // node: {id, op, ins:[ids], x, y, name}; op in leaf,+,*,tanh
+  function drawGraph(p, G, st) {
+    const R = 21, byId = Object.fromEntries(G.map(n => [n.id, n])), c = p.ctx;
+    // edges (handle multi-edges with curvature)
+    G.forEach(n => {
+      const seen = {};
+      n.ins.forEach((iid, k) => {
+        const a = byId[iid], dup = n.ins.filter(z => z === iid).length, idx = (seen[iid] = (seen[iid] || 0) + 1) - 1;
+        const X0 = p.X(a.x), Y0 = p.Y(a.y), X1 = p.X(n.x), Y1 = p.Y(n.y), L = Math.hypot(X1 - X0, Y1 - Y0), ux = (X1 - X0) / L, uy = (Y1 - Y0) / L;
+        const bend = dup > 1 ? (idx ? 1 : -1) * 26 : 0, mx = (X0 + X1) / 2 - uy * bend, my = (Y0 + Y1) / 2 + ux * bend;
+        const hot = st.hotEdges && st.hotEdges.some(e => e[0] === n.id && e[1] === k);
+        c.save(); c.strokeStyle = color(hot ? "c4" : "muted"); c.lineWidth = hot ? 3 : 1.5; c.globalAlpha = hot ? 1 : .7;
+        const sx = X0 + ux * R, sy = Y0 + uy * R, ex = X1 - ux * (R + 2), ey = Y1 - uy * (R + 2);
+        c.beginPath(); c.moveTo(sx, sy); c.quadraticCurveTo(mx, my, ex, ey); c.stroke();
+        const ang = Math.atan2(ey - my, ex - mx); c.fillStyle = c.strokeStyle; c.beginPath(); c.moveTo(ex, ey);
+        c.lineTo(ex - 9 * Math.cos(ang - .4), ey - 9 * Math.sin(ang - .4)); c.lineTo(ex - 9 * Math.cos(ang + .4), ey - 9 * Math.sin(ang + .4)); c.fill(); c.restore();
+        if (hot && st.edgeText) { const t = st.edgeText[n.id + ":" + k]; if (t) p.label(.25 * sx + .5 * mx + .25 * ex, .25 * sy + .5 * my + .25 * ey, t, { px: true, color: "c4", font: "600 12px monospace", bg: true, align: "center" }); }
+      });
+    });
+    G.forEach(n => {
+      const X = p.X(n.x), Y = p.Y(n.y), cur = st.current === n.id, done = st.done && st.done.has(n.id);
+      c.save(); c.beginPath(); c.arc(X, Y, R, 0, 2 * Math.PI);
+      c.fillStyle = withAlpha(n.op === "leaf" ? "c2" : "c1", cur ? .45 : done ? .3 : .14); c.fill();
+      c.strokeStyle = color(cur ? "c4" : n.op === "leaf" ? "c2" : "c1"); c.lineWidth = cur ? 3.5 : 2; c.stroke(); c.restore();
+      const inner = n.op === "leaf" ? n.name : n.op === "*" ? "×" : n.op;
+      p.label(X, Y, inner, { px: true, align: "center", font: (n.op === "tanh" ? "600 12px " : "600 15px ") + "sans-serif", color: "fg" });
+      if (n.op !== "leaf") p.label(X, Y - R - 9, n.name, { px: true, align: "center", font: "italic 600 13px sans-serif", color: "c1" });
+      const dv = st.data && st.data[n.id], gv = st.grad && st.grad[n.id];
+      if (dv !== undefined) p.label(X, Y + R + 11, "data " + f3(dv), { px: true, align: "center", font: "12px monospace", color: "c3", bg: true });
+      if (gv !== undefined) p.label(X, Y + R + 27, "grad " + f3(gv), { px: true, align: "center", font: "600 12px monospace", color: "c4", bg: true });
+    });
+  }
+  const opF = { "+": (a, b) => a + b, "*": (a, b) => a * b, tanh: a => Math.tanh(a) };
+  const local = (n, k, D) => n.op === "+" ? 1 : n.op === "*" ? D[n.ins[1 - k]] : 1 - D[n.id] ** 2;
+  const opSym = { "+": "+", "*": "·", tanh: "tanh" };
+
+  // ---------- fig: step-through forward/backward ----------
+  {
+    const p = new Plot("#fig-step", { xmin: -0.3, xmax: 10.3, ymin: -0.3, ymax: 6.2 });
+    const out = document.getElementById("out-step");
+    const graphs = {
+      basic: { vals: { a: 2, b: -3, c: 10, f: -2 }, G: [
+        { id: "a", op: "leaf", ins: [], x: 0.8, y: 5.2, name: "a" }, { id: "b", op: "leaf", ins: [], x: 0.8, y: 3.6, name: "b" },
+        { id: "c", op: "leaf", ins: [], x: 0.8, y: 2.0, name: "c" }, { id: "f", op: "leaf", ins: [], x: 4.8, y: 0.7, name: "f" },
+        { id: "e", op: "*", ins: ["a", "b"], x: 3.3, y: 4.4, name: "e" }, { id: "d", op: "+", ins: ["e", "c"], x: 5.9, y: 3.3, name: "d" },
+        { id: "L", op: "*", ins: ["d", "f"], x: 8.8, y: 2.3, name: "L" }] },
+      neuron: { vals: { x1: 2, w1: -3, x2: 0, w2: 1, b: 6.8814 }, G: [
+        { id: "x1", op: "leaf", ins: [], x: 0.7, y: 5.5, name: "x₁" }, { id: "w1", op: "leaf", ins: [], x: 0.7, y: 4.3, name: "w₁" },
+        { id: "x2", op: "leaf", ins: [], x: 0.7, y: 2.9, name: "x₂" }, { id: "w2", op: "leaf", ins: [], x: 0.7, y: 1.7, name: "w₂" },
+        { id: "b", op: "leaf", ins: [], x: 4.6, y: 0.6, name: "b" },
+        { id: "p1", op: "*", ins: ["x1", "w1"], x: 2.8, y: 4.9, name: "x₁w₁" }, { id: "p2", op: "*", ins: ["x2", "w2"], x: 2.8, y: 2.3, name: "x₂w₂" },
+        { id: "s", op: "+", ins: ["p1", "p2"], x: 4.9, y: 3.6, name: "s" }, { id: "n", op: "+", ins: ["s", "b"], x: 6.9, y: 2.4, name: "n" },
+        { id: "o", op: "tanh", ins: ["n"], x: 9.1, y: 2.4, name: "o" }] },
+      reuse: { vals: { x: 3 }, G: [
+        { id: "x", op: "leaf", ins: [], x: 1.0, y: 2.6, name: "x" },
+        { id: "s", op: "*", ins: ["x", "x"], x: 3.8, y: 4.6, name: "s" }, { id: "y", op: "+", ins: ["s", "x"], x: 6.2, y: 3.6, name: "y" },
+        { id: "L", op: "*", ins: ["y", "x"], x: 8.9, y: 2.0, name: "L" }] },
+    };
+    let key = "basic", G, D, Gr, k, buggy = false, st;
+    const reset = () => { G = graphs[key].G; D = { ...graphs[key].vals }; Gr = {}; k = 0; st = { data: {}, grad: {}, done: new Set() }; G.filter(n => n.op === "leaf").forEach(n => st.data[n.id] = D[n.id]);
+      out.textContent = "Leaves hold the inputs. Press step to run the forward pass."; p.render(); };
+    const ops = () => G.filter(n => n.op !== "leaf");
+    const step = () => {
+      const O = ops(), nF = O.length;
+      st.hotEdges = null; st.edgeText = null;
+      if (k < nF) {
+        const n = O[k], args = n.ins.map(i => D[i]); D[n.id] = opF[n.op](...args); st.data[n.id] = D[n.id]; st.current = n.id;
+        out.textContent = `forward ${k + 1}/${nF}:  ${n.name} = ` + (n.op === "tanh" ? `tanh(${f3(args[0])})` : `${f3(args[0])} ${opSym[n.op]} ${f3(args[1])}`) + ` = ${f3(D[n.id])}`;
+      } else if (k === nF) {
+        G.forEach(n => Gr[n.id] = 0); const top = O[nF - 1]; Gr[top.id] = 1; st.grad = { [top.id]: 1 }; st.current = top.id; st.done = new Set();
+        out.textContent = `backward: seed ${top.name}.grad = d${top.name}/d${top.name} = 1. Now walk the nodes in reverse order.`;
+      } else if (k <= 2 * nF) {
+        const n = O[2 * nF - k]; st.current = n.id; st.hotEdges = []; st.edgeText = {}; const lines = [];
+        n.ins.forEach((iid, j) => {
+          const loc = local(n, j, D), contrib = loc * Gr[n.id], before = Gr[iid];
+          Gr[iid] = buggy ? contrib : Gr[iid] + contrib; st.grad[iid] = Gr[iid]; st.hotEdges.push([n.id, j]); st.edgeText[n.id + ":" + j] = (buggy ? "= " : "+= ") + f3(contrib);
+          const nm = G.find(m => m.id === iid).name;
+          lines.push(`${nm}.grad ${buggy ? "=" : "+="} (local ${f3(loc)}) × (${n.name}.grad ${f3(Gr[n.id])}) = ${f3(contrib)}   →  ${nm}.grad: ${f3(before)} → ${f3(Gr[iid])}`);
+        });
+        st.done.add(n.id);
+        out.textContent = `backward through ${n.name} = ` + (n.op === "tanh" ? "tanh(·)  [local: 1 − o²]" : n.op === "+" ? "+  [local: 1, 1]" : "×  [local: the other input]") + "\n" + lines.join("\n");
+      } else {
+        st.current = null;
+        const leaves = G.filter(n => n.op === "leaf").map(n => `d/d${n.name} = ${f3(Gr[n.id])}`).join("   ");
+        out.textContent = "done.  " + leaves + (key === "reuse" ? `\nexact: dL/dx = 3x² + 2x = 33   ${buggy ? "← the buggy '=' version lost contributions!" : "✓"}` : "");
+        p.render(); return false;
+      }
+      k++; p.render(); return true;
+    };
+    select("#ctl-step", "graph ", [["basic", "L = (a·b + c)·f"], ["neuron", "neuron: tanh(x₁w₁ + x₂w₂ + b)"], ["reuse", "reuse: L = (x·x + x)·x"]], v => { key = v; anim.stop(); reset(); });
+    button("#ctl-step", "step", () => step());
+    const anim = animator((() => { let t = 0; return () => (++t % 40 ? true : step()); })());
+    button("#ctl-step", "▶ auto", () => anim.running ? anim.stop() : anim.start());
+    button("#ctl-step", "reset", () => { anim.stop(); reset(); });
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox";
+    cb.addEventListener("change", () => { buggy = cb.checked; reset(); }); lab.append(cb, " buggy: grad = instead of +="); document.getElementById("ctl-step").appendChild(lab);
+    reset();
+    p.render(p => drawGraph(p, G, st));
+    for (let i = 0; i < 5; i++) step();   // show a mid-backward state on load
+  }
+
+  // ---------- fig: topo-order game ----------
+  {
+    const p = new Plot("#fig-topo", { xmin: -0.3, xmax: 10.3, ymin: -0.2, ymax: 5.8 });
+    const out = document.getElementById("out-topo");
+    const V0 = { a: 1.5, b: 0.8, c: -0.5 };
+    const G = [
+      { id: "a", op: "leaf", ins: [], x: 0.8, y: 4.6, name: "a" }, { id: "b", op: "leaf", ins: [], x: 0.8, y: 2.6, name: "b" },
+      { id: "c", op: "leaf", ins: [], x: 3.6, y: 0.7, name: "c" },
+      { id: "m", op: "*", ins: ["a", "b"], x: 3.0, y: 3.6, name: "m" }, { id: "n", op: "+", ins: ["m", "c"], x: 5.4, y: 1.9, name: "n" },
+      { id: "t", op: "tanh", ins: ["n"], x: 7.3, y: 1.9, name: "t" }, { id: "L", op: "*", ins: ["m", "t"], x: 9.0, y: 3.6, name: "L" }];
+    const D = { ...V0 }; ["m", "n", "t", "L"].forEach(id => { const n = G.find(z => z.id === id); D[id] = opF[n.op](...n.ins.map(i => D[i])); });
+    const consumers = id => G.filter(n => n.ins.includes(id)).map(n => n.id);
+    let Gr, done, order, st;
+    const reset = () => { Gr = Object.fromEntries(G.map(n => [n.id, 0])); Gr.L = 1; done = new Set(); order = []; st = { data: { ...D }, grad: { L: 1 }, done }; out.textContent = "L.grad = 1 is seeded. Click the operation node whose _backward() should run first."; p.render(); };
+    const run = n => {
+      n.ins.forEach((iid, j) => { Gr[iid] += local(n, j, D) * Gr[n.id]; st.grad[iid] = Gr[iid]; }); done.add(n.id); order.push(n.name); st.current = n.id;
+    };
+    p.onClick = (x, y) => {
+      const n = G.reduce((best, m) => Math.hypot(m.x - x, (m.y - y) * 1.3) < Math.hypot(best.x - x, (best.y - y) * 1.3) ? m : best);
+      if (Math.hypot(n.x - x, n.y - y) > 0.8) return;
+      if (n.op === "leaf") { out.textContent = `${n.name} is a leaf: it has no _backward to run. Its grad just collects contributions.`; return; }
+      if (done.has(n.id)) { out.textContent = `${n.name} already ran.`; return; }
+      const waiting = consumers(n.id).filter(id => !done.has(id));
+      if (waiting.length) { out.textContent = `✗ Not yet: ${n.name} is used by ${waiting.map(id => G.find(z => z.id === id).name).join(", ")}, which hasn't run, so ${n.name}.grad is still incomplete (currently ${f3(Gr[n.id])}).\n  If ${n.name} pushed its gradient now, a and b would get a wrong answer.`; return; }
+      run(n);
+      const left = G.filter(m => m.op !== "leaf" && !done.has(m.id)).length;
+      out.textContent = `✓ ran ${n.name}._backward().  order so far: ${order.join(" → ")}` + (left ? "" : `\nAll done: dL/da = ${f3(Gr.a)}, dL/db = ${f3(Gr.b)}, dL/dc = ${f3(Gr.c)}. m received two contributions (from n and from L) before passing them on.`);
+      p.render();
+    };
+    button("#ctl-topo", "show a valid order", () => { reset(); ["L", "t", "n", "m"].forEach(id => run(G.find(z => z.id === id))); out.textContent = "reverse topological order: L → t → n → m. m waits until both of its consumers (L and n) are done.\n" + `dL/da = ${f3(Gr.a)}, dL/db = ${f3(Gr.b)}, dL/dc = ${f3(Gr.c)}`; p.render(); });
+    button("#ctl-topo", "reset", reset);
+    reset();
+    p.render(p => { drawGraph(p, G, st); p.label(10, 16, "click the operation nodes in backward order", { px: true, color: "muted", font: "12px sans-serif" }); });
+  }
+
+  // ---------- fig: micrograd in JS ----------
+  {
+    class V {
+      constructor(d, ch = []) { this.d = d; this.g = 0; this.ch = ch; this.bw = null; }
+      add(o) { o = o instanceof V ? o : new V(o); const r = new V(this.d + o.d, [this, o]); r.bw = () => { this.g += r.g; o.g += r.g; }; return r; }
+      mul(o) { o = o instanceof V ? o : new V(o); const r = new V(this.d * o.d, [this, o]); r.bw = () => { this.g += o.d * r.g; o.g += this.d * r.g; }; return r; }
+      relu() { const r = new V(this.d > 0 ? this.d : 0, [this]); r.bw = () => { this.g += (this.d > 0) * r.g; }; return r; }
+      backward() {
+        const order = [], seen = new Set(), stack = [[this, false]];
+        while (stack.length) { const [v, fin] = stack.pop(); if (fin) { order.push(v); continue; } if (seen.has(v)) continue; seen.add(v); stack.push([v, true]); for (const c of v.ch) if (!seen.has(c)) stack.push([c, false]); }
+        this.g = 1; for (let i = order.length - 1; i >= 0; i--) if (order[i].bw) order[i].bw();
+        return order.length;
+      }
+    }
+    // data: two moons
+    const R = Course.rng(5), X = [], Y = [];
+    for (let i = 0; i < 60; i++) { const up = i % 2 === 0, t = Math.PI * R.uniform(0, 1); let x = up ? Math.cos(t) : 1 - Math.cos(t), y = up ? Math.sin(t) : 0.5 - Math.sin(t); x += R.normal(0, .1); y += R.normal(0, .1); X.push([(x - 0.5) * 1.1, (y - 0.25) * 1.1]); Y.push(up ? 1 : -1); }
+    const sizes = [2, 16, 16, 1]; let layers, params, step, losses, nodes = 0;
+    const init = () => {
+      const r = Course.rng(1); layers = [];
+      for (let l = 0; l < 3; l++) layers.push(Array.from({ length: sizes[l + 1] }, () => ({ w: Array.from({ length: sizes[l] }, () => new V(r.uniform(-1, 1) / Math.sqrt(sizes[l] / 2))), b: new V(0) })));
+      params = layers.flatMap(L => L.flatMap(n => [...n.w, n.b])); step = 0; losses = [];
+    };
+    const fwd = x => { let h = x; layers.forEach((L, l) => { h = L.map(n => { let z = n.b; n.w.forEach((w, i) => { z = z.add(w.mul(h[i])); }); return l < 2 ? z.relu() : z; }); }); return h[0]; };
+    const fwdNum = x => { let h = x; layers.forEach((L, l) => { h = L.map(n => { let z = n.b.d; n.w.forEach((w, i) => { z += w.d * h[i]; }); return l < 2 ? Math.max(0, z) : z; }); }); return h[0]; };
+    const lossNum = () => { let s = 0; X.forEach((x, i) => { s += Math.max(0, 1 - Y[i] * fwdNum(x)); }); let r = 0; params.forEach(p => r += p.d * p.d); return s / X.length + 1e-4 * r; };
+    const lossGraph = () => { let s = new V(0); X.forEach((x, i) => { s = s.add(fwd(x).mul(-Y[i]).add(1).relu()); }); let r = new V(0); params.forEach(p => { r = r.add(p.mul(p)); }); return s.mul(1 / X.length).add(r.mul(1e-4)); };
+    const train = () => { const L = lossGraph(); params.forEach(p => p.g = 0); nodes = L.backward(); const lr = 1.0 - 0.9 * Math.min(step, 100) / 100; params.forEach(p => { p.d -= lr * p.g; }); step++; losses.push(L.d); };
+    const p = new Plot("#fig-micro", { xmin: -1.95, xmax: 1.95, ymin: -1.3, ymax: 1.3, equal: true });
+    const Lp = new Plot("#fig-micro-loss", { xmin: 0, xmax: 100, ymin: 0, ymax: 1.5 });
+    const out = document.getElementById("out-micro"); let gc = "";
+    const draw = () => {
+      p.render(p => {
+        p.field((x, y) => Math.tanh(fwdNum([x, y])), { cmap: "div", vmin: -1.6, vmax: 1.6, res: 8, alpha: .75 });
+        X.forEach((x, i) => p.point(x[0], x[1], { r: 4, color: Y[i] > 0 ? "c1" : "c4", stroke: "bg" }));
+      });
+      Lp.render(Lp => {
+        const n = Math.max(100, losses.length); Lp.setView(-n * .03, n * 1.04, 0, Math.max(1.2, losses[0] || 1) * 1.08);
+        Lp.grid({ step: n / 4, stepY: .25 }).axes({ step: n / 4, stepY: .5 });
+        Lp.path(losses.map((v, i) => [i, v]), { color: "c5", width: 2 });
+        Lp.label(40, 14, "loss vs step", { px: true, color: "muted", font: "12px sans-serif" });
+      });
+      const acc = X.reduce((s, x, i) => s + (Math.sign(fwdNum(x)) === Y[i]), 0) / X.length;
+      out.textContent = `step ${step}   loss ${losses.length ? losses[losses.length - 1].toFixed(4) : "—"}   accuracy ${(100 * acc).toFixed(0)}%   parameters ${params.length}\n` +
+        `scalar Value nodes in this step's graph: ${nodes.toLocaleString()}` + (gc ? "\n" + gc : "");
+    };
+    const anim = animator(() => { train(); draw(); return step < 150; });
+    button("#ctl-micro", "▶ play / ❚❚ pause", () => anim.running ? anim.stop() : anim.start());
+    button("#ctl-micro", "reset", () => { anim.stop(); init(); gc = ""; nodes = 0; draw(); });
+    button("#ctl-micro", "gradient check", () => {
+      const L = lossGraph(); params.forEach(q => q.g = 0); nodes = L.backward(); const r = Course.rng(step + 7), lines = [];
+      for (let t = 0; t < 3; t++) { const q = params[r.int(params.length)], old = q.d, h = 1e-5; q.d = old + h; const fp = lossNum(); q.d = old - h; const fm = lossNum(); q.d = old; lines.push(`autograd ${q.g.toExponential(5)}   numerical ${((fp - fm) / (2 * h)).toExponential(5)}`); }
+      gc = "gradient check on 3 random parameters:\n  " + lines.join("\n  "); draw();
+    });
+    init(); for (let i = 0; i < 3; i++) train(); draw();   // a few steps so the page opens mid-training
+  }
+});
+</script>
+</body>
+</html>

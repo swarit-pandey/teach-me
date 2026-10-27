@@ -1,0 +1,8 @@
+:8080 {
+	root * /srv
+	encode zstd gzip
+	file_server
+	@static path /assets/*
+	header @static Cache-Control "public, max-age=86400"
+	header /download/* Content-Disposition attachment
+}

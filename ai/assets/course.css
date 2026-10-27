@@ -1,0 +1,127 @@
+/* AI from Scratch — shared styles. Light/dark via prefers-color-scheme. */
+:root {
+  --bg: #fbfaf7; --fg: #1f2328; --muted: #656d76; --line: #d8dee4; --panel: #f3f1ec;
+  --accent: #2f6fde; --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700;
+  /* plot palette (also read by Plot via getComputedStyle) */
+  --c1: #2f6fde; --c2: #e8710a; --c3: #1a9e5a; --c4: #d6336c; --c5: #7c4ddc; --c6: #0e9aa7;
+  --grid: #e7e3db; --axis: #8c959f;
+  --maxw: 780px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a; --fg: #e6e6e6; --muted: #9aa3ad; --line: #30363d; --panel: #1d2025;
+    --accent: #6ea0ff; --ok: #3fb950; --bad: #f85149; --warn: #d29922;
+    --c1: #6ea0ff; --c2: #ff9a3c; --c3: #3ccf86; --c4: #ff6b9b; --c5: #a98bff; --c6: #3cc8d4;
+    --grid: #262a30; --axis: #6e7681;
+  }
+}
+* { box-sizing: border-box; }
+html { font-size: 17px; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 1rem/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+}
+main { max-width: var(--maxw); margin: 0 auto; padding: 1.5rem 1.25rem 6rem; }
+a { color: var(--accent); }
+h1 { font-size: 2.1rem; line-height: 1.2; margin: .3rem 0 .4rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.8rem 0 .6rem; padding-top: .6rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .4rem; }
+p, li { max-width: 72ch; }
+code { font-family: var(--mono); font-size: .88em; background: var(--panel); padding: .1em .35em; border-radius: 4px; }
+pre { font-family: var(--mono); font-size: .84rem; line-height: 1.5; background: var(--panel); border: 1px solid var(--line);
+  padding: .9rem 1rem; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+table { border-collapse: collapse; margin: 1rem 0; font-size: .92rem; }
+th, td { border: 1px solid var(--line); padding: .35rem .7rem; text-align: left; }
+th { background: var(--panel); }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: .2rem 0; }
+
+/* ---------- lesson chrome ---------- */
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; font-size: .85rem; color: var(--muted); }
+.topbar a { color: var(--muted); text-decoration: none; }
+.topbar a:hover { color: var(--accent); }
+.kicker { font-size: .82rem; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); font-weight: 600; }
+.lede { font-size: 1.12rem; color: var(--muted); margin-top: 0; }
+.objectives { background: var(--panel); border-radius: 10px; padding: .8rem 1.2rem; margin: 1.2rem 0; }
+.objectives h4 { margin: .2rem 0 .3rem; font-size: .85rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.objectives ul { margin: .2rem 0; padding-left: 1.2rem; }
+.toc { font-size: .9rem; columns: 2; column-gap: 2rem; padding-left: 1.2rem; }
+.lesson-footer { margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.btn { font: inherit; font-size: .92rem; padding: .5rem 1rem; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; text-decoration: none; display: inline-block; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.done { background: var(--ok); color: #fff; border-color: var(--ok); }
+
+/* ---------- callouts ---------- */
+.callout { border-left: 4px solid var(--accent); background: var(--panel); padding: .7rem 1rem; border-radius: 0 8px 8px 0; margin: 1.2rem 0; }
+.callout > :first-child { margin-top: 0; } .callout > :last-child { margin-bottom: 0; }
+.callout.intuition { border-color: var(--c3); }
+.callout.intuition::before { content: "Intuition"; }
+.callout.warning { border-color: var(--warn); }
+.callout.warning::before { content: "Watch out"; }
+.callout.ml { border-color: var(--c5); }
+.callout.ml::before { content: "Why this matters for AI"; }
+.callout.key { border-color: var(--c2); }
+.callout.key::before { content: "Key idea"; }
+.callout::before { display: block; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: var(--muted); margin-bottom: .25rem; }
+
+/* ---------- figures / widgets ---------- */
+.figure { margin: 1.6rem -1rem; padding: 1rem; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.figure.wide { margin-left: calc(-1 * min(12vw, 160px)); margin-right: calc(-1 * min(12vw, 160px)); }
+.figure canvas { display: block; width: 100%; height: auto; border-radius: 8px; background: var(--bg); touch-action: none; }
+.figure .caption { font-size: .86rem; color: var(--muted); margin-top: .6rem; }
+.figure .readout { font-family: var(--mono); font-size: .85rem; margin-top: .5rem; white-space: pre-wrap; }
+.controls { display: flex; flex-wrap: wrap; gap: .6rem 1.4rem; margin-top: .7rem; align-items: center; font-size: .88rem; }
+.controls label { display: flex; align-items: center; gap: .5rem; }
+.controls input[type=range] { width: 150px; accent-color: var(--accent); }
+.controls .val { font-family: var(--mono); min-width: 3.5em; display: inline-block; }
+.row { display: flex; gap: 1rem; flex-wrap: wrap; } .row > * { flex: 1 1 260px; min-width: 0; }
+
+/* ---------- worked examples & problems ---------- */
+.example { border: 1px solid var(--line); border-radius: 10px; padding: .8rem 1.1rem; margin: 1.2rem 0; }
+.example > .label, .problem > .label { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--c2); }
+.problem { border: 1px dashed var(--line); border-radius: 10px; padding: .8rem 1.1rem; margin: 1rem 0; }
+.problem > .label { color: var(--c5); }
+.problem .difficulty { float: right; font-size: .75rem; color: var(--muted); }
+details { margin: .6rem 0; }
+details > summary { cursor: pointer; color: var(--accent); font-size: .9rem; user-select: none; }
+details[open] > summary { margin-bottom: .4rem; }
+details.solution { background: var(--panel); border-radius: 8px; padding: .4rem .8rem; }
+details.hint > summary { color: var(--warn); }
+
+/* ---------- quiz ---------- */
+.quiz { border: 1px solid var(--line); border-radius: 10px; padding: .8rem 1.1rem; margin: 1.2rem 0; }
+.quiz .q { font-weight: 600; margin-bottom: .5rem; }
+.quiz .opts { display: grid; gap: .4rem; }
+.quiz .opts button { text-align: left; font: inherit; font-size: .95rem; padding: .45rem .8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); cursor: pointer; }
+.quiz .opts button:hover { border-color: var(--accent); }
+.quiz .opts button.right { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, var(--bg)); }
+.quiz .opts button.wrong { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--bg)); }
+.quiz .explain { display: none; margin-top: .6rem; font-size: .92rem; color: var(--muted); }
+.quiz.answered .explain { display: block; }
+.numcheck { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .5rem 0; }
+.numcheck input { font: inherit; font-family: var(--mono); width: 9em; padding: .3rem .5rem; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.numcheck .fb { font-size: .9rem; }
+.numcheck .fb.ok { color: var(--ok); } .numcheck .fb.bad { color: var(--bad); }
+
+/* ---------- workbook box ---------- */
+.workbook { border: 2px solid var(--accent); border-radius: 12px; padding: 1rem 1.2rem; margin: 2rem 0; }
+.workbook h3 { margin-top: 0; }
+
+/* ---------- index ---------- */
+.course-hero { padding: 2rem 0 1rem; }
+.progressbar { height: 8px; background: var(--panel); border-radius: 99px; overflow: hidden; border: 1px solid var(--line); }
+.progressbar > div { height: 100%; background: var(--ok); width: 0; transition: width .4s; }
+.part { margin: 2rem 0; }
+.part h2 { border: 0; margin-bottom: .2rem; }
+.part .blurb { color: var(--muted); margin: 0 0 .8rem; }
+.lesson-list { list-style: none; padding: 0; margin: 0; display: grid; gap: .45rem; }
+.lesson-list a { display: flex; gap: .9rem; align-items: center; padding: .55rem .9rem; border: 1px solid var(--line); border-radius: 10px; text-decoration: none; color: var(--fg); background: var(--bg); }
+.lesson-list a:hover { border-color: var(--accent); }
+.lesson-list .num { font-family: var(--mono); color: var(--muted); width: 1.8em; }
+.lesson-list .t { flex: 1; }
+.lesson-list .h { font-size: .8rem; color: var(--muted); }
+.lesson-list .chk { width: 1.3em; text-align: center; color: var(--ok); font-weight: 700; }
+.lesson-list a.missing { opacity: .45; pointer-events: none; }

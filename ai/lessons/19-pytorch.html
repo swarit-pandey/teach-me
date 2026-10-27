@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moving to PyTorch</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="19">
+<main>
+
+<div class="kicker">Part 5 · Deep learning</div>
+<h1>Moving to PyTorch</h1>
+<p class="lede">You've built every piece by hand: batched forward passes (lesson 16), an autograd engine (17), optimizers and LayerNorm (18). PyTorch is those same pieces, engineered: tensors that run on GPUs, an autograd engine that records tensor ops, and a library of modules and optimizers. Because you've built a toy version of each, nothing in this lesson is magic. It's mostly a mapping from your code to theirs, plus the habits that keep shapes and gradients sane.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Move between NumPy and torch tensors, and predict broadcasting and matmul shapes before running code.</li>
+    <li>Map <code>requires_grad</code>, <code>grad_fn</code>, <code>.backward()</code> and <code>.grad</code> onto your own micrograd.</li>
+    <li>Write <code>nn.Module</code>s with <code>nn.Parameter</code>s, and the canonical five-line training loop with an optimizer and a <code>DataLoader</code>.</li>
+    <li>Debug shape errors systematically, and understand views, strides and <code>.contiguous()</code>.</li>
+    <li>Write a custom <code>autograd.Function</code> and verify it with <code>gradcheck</code>.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="map">1. You already wrote this</h2>
+<p>Here is your workbook-17 engine next to PyTorch, concept by concept:</p>
+<table>
+  <tr><th>Your micrograd</th><th>PyTorch</th><th>Notes</th></tr>
+  <tr><td><code>Value(3.0)</code></td><td><code>torch.tensor(3.0, requires_grad=True)</code></td><td>a leaf the engine tracks; any shape, not just scalars</td></tr>
+  <tr><td><code>out._prev</code>, <code>out._op</code></td><td><code>out.grad_fn</code>, <code>out.grad_fn.next_functions</code></td><td>the recorded graph (try printing them)</td></tr>
+  <tr><td><code>out._backward</code></td><td><code>out.grad_fn</code> (e.g. <code>MulBackward0</code>)</td><td>each op's VJP (lesson 17 §7)</td></tr>
+  <tr><td><code>loss.backward()</code></td><td><code>loss.backward()</code></td><td>topological sort + VJPs, in C++</td></tr>
+  <tr><td><code>p.grad</code> (accumulates with <code>+=</code>)</td><td><code>p.grad</code> (also accumulates!)</td><td>hence <code>optimizer.zero_grad()</code></td></tr>
+  <tr><td><code>p.data -= lr * p.grad</code></td><td><code>optimizer.step()</code></td><td>your workbook-18 classes, e.g. <code>torch.optim.AdamW</code></td></tr>
+  <tr><td><code>Neuron</code>, <code>Layer</code>, <code>MLP</code></td><td><code>nn.Module</code>, <code>nn.Linear</code>, <code>nn.Sequential</code></td><td>modules own parameters and submodules</td></tr>
+</table>
+<pre><code>import torch
+x = torch.tensor([2.0, -1.0], requires_grad=True)
+y = (x * x).sum() + x[0] * 3      # the graph is built as ordinary code runs
+y.backward()
+print(x.grad)                      # tensor([7., -2.])  =  2x + [3, 0]
+print(y.grad_fn)                   # &lt;AddBackward0 ...&gt;: the node that made y</code></pre>
+<p>One important difference: PyTorch frees the graph after <code>backward()</code> to save memory. Call it twice on the same graph and you get an error, unless you pass <code>retain_graph=True</code>. Each training step builds a fresh graph, just as your micrograd did.</p>
+
+<!-- ============================================================ -->
+<h2 id="tensors">2. Tensors and NumPy</h2>
+<p>A <b>tensor</b> is an n-dimensional array: lesson 12's <code>ndarray</code> plus a <code>device</code> (CPU or GPU) and optional gradient tracking. The API is deliberately NumPy-like:</p>
+<pre><code>a = np.arange(6.0).reshape(2, 3)
+t = torch.from_numpy(a)      # shares memory with a: a[0,0] = 9 changes t too
+t2 = torch.tensor(a)         # copies
+back = t2.numpy()            # shares memory (CPU only); use t.detach().cpu().numpy() in general
+t.dtype                      # torch.float64, inherited from numpy
+torch.zeros(2, 3).dtype      # torch.float32: torch's default, numpy's is float64!
+loss.item()                  # 0-d tensor -> Python float (detaches; use it for logging)</code></pre>
+<div class="callout warning">
+<p>Three classic first-week bugs. (1) Mixing float64 data from NumPy with float32 model weights gives "expected scalar type Float but found Double". Convert with <code>.float()</code>. (2) Logging <code>total += loss</code> instead of <code>loss.item()</code> keeps every step's graph alive and leaks memory. (3) Integer class labels must be <code>torch.long</code> (int64) for <code>F.cross_entropy</code>.</p>
+</div>
+
+<h3>Broadcasting and matmul shapes</h3>
+<p>Broadcasting follows NumPy's rules exactly (lesson 12). Align the shapes on the right, and each pair of sizes must be equal or contain a 1, which stretches. <code>@</code> (<code>torch.matmul</code>) treats the last two dimensions as matrices, $(\dots, n, k) @ (\dots, k, m) \to (\dots, n, m)$, and <em>broadcasts all the leading "batch" dimensions</em>. That one rule covers a batch of sequences of token vectors hitting a weight matrix, $(B, T, C) @ (C, V) \to (B, T, V)$. You'll see it in every transformer (lessons 22–24).</p>
+
+<div class="figure">
+  <canvas id="fig-bcast" width="680" height="200"></canvas>
+  <div class="controls" id="ctl-bcast"></div>
+  <div class="readout" id="out-bcast"></div>
+  <div class="caption"><b>Try it:</b> pick an example, or type your own shapes (comma-separated) and press Enter. For <code>+</code>, sizes are compared column by column from the right. Green means equal, blue means one side is 1 and stretches, red means a mismatch. For <code>@</code>, the last two dims follow the matrix rule (the inner sizes must match) and the leading dims broadcast. Predict the result before you look.</div>
+</div>
+
+<h3>Views, strides and <code>.contiguous()</code></h3>
+<p>A tensor is a flat block of memory plus metadata: a <b>shape</b>, a <b>stride</b> (how many elements to skip in memory to move one step along each dimension), and an offset. Many operations (<code>.T</code>, <code>.transpose</code>, slicing, <code>.view</code>, <code>.expand</code>) just make new metadata over the <em>same</em> memory. They're free, but writing through them changes the original. <code>.view()</code> requires a compatible memory layout, while <code>.reshape()</code> copies when it must.</p>
+<div class="figure">
+  <canvas id="fig-stride" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-stride"></div>
+  <div class="readout" id="out-stride"></div>
+  <div class="caption"><b>Try it:</b> the bottom row is the tensor's memory, 12 numbers in a line. The grid is the tensor as you index it. Choose an operation and hover over a cell to see which memory slot it reads, at address $\text{offset} + \sum_d i_d\cdot\text{stride}_d$. After <code>.T</code> the memory is untouched and only the strides swap, so the tensor is no longer "contiguous" (row-major). That's why <code>x.T.view(-1)</code> raises an error while <code>x.T.contiguous().view(-1)</code> works: <code>.contiguous()</code> copies into fresh row-major memory.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="autograd">3. Autograd: the graph PyTorch records</h2>
+<p>Any tensor computed from a tensor with <code>requires_grad=True</code> gets a <code>grad_fn</code>: the backward node of the op that made it. Leaves you created yourself (your parameters) have <code>grad_fn = None</code>. They're accumulated into by special <code>AccumulateGrad</code> nodes, which do <code>p.grad += incoming</code>. Calling <code>loss.backward()</code> walks this graph in reverse topological order, exactly like your <code>Value.backward</code>.</p>
+
+<div class="figure">
+  <canvas id="fig-graph" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-graph"></div>
+  <div class="readout" id="out-graph"></div>
+  <div class="caption"><b>Try it:</b> the graph PyTorch records for <code>loss = ((x @ W + b).relu() - y).pow(2).mean()</code>, with batch size $N$. Click any node to see its forward op, output shape and what its backward computes. Press <em>backward step</em> to walk the graph in reverse topological order, watching the gradient's shape at each edge. Notice <code>AddBackward0</code>: <code>b</code> was broadcast over $N$ rows, so its gradient gets summed back to shape (4,). Your <code>unbroadcast</code> from workbook 17 lives inside it.</div>
+</div>
+
+<div class="callout key">
+<p>Three switches control recording. <code>with torch.no_grad():</code> turns it off, which you want for evaluation and for manual parameter updates. <code>t.detach()</code> returns the same data cut out of the graph. <code>model.eval()</code> is unrelated to gradients: it switches layers like dropout and BatchNorm to inference behavior. You usually want both <code>model.eval()</code> and <code>no_grad()</code> when evaluating.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="modules">4. <code>nn.Module</code> and <code>nn.Parameter</code></h2>
+<p>A <b>module</b> is an object that owns parameters and submodules and defines <code>forward</code>. Assigning an <code>nn.Parameter</code> or another module as an attribute <em>registers</em> it, so <code>model.parameters()</code> can find every learnable tensor recursively. That's how the optimizer knows what to update. Here is <code>nn.Linear</code>, essentially as PyTorch writes it:</p>
+<pre><code>class MyLinear(nn.Module):
+    def __init__(self, d_in, d_out):
+        super().__init__()                                   # sets up the registries
+        k = 1 / d_in ** 0.5
+        self.weight = nn.Parameter(torch.empty(d_out, d_in).uniform_(-k, k))
+        self.bias   = nn.Parameter(torch.empty(d_out).uniform_(-k, k))
+
+    def forward(self, x):                                    # x: (..., d_in)
+        return x @ self.weight.T + self.bias                 # (..., d_out)
+
+class MLP(nn.Module):
+    def __init__(self, sizes):
+        super().__init__()
+        self.layers = nn.ModuleList(MyLinear(a, b) for a, b in zip(sizes, sizes[1:]))
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = layer(x)                                     # call the module, not .forward
+            if i &lt; len(self.layers) - 1:
+                x = torch.relu(x)
+        return x</code></pre>
+<p>Notice PyTorch's weight convention: shape <code>(d_out, d_in)</code> and <code>x @ W.T</code>. In lessons 16–18 we used <code>(d_in, d_out)</code> and <code>x @ W</code>. Same math, transposed storage. Use <code>nn.ModuleList</code> or <code>nn.Sequential</code>, never a plain Python list, or the parameters silently go unregistered and never train. <code>model.state_dict()</code> is the dictionary of every registered tensor, which is what you save and load.</p>
+
+<div class="example">
+  <div class="label">Worked example: counting a model's parameters</div>
+  <p>The character language model of lesson 20: <code>nn.Embedding(65, 10)</code>, then <code>nn.Linear(50, 100)</code>, then <code>nn.Linear(100, 65)</code>.</p>
+  <p>Embedding: a $65\times10$ table, so 650 parameters, no bias. First linear: $50\cdot100 + 100 = 5{,}100$. Second: $100\cdot65 + 65 = 6{,}565$. Total $12{,}315$, which is what <code>sum(p.numel() for p in model.parameters())</code> prints.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="loop">5. Optimizers and the canonical training loop</h2>
+<p>Every PyTorch training script in the world contains these five lines:</p>
+<pre><code>opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
+for xb, yb in loader:
+    logits = model(xb)                      # 1. forward  (builds the graph)
+    loss = F.cross_entropy(logits, yb)      # 2. loss     (a 0-d tensor)
+    opt.zero_grad()                         # 3. clear .grad (it accumulates!)
+    loss.backward()                         # 4. backward (fills p.grad)
+    opt.step()                              # 5. update   (your lesson-18 Adam)</code></pre>
+<p><code>F.cross_entropy</code> takes raw <b>logits</b> and integer labels. It applies log-softmax internally, in the numerically stable way from lesson 14. Don't softmax first. Learning-rate schedules attach as <code>torch.optim.lr_scheduler</code> objects, stepped once per iteration.</p>
+
+<div class="figure wide">
+  <div class="row">
+    <div style="flex:1.4 1 360px"><canvas id="fig-curves" width="440" height="360"></canvas></div>
+    <div><canvas id="fig-curves-data" width="300" height="360"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-curves"></div>
+  <div class="readout" id="out-curves"></div>
+  <div class="caption"><b>Try it:</b> a small MLP trains in your browser with the five-line loop above, on a noisy spirals dataset split into 240 training and 60 validation points. Left: <span style="color:var(--c1)">training</span> and <span style="color:var(--c4)">validation</span> loss per epoch. Right: the data and decision regions. Explore: (1) SGD vs Adam at the same learning rate; (2) a learning rate that's too high, giving a spiky or diverging curve; (3) batch size 8 vs 240, which gives a noisy curve vs a smooth slow one; (4) hidden width 128 with long training, where validation loss turns back up (overfitting, lesson 15); (5) the <b>forgot zero_grad()</b> bug, where gradients pile up step after step and training goes haywire.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="data">6. <code>Dataset</code> and <code>DataLoader</code></h2>
+<p>A <code>Dataset</code> is anything with <code>__len__</code> and <code>__getitem__(i)</code> returning one example. A <code>DataLoader</code> wraps it to produce shuffled minibatches. It draws indices, calls <code>__getitem__</code> for each, and <b>collates</b> them by stacking the first elements into an <code>xb</code> of shape <code>(B, ...)</code> and the labels into <code>yb</code>.</p>
+<pre><code>class Blobs(Dataset):
+    def __init__(self, X, y):  self.X, self.y = torch.as_tensor(X).float(), torch.as_tensor(y).long()
+    def __len__(self):         return len(self.y)
+    def __getitem__(self, i):  return self.X[i], self.y[i]
+
+loader = DataLoader(Blobs(X, y), batch_size=64, shuffle=True)   # reshuffled every epoch
+xb, yb = next(iter(loader))                                     # (64, 2), (64,)</code></pre>
+<p>When the whole dataset is a single tensor in memory, as for our character corpus in lesson 20, it's simpler and faster to index random rows directly: <code>idx = torch.randint(0, N, (B,)); xb, yb = X[idx], Y[idx]</code>.</p>
+
+<!-- ============================================================ -->
+<h2 id="shapes">7. Shape debugging, systematically</h2>
+<p>Most PyTorch bugs are shape bugs. Worse, broadcasting turns many of them into <em>silent</em> wrong answers instead of errors. A routine that works:</p>
+<ol>
+  <li><b>Write the shapes in comments</b> on every line: <code># (B, T, C)</code>. Name the dimensions.</li>
+  <li><b>Run one tiny batch</b> with distinct sizes (B=2, T=3, C=5), so that a transposed pair of dimensions can't hide by being equal.</li>
+  <li><b>Assert</b> the shapes you expect: <code>assert logits.shape == (B, V)</code>.</li>
+  <li>Watch the silent broadcasts. <code>(N,) - (N, 1)</code> is <code>(N, N)</code>, not <code>(N,)</code>. Use <code>keepdim=True</code> in reductions you'll broadcast back.</li>
+  <li>Know the conventions. <code>F.cross_entropy</code> wants logits of shape <code>(N, C)</code> and targets <code>(N,)</code>. For sequences, flatten <code>(B, T, V)</code> to <code>(B·T, V)</code> first.</li>
+</ol>
+<div class="example">
+  <div class="label">Worked example: a silent broadcasting bug</div>
+  <p>You compute an MSE with <code>pred = model(x)</code> of shape <code>(N, 1)</code> and targets <code>y</code> of shape <code>(N,)</code>. Then <code>((pred - y) ** 2).mean()</code> broadcasts <code>(N, 1) - (N,)</code> to <code>(N, N)</code>. It compares every prediction with every target and averages $N^2$ numbers. No error, a plausible-looking loss, and a model that learns to predict the mean.</p>
+  <p>Fix: <code>pred.squeeze(-1)</code> (or <code>y[:, None]</code>), then <code>assert pred.shape == y.shape</code>. With $N = 32$ the buggy loss averages 1024 terms. Run it once with $N=2$ and print the shape, and you'd have caught it immediately.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="custom">8. <code>gradcheck</code> and custom <code>autograd.Function</code>s</h2>
+<p>Sometimes you want to supply the backward yourself. It might be faster (a fused kernel), more stable (a hand-simplified formula), or deliberately "wrong" (the straight-through estimator for rounding). That's a <code>torch.autograd.Function</code>: a <code>forward</code> and a <code>backward</code>, glued into the graph as one node, which is literally your <code>Value</code> op with its <code>_backward</code> closure.</p>
+<pre><code>class ScaledTanh(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, a):                 # y = tanh(a x), a is a 0-d "gain"
+        t = torch.tanh(a * x)
+        ctx.save_for_backward(x, a, t)
+        return t
+
+    @staticmethod
+    def backward(ctx, g):                   # g = dL/dy, same shape as y
+        x, a, t = ctx.saved_tensors
+        local = 1 - t * t
+        return g * local * a, (g * local * x).sum()   # one grad per input, same shapes
+
+x = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+a = torch.tensor(0.7, dtype=torch.float64, requires_grad=True)
+torch.autograd.gradcheck(ScaledTanh.apply, (x, a))     # True, or raises with the mismatch</code></pre>
+<p><code>gradcheck</code> is your workbook-17 numerical-gradient test, built in. It perturbs every input entry, takes central differences, and compares with your backward. Use <b>float64</b>: with float32's roughly 7 significant digits, the difference quotient's rounding error ($\approx 10^{-7}/h$) swamps the comparison.</p>
+<div class="callout ml">
+<p>Everything from here on (embeddings and RNNs in lesson 20, attention in 22, the GPT you train in 24, and the RL fine-tuning in 26–29) is written in exactly this vocabulary: modules, parameters, a loss, <code>backward()</code>, <code>step()</code>. When something misbehaves, the fallbacks are what you now know: check shapes, check gradients numerically, and check that <code>zero_grad</code> and <code>eval</code> are where they should be.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>What is the shape of <code>A + B</code> for <code>A</code> of shape <code>(8, 1, 6)</code> and <code>B</code> of shape <code>(7, 1)</code>? How many elements does the result have?</p>
+<div class="numcheck" data-answer="336" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Right-align: <code>(8, 1, 6)</code> vs <code>(·, 7, 1)</code> → <code>(8, 7, 6)</code>, which has $8\cdot7\cdot6 = 336$ elements.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Logits are computed as <code>h @ W</code> with <code>h</code> of shape <code>(4, 8, 16)</code> (batch, time, channels) and <code>W</code> of shape <code>(16, 65)</code>. What is the output shape, and what shapes must you pass to <code>F.cross_entropy</code> with targets of shape <code>(4, 8)</code>? Enter the number of rows of the flattened logits.</p>
+<div class="numcheck" data-answer="32" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p><code>(4, 8, 65)</code>. Flatten to <code>logits.view(-1, 65)</code>, shape <code>(32, 65)</code>, and <code>targets.view(-1)</code>, shape <code>(32,)</code>. Each of the 32 positions is its own classification problem.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">warm-up</span>
+<p>How many parameters does <code>nn.Sequential(nn.Linear(784, 256), nn.ReLU(), nn.Linear(256, 10))</code> have?</p>
+<div class="numcheck" data-answer="203530" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$784\cdot256 + 256 + 256\cdot10 + 10 = 200{,}704 + 256 + 2{,}560 + 10 = 203{,}530$. ReLU has none.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>A contiguous float tensor has shape <code>(2, 3, 4)</code>. What is its stride? What is the stride of <code>x.transpose(0, 2)</code>? Enter the three strides of the transposed tensor.</p>
+<div class="numcheck" data-answer="1,4,12" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Row-major: the last dim moves 1 element at a time, the middle one 4, the first $3\cdot4 = 12$. So the stride is <code>(12, 4, 1)</code>. Transposing dims 0 and 2 swaps their strides: <code>(1, 4, 12)</code>, with shape <code>(4, 3, 2)</code> and the same memory. It is not contiguous, since a row-major <code>(4, 3, 2)</code> tensor would have strides <code>(6, 2, 1)</code>.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>You forget <code>opt.zero_grad()</code> and use plain SGD. Suppose the true gradient happens to be the same constant $g$ at every step. The first step moves the parameter by $-\eta g$. By what multiple of $\eta g$ has it moved in total after 3 steps?</p>
+<div class="numcheck" data-answer="6" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>The stored gradient after step $k$ is $kg$ (it accumulates), so the moves are $\eta g, 2\eta g, 3\eta g$, for a total of $6\eta g$. In general the effective learning rate grows linearly with the step count, which is why training "goes haywire" in the figure in §5. It's also exactly how deliberate <em>gradient accumulation</em> works: call <code>backward()</code> on several minibatches, then <code>step()</code> and <code>zero_grad()</code> once.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · derivation</span>
+<p>Write the <code>backward</code> of a custom <code>Softplus</code> function $y = \log(1 + e^x)$. What is $dy/dx$ at $x = 0$? Why might you implement the forward as <code>torch.where(x > 20, x, torch.log1p(torch.exp(x)))</code>?</p>
+<div class="numcheck" data-answer="0.5" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$dy/dx = e^x/(1+e^x) = \sigma(x)$, so <code>backward</code> returns <code>g * torch.sigmoid(x)</code>, and at 0 the slope is $0.5$. For large $x$, $e^x$ overflows (float32 overflows past $x\approx 88$), but $\log(1+e^x)\approx x$ there. The <code>where</code> keeps the forward finite, and <code>log1p</code> is accurate when $e^x$ is tiny. One subtlety: <code>torch.where</code> evaluates both branches, and the inf from the unused branch can still poison an autograd-derived gradient. A custom backward avoids that.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Your validation loop is <code>for xb, yb in val_loader: total += F.cross_entropy(model(xb), yb)</code>, and memory grows until the process dies. Name two independent fixes.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(1) Wrap the loop in <code>with torch.no_grad():</code> so no graph is recorded at all. (2) Accumulate <code>.item()</code> instead of the tensor. Without either, <code>total</code> is a tensor whose graph links back through every batch's forward pass, so nothing can be freed. Also call <code>model.eval()</code> if the model has dropout or BatchNorm.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>Why does <code>gradcheck</code> insist on float64? Estimate the error of a central difference $\frac{f(x+h)-f(x-h)}{2h}$ when $f$ is computed with relative rounding error $\varepsilon$ (about $6\times10^{-8}$ for float32, $10^{-16}$ for float64), and find the best $h$.</p>
+<details class="hint"><summary>Hint</summary><p>Two error sources: truncation, $\approx \frac{h^2}{6}|f'''|$ (from Taylor, lesson 05), and rounding, $\approx \varepsilon|f|/h$. Minimize the sum over $h$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Total error $E(h) \approx \frac{h^2}{6}|f'''| + \frac{\varepsilon|f|}{h}$, minimized at $h\sim\varepsilon^{1/3}$, which gives $E\sim\varepsilon^{2/3}$. For float32 that's $h\approx 4\times10^{-3}$ with an error around $10^{-5}$ in the best case, often much worse, too noisy to distinguish a subtly wrong backward from a right one. For float64, $h\approx5\times10^{-6}$ and $E\approx10^{-11}$, a crisp test. PyTorch's default <code>eps=1e-6</code> is tuned for float64.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">You store your layers as <code>self.layers = [nn.Linear(4, 4), nn.Linear(4, 2)]</code>. What happens?</div>
+  <div class="opts">
+    <button data-k="a">Works fine; Python lists are scanned automatically</button>
+    <button data-k="b">The forward pass works, but model.parameters() is empty for those layers, so the optimizer never updates them</button>
+    <button data-k="c">PyTorch raises an error at construction</button>
+    <button data-k="d">The layers share weights</button>
+  </div>
+  <div class="explain">Only attributes that are Parameters or Modules (including ModuleList/ModuleDict/Sequential) get registered. A plain list is invisible to .parameters(), .to(device) and state_dict(). It's a silent bug.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Which order of the loop body is correct?</div>
+  <div class="opts">
+    <button data-k="a">backward → zero_grad → step</button>
+    <button data-k="b">step → backward → zero_grad</button>
+    <button data-k="c">zero_grad → backward → step (zero_grad may also come right after step)</button>
+    <button data-k="d">Order doesn't matter as long as all three are called</button>
+  </div>
+  <div class="explain">The grads must be cleared before backward fills them, and step must read them after. Zeroing between backward and step would update with zeros.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q"><code>x</code> is a contiguous (3, 4) tensor. Which of these copies memory?</div>
+  <div class="opts">
+    <button data-k="a">x.T.contiguous()</button>
+    <button data-k="b">x.T</button>
+    <button data-k="c">x.view(4, 3)</button>
+    <button data-k="d">x[:, 1]</button>
+  </div>
+  <div class="explain">Transpose, view and slicing only change shape, stride and offset. .contiguous() on a non-contiguous tensor allocates row-major memory and copies. (Note that x.view(4, 3) is <em>not</em> the transpose: it re-reads the same 12 numbers in order.)</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Your logits have shape (N, C). What should go into <code>F.cross_entropy</code>?</div>
+  <div class="opts">
+    <button data-k="a">softmax(logits) and one-hot targets of shape (N, C)</button>
+    <button data-k="b">log(softmax(logits)) and float targets</button>
+    <button data-k="c">logits.T and targets of shape (N, 1)</button>
+    <button data-k="d">raw logits (N, C) and integer class targets (N,) of dtype long</button>
+  </div>
+  <div class="explain">cross_entropy applies a stable log-softmax itself. Softmaxing first double-applies it, and gives a worse loss with weaker gradients.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>PyTorch</th><th>Your version</th></tr>
+  <tr><td>Tracked tensor</td><td><code>requires_grad=True</code>, <code>.grad_fn</code></td><td><code>Value</code>, <code>_prev</code>, <code>_backward</code></td></tr>
+  <tr><td>Backprop</td><td><code>loss.backward()</code>; grads accumulate</td><td>workbook 17</td></tr>
+  <tr><td>Model</td><td><code>nn.Module</code> + <code>nn.Parameter</code>, <code>ModuleList</code></td><td><code>MLP</code> of workbook 17</td></tr>
+  <tr><td>Optimizer</td><td><code>torch.optim.AdamW</code>, <code>.zero_grad()</code>, <code>.step()</code></td><td>workbook 18</td></tr>
+  <tr><td>Data</td><td><code>Dataset</code> + <code>DataLoader</code> (shuffle, collate)</td><td>minibatch indices</td></tr>
+  <tr><td>Memory layout</td><td>shape + stride + offset; views are free</td><td>numpy works the same</td></tr>
+  <tr><td>Custom op</td><td><code>autograd.Function</code> + <code>gradcheck</code> (float64)</td><td><code>Value</code> op + numerical grads</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 19: build it</h3>
+  <p>Open <code>workbooks/19_pytorch/exercises.py</code>. You'll implement <code>broadcast_shape</code> by hand (tested against <code>torch.broadcast_shapes</code>), <code>grad_of</code> with autograd, a <code>MyLinear</code> module that is drop-in compatible with <code>nn.Linear</code>'s <code>state_dict</code>, an <code>MLP</code>, a <code>Dataset</code>, the canonical training loop, and lesson 16's spiral classifier in about 15 lines. Finally you'll write a custom <code>ScaledTanh</code> autograd function verified by <code>gradcheck</code>, then train its gain. Grade yourself with:</p>
+  <pre><code>./course check 19</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>The official PyTorch tutorials: "Learn the Basics" and "Autograd mechanics" (pytorch.org).</li>
+  <li>Edward Z. Yang, "PyTorch internals" (blog post): tensors, strides, and how the autograd graph is stored.</li>
+  <li>Andrej Karpathy, "A Recipe for Training Neural Networks" (blog post): debugging habits.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, fmt, color, withAlpha } = Course;
+
+  // ---------- fig: broadcasting / matmul shape inspector ----------
+  {
+    const p = new Plot("#fig-bcast", { xmin: 0, xmax: 680, ymin: 0, ymax: 200 });
+    const out = document.getElementById("out-bcast");
+    const ctl = document.getElementById("ctl-bcast");
+    let A = [8, 1, 6], B = [7, 1], op = "+";
+    const mkInput = (lab, val, set) => { const l = document.createElement("label"), i = document.createElement("input"); i.value = val.join(", "); i.style.cssText = "width:8em;font-family:var(--mono);padding:.2rem .4rem;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg)";
+      i.addEventListener("change", () => { const v = i.value.split(/[,\s]+/).filter(Boolean).map(Number); if (v.every(n => Number.isInteger(n) && n >= 1)) { set(v); p.render(); } }); l.append(lab, i); ctl.appendChild(l); return i; };
+    const ex = { a: [[8, 1, 6], [7, 1], "+"], b: [[4, 3], [3], "+"], c: [[2, 3], [3, 2], "+"], d: [[4, 8, 16], [16, 65], "@"], e: [[5, 1, 3, 4], [6, 4, 2], "@"], f: [[3, 4], [3, 4], "@"], g: [[32, 1], [32], "+"] };
+    select(ctl, "example ", [["a", "(8,1,6) + (7,1)"], ["b", "(4,3) + (3,)  bias"], ["c", "(2,3) + (3,2)"], ["d", "(B,T,C) @ (C,V)"], ["e", "batched @ with broadcast"], ["f", "(3,4) @ (3,4)"], ["g", "(N,1) − (N,)  silent bug"]], k => { [A, B, op] = ex[k].map(v => Array.isArray(v) ? v.slice() : v); ia.value = A.join(", "); ib.value = B.join(", "); so.value = op; p.render(); });
+    const ia = mkInput("A ", A, v => A = v), ib = mkInput("B ", B, v => B = v);
+    const so = select(ctl, "op ", [["+", "A + B (elementwise)"], ["@", "A @ B (matmul)"]], v => { op = v; p.render(); });
+    const bc = (a, b) => { const n = Math.max(a.length, b.length), pa = Array(n - a.length).fill(null).concat(a), pb = Array(n - b.length).fill(null).concat(b), res = [], st = [];
+      for (let i = 0; i < n; i++) { const x = pa[i] ?? 1, y = pb[i] ?? 1; if (x === y) { res.push(x); st.push("eq"); } else if (x === 1 || y === 1) { res.push(Math.max(x, y)); st.push("str"); } else { res.push(null); st.push("bad"); } } return { pa, pb, res, st }; };
+    p.render(() => {
+      const cw = 64, x0 = 140; let lines = [];
+      const row = (y, label, dims, st, kind) => {
+        p.label(x0 - 14, y, label, { align: "right", font: "600 13px monospace", color: "muted" });
+        dims.forEach((d, i) => { const X = x0 + i * cw, s = st ? st[i] : null, col = kind === "res" ? (d === null ? "bad" : "c5") : s === "bad" ? "bad" : s === "str" && d !== null && d === 1 ? "c1" : s === "str" && d === null ? "c1" : s === "eq" || s === "str" ? "ok" : "c5";
+          if (d === null && kind !== "res") { p.rect(X + 4, y - 15, X + cw - 4, y + 15, { fill: "muted", fillAlpha: .06, color: "muted", width: 1, dash: [3, 3] }); p.label(X + cw / 2, y, "(1)", { align: "center", color: "muted", font: "12px monospace" }); return; }
+          p.rect(X + 4, y - 15, X + cw - 4, y + 15, { fill: col, fillAlpha: .18, color: col, width: 1.5 });
+          p.label(X + cw / 2, y, d === null ? "✗" : String(d), { align: "center", color: d === null ? "bad" : "fg", font: "600 14px monospace" }); });
+      };
+      if (op === "+") {
+        const r = bc(A, B), ok = !r.res.includes(null);
+        row(150, "A", r.pa, r.st); row(105, "B", r.pb, r.st); p.line(x0, 80, x0 + r.res.length * cw, 80, { color: "muted", width: 1 }); row(50, "A + B", r.res, null, "res");
+        p.label(x0, 185, "align on the right → compare column by column", { color: "muted", font: "12px sans-serif" });
+        out.textContent = ok ? `A ${JSON.stringify(A)} + B ${JSON.stringify(B)}  →  shape (${r.res.join(", ")})   = ${r.res.reduce((a, b) => a * b, 1)} elements` + (r.st.includes("str") ? "\nblue columns: a size-1 (or missing) dim is stretched by copying, without using any memory" : "")
+          : `✗ RuntimeError: sizes ${r.pa.map((v, i) => r.st[i] === "bad" ? v : null).filter(v => v !== null)} and ${r.pb.map((v, i) => r.st[i] === "bad" ? v : null).filter(v => v !== null)} don't match and neither is 1`;
+        if (JSON.stringify(A) === "[32,1]" && JSON.stringify(B) === "[32]") out.textContent += "\n⚠ (N,1) − (N,) silently became (N,N): the MSE bug of §7!";
+      } else {
+        if (A.length < 2 || B.length < 2) { out.textContent = "this inspector shows the ≥2-D case of @ (1-D operands get a dim added, then removed)"; return; }
+        const ma = A.slice(-2), mb = B.slice(-2), r = bc(A.slice(0, -2), B.slice(0, -2)), inner = ma[1] === mb[0];
+        const nb = r.res.length, Xm = x0 + nb * cw + 30;
+        if (nb) { row(150, "A batch", r.pa, r.st); row(105, "B batch", r.pb, r.st); row(50, "result", r.res, null, "res"); }
+        const mat = (x, y, s, lab, good) => { p.rect(x, y - 15, x + 2 * cw - 8, y + 15, { fill: good ? "c3" : "bad", fillAlpha: .18, color: good ? "c3" : "bad", width: 1.5 }); p.label(x + cw - 4, y, `${s[0]} × ${s[1]}`, { align: "center", font: "600 14px monospace" }); p.label(x + 2 * cw, y, lab, { color: "muted", font: "12px sans-serif" }); };
+        mat(Xm, 150, ma, "A's matrices (n × k)", inner); mat(Xm, 105, mb, "B's matrices (k × m)", inner);
+        p.line(nb ? x0 : Xm, 80, Xm + 2 * cw, 80, { color: "muted", width: 1 });
+        if (inner) mat(Xm, 50, [ma[0], mb[1]], "n × m", true); else p.label(Xm + cw - 4, 50, `✗ k: ${ma[1]} ≠ ${mb[0]}`, { align: "center", color: "bad", font: "600 14px monospace" });
+        if (nb) p.label(x0, 185, "batch dims broadcast", { color: "muted", font: "12px sans-serif" });
+        p.label(Xm, 185, "last two dims: matrix rule", { color: "muted", font: "12px sans-serif" });
+        const ok = inner && !r.res.includes(null), shp = [...r.res, ma[0], mb[1]];
+        out.textContent = ok ? `A ${JSON.stringify(A)} @ B ${JSON.stringify(B)}  →  (${shp.join(", ")})` + (B.length === 2 && A.length > 2 ? "\nthe same (k × m) matrix is applied to every (n × k) slice: every token of every sequence" : "")
+          : (!inner ? `✗ RuntimeError: mat1 and mat2 shapes cannot be multiplied (${ma.join("x")} and ${mb.join("x")})` : "✗ batch dims don't broadcast");
+      }
+    });
+  }
+
+  // ---------- fig: strides ----------
+  {
+    const p = new Plot("#fig-stride", { xmin: 0, xmax: 680, ymin: 0, ymax: 300 });
+    const out = document.getElementById("out-stride");
+    const ops = {
+      orig: { name: "x  (contiguous)", shape: [3, 4], stride: [4, 1], off: 0, mem: "same memory" },
+      T: { name: "x.T", shape: [4, 3], stride: [1, 4], off: 0, mem: "same memory (a view)" },
+      view: { name: "x.view(4, 3)", shape: [4, 3], stride: [3, 1], off: 0, mem: "same memory (a view): the same 12 numbers re-read in order" },
+      col: { name: "x[:, 1]", shape: [3], stride: [4], off: 1, mem: "same memory (a view) with offset 1" },
+      sub: { name: "x[1:, ::2]", shape: [2, 2], stride: [4, 2], off: 4, mem: "same memory (a view): step 2 doubles the stride" },
+      Tc: { name: "x.T.contiguous()", shape: [4, 3], stride: [3, 1], off: 0, mem: "NEW memory: a row-major copy", copy: true },
+    };
+    let k = "T", hov = null;
+    select("#ctl-stride", "operation ", Object.entries(ops).map(([key, o]) => [key, o.name]), v => { k = v; hov = null; p.render(); }).value = k;
+    const baseMem = Array.from({ length: 12 }, (_, i) => i);
+    const cellsOf = o => { const out2 = []; if (o.shape.length === 1) for (let i = 0; i < o.shape[0]; i++) out2.push([[i], o.off + i * o.stride[0]]); else for (let i = 0; i < o.shape[0]; i++) for (let j = 0; j < o.shape[1]; j++) out2.push([[i, j], o.off + i * o.stride[0] + j * o.stride[1]]); return out2; };
+    const geom = o => { const rows = o.shape.length === 1 ? 1 : o.shape[0], cols = o.shape.length === 1 ? o.shape[0] : o.shape[1], cs = 40; return { rows, cols, cs, gx: 340 - cols * cs / 2, gy: 270 }; };
+    p.canvas.addEventListener("pointermove", e => { const r = p.canvas.getBoundingClientRect(), px = (e.clientX - r.left) * 680 / r.width, py = (e.clientY - r.top) * 300 / r.height, o = ops[k], g = geom(o);
+      const c = Math.floor((px - g.gx) / g.cs), rr = Math.floor((py - (300 - g.gy)) / g.cs); const nh = (c >= 0 && c < g.cols && rr >= 0 && rr < g.rows) ? (o.shape.length === 1 ? [c] : [rr, c]) : null;
+      if (JSON.stringify(nh) !== JSON.stringify(hov)) { hov = nh; p.render(); } });
+    p.render(() => {
+      const o = ops[k], g = geom(o), cells = cellsOf(o), mem = o.copy ? cells.map(([idx]) => baseMem[idx[0] * 1 + idx[1] * 4]) : baseMem;   // copy of x.T: element [i, j] = x[j, i]
+      const val = idx => { const c = cells.find(([ii]) => JSON.stringify(ii) === JSON.stringify(idx)); return c; };
+      // grid
+      for (const [idx, addr] of cells) {
+        const i = idx.length === 1 ? 0 : idx[0], j = idx.length === 1 ? idx[0] : idx[1], X = g.gx + j * g.cs, Y = g.gy - i * g.cs, on = hov && JSON.stringify(hov) === JSON.stringify(idx);
+        const memIndex = o.copy ? cells.indexOf(cells.find(c => c[0] === idx)) : addr;
+        p.rect(X + 2, Y - g.cs + 2, X + g.cs - 2, Y - 2, { fill: on ? "c4" : "c1", fillAlpha: on ? .45 : .15, color: on ? "c4" : "c1", width: 1.2 });
+        p.label(X + g.cs / 2, Y - g.cs / 2, String(o.copy ? mem[memIndex] : baseMem[addr]), { align: "center", font: "600 14px monospace" });
+      }
+      p.label(g.gx - 10, g.gy - g.cs / 2, o.name, { align: "right", color: "fg", font: "600 13px monospace" });
+      // memory strip
+      const mx = 100, mw = 40, my = 60;
+      p.label(mx - 10, my, o.copy ? "new memory" : "memory", { align: "right", color: "muted", font: "12px sans-serif" });
+      const n = o.copy ? cells.length : 12;
+      for (let a = 0; a < n; a++) {
+        const used = o.copy ? true : cells.some(c => c[1] === a), hit = hov && (o.copy ? cells.findIndex(c => JSON.stringify(c[0]) === JSON.stringify(hov)) === a : val(hov) && val(hov)[1] === a);
+        p.rect(mx + a * mw + 2, my - 16, mx + (a + 1) * mw - 2, my + 16, { fill: hit ? "c4" : used ? "c2" : "muted", fillAlpha: hit ? .5 : used ? .18 : .05, color: hit ? "c4" : used ? "c2" : "muted", width: 1.2 });
+        p.label(mx + a * mw + mw / 2, my, String(o.copy ? mem[a] : baseMem[a]), { align: "center", font: "13px monospace", color: used ? "fg" : "muted" });
+        p.label(mx + a * mw + mw / 2, my - 26, String(a), { align: "center", font: "10px monospace", color: "muted" });
+      }
+      if (hov && !o.copy) { const c = val(hov); if (c) { const i = hov.length === 1 ? 0 : hov[0], j = hov.length === 1 ? hov[0] : hov[1]; p.line(g.gx + j * g.cs + g.cs / 2, g.gy - (i + 1) * g.cs + 2, mx + c[1] * mw + mw / 2, my + 16, { color: "c4", width: 2, dash: [4, 3] }); } }
+      const contig = JSON.stringify(o.stride) === JSON.stringify(o.shape.length === 1 ? [1] : [o.shape[1], 1]) && o.off === 0;
+      let hv = ""; if (hov && !o.copy) { const c = val(hov); hv = `\nelement [${hov.join(", ")}] → address ${o.off} + ` + hov.map((v, d) => `${v}·${o.stride[d]}`).join(" + ") + ` = ${c[1]}`; }
+      out.textContent = `${o.name}:  shape (${o.shape.join(", ")})   stride (${o.stride.join(", ")})   offset ${o.off}   is_contiguous() = ${contig}\n${o.mem}` + hv;
+    });
+  }
+
+  // ---------- fig: torch autograd graph ----------
+  {
+    const p = new Plot("#fig-graph", { xmin: 0, xmax: 10, ymin: 0, ymax: 6.2 });
+    const out = document.getElementById("out-graph");
+    let N = 32, sel = null, bstep = -1;
+    slider("#ctl-graph", { label: "batch N ", min: 1, max: 64, step: 1, value: N }, v => { N = v; p.render(); });
+    const nodes = () => [
+      { id: "x", x: 0.6, y: 5.4, t: "x", leaf: true, shape: `(${N}, 3)`, rg: false, info: "input batch: a leaf with requires_grad=False, so no gradient is computed for it" },
+      { id: "W", x: 0.6, y: 4.0, t: "W", leaf: true, shape: "(3, 4)", rg: true, info: "parameter (leaf, requires_grad=True). Its AccumulateGrad node does W.grad += incoming. grad_fn is None." },
+      { id: "mm", x: 2.2, y: 4.7, t: "MmBackward0", ins: ["x", "W"], shape: `(${N}, 4)`, info: "forward: x @ W.   backward: dW = xᵀ·g (3×4), dx = g·Wᵀ (skipped: x doesn't need grad)" },
+      { id: "b", x: 2.2, y: 2.7, t: "b", leaf: true, shape: "(4,)", rg: true, info: "bias parameter, broadcast over the N rows in the forward pass" },
+      { id: "add", x: 3.9, y: 3.7, t: "AddBackward0", ins: ["mm", "b"], shape: `(${N}, 4)`, info: `forward: + b (broadcast).   backward: passes g through to both inputs, summing over the ${N} rows for b → shape (4,)` },
+      { id: "relu", x: 5.6, y: 3.7, t: "ReluBackward0", ins: ["add"], shape: `(${N}, 4)`, info: "forward: relu.   backward: g · 1[input > 0] (a mask saved from the forward pass)" },
+      { id: "y", x: 5.6, y: 1.6, t: "y", leaf: true, shape: `(${N}, 4)`, rg: false, info: "targets: no grad" },
+      { id: "sub", x: 7.2, y: 2.6, t: "SubBackward0", ins: ["relu", "y"], shape: `(${N}, 4)`, info: "forward: −.   backward: +g to the left input, −g to the right (y doesn't need it)" },
+      { id: "pow", x: 8.4, y: 4.0, lab: "right", t: "PowBackward0", ins: ["sub"], shape: `(${N}, 4)`, info: "forward: (·)².   backward: g · 2·input" },
+      { id: "mean", x: 8.6, y: 5.5, lab: "above", t: "MeanBackward0", ins: ["pow"], shape: "() scalar", info: `forward: mean of ${4 * N} numbers.   backward: broadcasts g/${4 * N} back to every element. loss.backward() starts here with g = 1.` },
+    ];
+    const order = ["mean", "pow", "sub", "relu", "add", "mm", "b", "W"];
+    p.onClick = (x, y) => { const ns = nodes(); let best = null, bd = 0.7; ns.forEach(n => { const d = Math.hypot(n.x - x, (n.y - y) * 1.2); if (d < bd) { bd = d; best = n.id; } }); sel = best; p.render(); };
+    button("#ctl-graph", "backward step", () => { bstep = Math.min(order.length - 1, bstep + 1); sel = order[bstep]; p.render(); });
+    button("#ctl-graph", "reset", () => { bstep = -1; sel = null; p.render(); });
+    p.render(() => {
+      const ns = nodes(), by = Object.fromEntries(ns.map(n => [n.id, n])), c = p.ctx, done = new Set(order.slice(0, bstep + 1));
+      const wOf = n => { c.save(); c.font = (n.leaf ? "600 14px " : "600 11px ") + "monospace"; const w = c.measureText(n.t).width + 16; c.restore(); return w; };
+      const clip = (n, dx, dy) => Math.min(Math.abs(dx) > 1e-9 ? (wOf(n) / 2 + 4) / Math.abs(dx) : 1e9, Math.abs(dy) > 1e-9 ? 18 / Math.abs(dy) : 1e9);
+      ns.forEach(n => (n.ins || []).forEach(i => { const a = by[i], hot = done.has(n.id) && (by[i].rg !== false);
+        const X0 = p.X(a.x), Y0 = p.Y(a.y), X1 = p.X(n.x), Y1 = p.Y(n.y), dx = X1 - X0, dy = Y1 - Y0, t0 = clip(a, dx, dy), t1 = clip(n, dx, dy);
+        p.arrow(p.toWorld(X0 + dx * t0, Y0 + dy * t0)[0], p.toWorld(X0 + dx * t0, Y0 + dy * t0)[1], p.toWorld(X1 - dx * t1, Y1 - dy * t1)[0], p.toWorld(X1 - dx * t1, Y1 - dy * t1)[1], { color: hot ? "c4" : "muted", width: hot ? 2.5 : 1.4, head: 9 }); }));
+      ns.forEach(n => {
+        const X = p.X(n.x), Y = p.Y(n.y), w = wOf(n);
+        const col = n.leaf ? (n.rg ? "c2" : "muted") : "c1", on = sel === n.id, did = done.has(n.id);
+        c.save(); c.beginPath(); if (c.roundRect) c.roundRect(X - w / 2, Y - 14, w, 28, n.leaf ? 14 : 6); else c.rect(X - w / 2, Y - 14, w, 28);
+        c.fillStyle = withAlpha(on ? "c4" : col, did ? .4 : on ? .35 : .15); c.fill(); c.strokeStyle = color(on ? "c4" : col); c.lineWidth = on ? 3 : 1.5; c.stroke(); c.restore();
+        p.label(X, Y, n.t, { px: true, align: "center", font: (n.leaf ? "600 14px " : "600 11px ") + "monospace" });
+        if (n.lab === "right") p.label(X + w / 2 + 6, Y, n.shape, { px: true, align: "left", font: "11px monospace", color: "c3" });
+        else p.label(X, n.lab === "above" ? Y - 24 : Y + 24, n.shape, { px: true, align: "center", font: "11px monospace", color: "c3" });
+      });
+      p.label(10, p.H - 14, "nodes = grad_fn objects (blue) and leaves (orange: requires_grad, grey: data)", { px: true, color: "muted", font: "12px sans-serif" });
+      const n = by[sel];
+      out.textContent = n ? `${n.t}   output shape ${n.shape}\n${n.info}` + (bstep >= 0 ? `\nbackward order so far: ${order.slice(0, bstep + 1).map(id => by[id].t).join(" → ")}` : "") : "click a node, or press backward step";
+    });
+  }
+
+  // ---------- fig: training-curve explorer ----------
+  {
+    const P = new Plot("#fig-curves", { xmin: 0, xmax: 60, ymin: 0, ymax: 1.4 });
+    const D = new Plot("#fig-curves-data", { xmin: -1.2, xmax: 1.2, ymin: -1.2, ymax: 1.2, equal: true });
+    const out = document.getElementById("out-curves");
+    const R0 = Course.rng(7), pts = [];
+    for (let j = 0; j < 3; j++) for (let i = 0; i < 100; i++) { const r = i / 99, t = j * 4 + 4 * i / 99 + R0.normal(0, 0.35); pts.push([r * Math.sin(t), r * Math.cos(t), j]); }
+    for (let i = pts.length - 1; i > 0; i--) { const k = R0.int(i + 1); [pts[i], pts[k]] = [pts[k], pts[i]]; }
+    const tr = pts.slice(0, 240), va = pts.slice(240);
+    let opt = "adam", lr = 0.01, bs = 32, H = 32, bug = false, epochs = 60, net, st, hist, ep, R;
+    const init = () => {
+      R = Course.rng(3); const he = (fi) => Math.sqrt(2 / fi);
+      net = { W1: Array.from({ length: 2 * H }, () => R.normal(0, he(2))), b1: new Array(H).fill(0), W2: Array.from({ length: H * 3 }, () => R.normal(0, he(H))), b2: [0, 0, 0] };
+      st = {}; for (const k in net) st[k] = { g: net[k].map(() => 0), m: net[k].map(() => 0), v: net[k].map(() => 0) }; st.t = 0; hist = []; ep = 0;
+    };
+    const fwd = (x, keep) => { const z = new Array(H), a = new Array(H); for (let k = 0; k < H; k++) { z[k] = x[0] * net.W1[k] + x[1] * net.W1[H + k] + net.b1[k]; a[k] = z[k] > 0 ? z[k] : 0; }
+      const s = [0, 1, 2].map(c => { let v = net.b2[c]; for (let k = 0; k < H; k++) v += a[k] * net.W2[k * 3 + c]; return v; }); return { z, a, s }; };
+    const ce = (s, y) => { const m = Math.max(...s), e = s.map(v => Math.exp(v - m)), S = e[0] + e[1] + e[2]; return { l: -Math.log(e[y] / S), p: e.map(v => v / S) }; };
+    const evalSet = set => { let L = 0, acc = 0; set.forEach(([x0, x1, y]) => { const { s } = fwd([x0, x1]); const r = ce(s, y); L += r.l; acc += s.indexOf(Math.max(...s)) === y; }); return [L / set.length, acc / set.length]; };
+    const step = batch => {
+      if (!bug) for (const k in net) st[k].g.fill(0);                         // opt.zero_grad()
+      batch.forEach(([x0, x1, y]) => {                                        // loss.backward()
+        const { z, a, s } = fwd([x0, x1]), { p: pr } = ce(s, y), n = batch.length;
+        const g = pr.map((v, c) => (v - (c === y ? 1 : 0)) / n);
+        for (let c = 0; c < 3; c++) { st.b2.g[c] += g[c]; for (let k = 0; k < H; k++) st.W2.g[k * 3 + c] += a[k] * g[c]; }
+        for (let k = 0; k < H; k++) { if (z[k] <= 0) continue; const gk = g[0] * net.W2[k * 3] + g[1] * net.W2[k * 3 + 1] + g[2] * net.W2[k * 3 + 2]; st.W1.g[k] += x0 * gk; st.W1.g[H + k] += x1 * gk; st.b1.g[k] += gk; }
+      });
+      st.t++;                                                                  // opt.step()
+      for (const k in net) { const S = st[k], w = net[k]; for (let i = 0; i < w.length; i++) { const g = S.g[i];
+        if (opt === "sgd") w[i] -= lr * g; else { S.m[i] = 0.9 * S.m[i] + 0.1 * g; S.v[i] = 0.999 * S.v[i] + 0.001 * g * g; w[i] -= lr * (S.m[i] / (1 - 0.9 ** st.t)) / (Math.sqrt(S.v[i] / (1 - 0.999 ** st.t)) + 1e-8); } } }
+    };
+    const epoch = () => {
+      const idx = tr.map((_, i) => i); for (let i = idx.length - 1; i > 0; i--) { const k = R.int(i + 1); [idx[i], idx[k]] = [idx[k], idx[i]]; }
+      for (let s = 0; s < idx.length; s += bs) step(idx.slice(s, s + bs).map(i => tr[i]));
+      const [lt, at] = evalSet(tr), [lv, av] = evalSet(va); hist.push([lt, lv, at, av]); ep++;
+    };
+    const draw = () => {
+      P.render(P => {
+        const fin = hist.flatMap(h => [h[0], h[1]]).filter(isFinite), top = Math.min(4, Math.max(1.4, ...fin.slice(0, 4)) * 1.1);
+        P.setView(-epochs * .1, epochs * 1.03, -top * .06, top);
+        P.grid({ step: epochs / 6, stepY: top > 2 ? 1 : 0.25 }).axes({ step: epochs / 6, stepY: top > 2 ? 1 : 0.25 });
+        P.path(hist.map((h, i) => [i + 1, Math.min(h[0], top)]), { color: "c1", width: 2.5 });
+        P.path(hist.map((h, i) => [i + 1, Math.min(h[1], top)]), { color: "c4", width: 2.5 });
+        P.label(60, 14, "loss per epoch:", { px: true, color: "muted", font: "12px sans-serif" });
+        P.label(160, 14, "■ train", { px: true, color: "c1", font: "600 12px sans-serif" }); P.label(220, 14, "■ val", { px: true, color: "c4", font: "600 12px sans-serif" });
+      });
+      D.render(D => {
+        const cc = ["c1", "c4", "c3"].map(k => withAlpha(color(k), .22)), c = D.ctx, res = 10;
+        for (let py = 0; py < D.H; py += res) for (let px = 0; px < D.W; px += res) { const [x, y] = D.toWorld(px + res / 2, py + res / 2), s = fwd([x, y]).s; c.fillStyle = cc[s.indexOf(Math.max(...s))]; c.fillRect(px, py, res, res); }
+        tr.forEach(([x, y, k]) => D.point(x, y, { r: 2.6, color: ["c1", "c4", "c3"][k] }));
+        va.forEach(([x, y, k]) => D.point(x, y, { r: 4, color: "bg", stroke: ["c1", "c4", "c3"][k] }));
+      });
+      const h = hist[hist.length - 1];
+      out.textContent = `epoch ${ep}/${epochs}   ${opt.toUpperCase()} lr ${lr}   batch ${bs}   hidden ${H}${bug ? "   ⚠ zero_grad() missing" : ""}\n` +
+        (h ? `train loss ${isFinite(h[0]) ? h[0].toFixed(3) : "NaN"} (acc ${(100 * h[2]).toFixed(0)}%)   val loss ${isFinite(h[1]) ? h[1].toFixed(3) : "NaN"} (acc ${(100 * h[3]).toFixed(0)}%)   (hollow dots = validation)` : "press train");
+    };
+    const anim = animator(() => { epoch(); draw(); return ep < epochs && isFinite(hist[hist.length - 1][0]); });
+    const restart = () => { anim.stop(); init(); draw(); };
+    button("#ctl-curves", "▶ train", () => { init(); anim.start(); });
+    select("#ctl-curves", "optimizer ", [["adam", "Adam"], ["sgd", "SGD"]], v => { opt = v; restart(); });
+    select("#ctl-curves", "lr ", [["0.01", "0.01"], ["0.001", "0.001"], ["0.1", "0.1"], ["0.5", "0.5"], ["2", "2"]], v => { lr = +v; restart(); });
+    select("#ctl-curves", "batch ", [["32", "32"], ["8", "8"], ["240", "240 (full)"]], v => { bs = +v; restart(); });
+    select("#ctl-curves", "hidden ", [["32", "32"], ["8", "8"], ["128", "128"]], v => { H = +v; restart(); });
+    select("#ctl-curves", "epochs ", [["60", "60"], ["200", "200"]], v => { epochs = +v; restart(); });
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.addEventListener("change", () => { bug = cb.checked; restart(); });
+    lab.append(cb, " bug: forgot zero_grad()"); document.getElementById("ctl-curves").appendChild(lab);
+    init(); for (let i = 0; i < 25; i++) epoch(); draw();
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How this course works</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="00">
+<main>
+
+<div class="kicker">Start here</div>
+<h1>How this course works</h1>
+<p class="lede">Thirty lessons, bottom-up. You'll start with arrows on a grid. You'll finish by training a GPT on your laptop and then aligning it with the same techniques used for frontier models. Nothing is a black box: every piece gets drawn, derived, and then built by you.</p>
+
+<div class="objectives">
+  <h4>In this lesson</h4>
+  <ul>
+    <li>See the whole map and how each part feeds the next.</li>
+    <li>Set up the workbooks (one command).</li>
+    <li>Pick a pace and a study method that makes the material stick.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<h2 id="map">1. The map</h2>
+<p>Every arrow below is a real dependency: you can't understand the thing at the head without the thing at the tail. Hover over a box to see which lessons it covers, and click to jump there.</p>
+<div class="figure wide">
+  <canvas id="fig-map" width="900" height="460"></canvas>
+  <div class="readout" id="out-map">hover a box…</div>
+  <div class="caption">The course as a dependency graph. The math parts (1–3) run in parallel conceptually, but the order 1 → 2 → 3 works best because each one leans a little on the previous.</div>
+</div>
+
+<h2 id="where">2. Where we're going</h2>
+<p>A taste of the destination. A language model is a function that takes some tokens and outputs a probability for every possible next token. Here are made-up scores ("logits") a model might produce after the prompt <code>"The cat sat on the"</code>. Drag the <b>temperature</b> slider to see how sampling changes. Low temperature means the model almost always picks its favourite word; high temperature makes it more adventurous. By lesson 25 you'll know exactly why this works, and you'll have implemented it.</p>
+<div class="figure">
+  <canvas id="fig-temp" width="680" height="320"></canvas>
+  <div class="controls" id="ctl-temp"></div>
+  <div class="caption"><b>Try it:</b> slide the temperature toward 0 and the distribution becomes "greedy". Push it up and it flattens toward uniform. The formula is softmax, which you'll derive in lesson 14: $p_i = e^{z_i/T} / \sum_j e^{z_j/T}$.</div>
+</div>
+
+<h2 id="lesson-anatomy">3. Anatomy of a lesson</h2>
+<table>
+  <tr><th>Step</th><th>What you do</th><th>Time</th></tr>
+  <tr><td>1. Read &amp; play</td><td>Read the lesson in order. Every figure has a <b>Try it</b> caption. Actually do it, and predict what will happen <em>before</em> you drag.</td><td>40–60 min</td></tr>
+  <tr><td>2. Problems</td><td>Pen and paper. Attempt each one for real before opening the solution. Numeric answers have a checker.</td><td>30–45 min</td></tr>
+  <tr><td>3. Quick check</td><td>Multiple-choice questions aimed at common misconceptions. If you miss one, re-read that section.</td><td>5 min</td></tr>
+  <tr><td>4. Workbook</td><td>Implement the ideas in Python. Fill in <code>exercises.py</code> and grade it with <code>./course check NN</code>.</td><td>45–90 min</td></tr>
+</table>
+
+<h2 id="setup">4. Setup</h2>
+<p>You need Python 3.11+ and Chrome, Safari or Firefox. If you're reading this online, first <a href="../download/ai-from-scratch.zip">download the course zip</a> and unzip it. The workbooks run on your own machine. Then, from the course folder:</p>
+<pre><code>./course setup        # creates .venv with numpy, torch (CPU), pytest
+./course list         # all lessons + workbooks
+./course open 01      # open lesson 01 in your browser
+./course check 01     # grade your workbook 01
+./course check 01 -k cosine   # run only tests matching "cosine"</code></pre>
+<p>Each workbook folder contains three files: <code>exercises.py</code> (yours to fill in), <code>test_exercises.py</code> (the grader, so read it when a test fails), and <code>solutions.py</code> (look only after a genuine attempt). Your progress on lessons is saved in the browser. Use "Mark lesson complete" at the bottom of each page, and the home page shows the progress bar.</p>
+<div class="callout warning">
+<p>Workbooks for lessons 01–18 use only NumPy. PyTorch arrives in lesson 19, <em>after</em> you've built your own autograd engine in lesson 17. That order is deliberate: when you meet <code>loss.backward()</code> you'll know exactly what it does, because you wrote it.</p>
+</div>
+
+<h2 id="pace">5. Pace</h2>
+<p>Plan on <b>10–12 weeks at 6–8 hours a week</b>. A suggested rhythm:</p>
+<table>
+  <tr><th>Weeks</th><th>Lessons</th><th>Milestone</th></tr>
+  <tr><td>1–2</td><td>01–04</td><td>You can see a matrix as a transformation and explain PCA.</td></tr>
+  <tr><td>3</td><td>05–07</td><td>You can backprop through a 2-layer net by hand.</td></tr>
+  <tr><td>4–5</td><td>08–11</td><td>You know where every loss function comes from.</td></tr>
+  <tr><td>5–6</td><td>12–15</td><td>Linear and logistic regression trained from scratch.</td></tr>
+  <tr><td>7–8</td><td>16–20</td><td>Your own autograd engine; a neural language model.</td></tr>
+  <tr><td>9–10</td><td>21–25</td><td>A GPT you trained, generating text.</td></tr>
+  <tr><td>11–12</td><td>26–29</td><td>That GPT improved with PPO, DPO and GRPO.</td></tr>
+</table>
+
+<h2 id="method">6. How to make it stick</h2>
+<ul>
+  <li><b>Predict before you play.</b> Before dragging a handle, guess what will happen. The surprise when you're wrong is when the learning happens.</li>
+  <li><b>Struggle first.</b> Ten honest minutes on a problem before you look at the hint teach you more than reading the solution right away.</li>
+  <li><b>Explain it out loud.</b> At the end of each lesson, write three sentences explaining the key idea to a colleague. If you can't, you've found the gap.</li>
+  <li><b>Revisit.</b> Each lesson's quick-check questions make good flashcards. Redo the previous lesson's quiz before starting the next one.</li>
+  <li><b>Rebuild from memory.</b> After passing a workbook, delete one function and rewrite it without looking.</li>
+</ul>
+
+<h2 id="notation">7. Notation cheat sheet</h2>
+<table>
+  <tr><th>Symbol</th><th>Meaning</th><th>First seen</th></tr>
+  <tr><td>$x$, $\mathbf{x}$, $X$</td><td>scalar, vector, matrix</td><td>01, 02</td></tr>
+  <tr><td>$\mathbb{R}^n$</td><td>the space of $n$-dimensional real vectors</td><td>01</td></tr>
+  <tr><td>$\mathbf{a}\cdot\mathbf{b}$, $\mathbf{a}^\top\mathbf{b}$</td><td>dot product</td><td>01</td></tr>
+  <tr><td>$\|\mathbf{x}\|$</td><td>length (norm)</td><td>01</td></tr>
+  <tr><td>$A^\top$, $A^{-1}$</td><td>transpose, inverse</td><td>03</td></tr>
+  <tr><td>$\frac{df}{dx}$, $f'(x)$</td><td>derivative</td><td>05</td></tr>
+  <tr><td>$\frac{\partial f}{\partial x}$, $\nabla f$</td><td>partial derivative, gradient</td><td>06</td></tr>
+  <tr><td>$J$</td><td>Jacobian matrix</td><td>07</td></tr>
+  <tr><td>$P(A \mid B)$</td><td>probability of A given B</td><td>08</td></tr>
+  <tr><td>$\mathbb{E}[X]$, $\operatorname{Var}(X)$</td><td>expectation, variance</td><td>09</td></tr>
+  <tr><td>$\mathcal{N}(\mu, \sigma^2)$</td><td>Gaussian distribution</td><td>09</td></tr>
+  <tr><td>$H(p)$, $H(p,q)$, $D_{\mathrm{KL}}(p\,\|\,q)$</td><td>entropy, cross-entropy, KL divergence</td><td>11</td></tr>
+  <tr><td>$\theta$</td><td>model parameters</td><td>13</td></tr>
+  <tr><td>$\mathcal{L}$</td><td>loss</td><td>13</td></tr>
+  <tr><td>$\pi_\theta(a \mid s)$</td><td>policy: probability of action $a$ in state $s$</td><td>26</td></tr>
+</table>
+
+<div class="quiz" data-answer="c">
+  <div class="q">You're stuck on a workbook test. What's the best first move?</div>
+  <div class="opts">
+    <button data-k="a">Open solutions.py.</button>
+    <button data-k="b">Skip it and move on to the next lesson.</button>
+    <button data-k="c">Read the failing test in test_exercises.py. It states exactly what's expected. Then re-read the docstring hint.</button>
+  </div>
+  <div class="explain">The tests are part of the teaching material: they encode the properties a correct implementation must have. Solutions are for after you've made a real attempt.</div>
+</div>
+
+<div class="workbook">
+  <h3>Ready?</h3>
+  <p>Run <code>./course setup</code>, then head to <a href="01-vectors.html">lesson 01: Vectors &amp; the dot product</a>.</p>
+</div>
+
+</main>
+<script>
+Course.ready(() => {
+  const { Plot, slider, LA } = Course;
+
+  // ---------- dependency map ----------
+  {
+    const p = new Plot("#fig-map", { xmin: 0, xmax: 900, ymin: 0, ymax: 460 });
+    const B = {
+      P1: { x: 30, y: 330, t: "1 · Linear algebra", l: "01–04", c: "c1" },
+      P2: { x: 30, y: 200, t: "2 · Calculus", l: "05–07", c: "c2" },
+      P3: { x: 30, y: 70, t: "3 · Probability", l: "08–11", c: "c3" },
+      P4: { x: 265, y: 200, t: "4 · ML in code", l: "12–15", c: "c6" },
+      P5: { x: 470, y: 200, t: "5 · Deep learning", l: "16–20", c: "c5" },
+      P6: { x: 675, y: 300, t: "6 · Transformers", l: "21–25", c: "c4" },
+      P7: { x: 675, y: 100, t: "7 · RL on transformers", l: "26–29", c: "c2" },
+    };
+    const W = 190, H = 64, first = { P1: "01", P2: "05", P3: "08", P4: "12", P5: "16", P6: "21", P7: "26" };
+    const edges = [["P1", "P4"], ["P2", "P4"], ["P3", "P4"], ["P4", "P5"], ["P5", "P6"], ["P6", "P7"], ["P3", "P7"], ["P1", "P6"]];
+    const titles = id => COURSE.parts.find(q => q.id === id).lessons.map(l => l.n + " " + l.title).join("  ·  ");
+    let hover = null; const out = document.getElementById("out-map");
+    const hit = (x, y) => Object.keys(B).find(k => x >= B[k].x && x <= B[k].x + W && y >= B[k].y && y <= B[k].y + H);
+    p.canvas.addEventListener("pointermove", e => { const r = p.canvas.getBoundingClientRect(); const [x, y] = p.toWorld((e.clientX - r.left) * p.W / r.width, (e.clientY - r.top) * p.H / r.height); const h = hit(x, y) || null; p.canvas.style.cursor = h ? "pointer" : "default"; if (h !== hover) { hover = h; out.textContent = h ? titles(h) : "hover a box…"; p.render(); } });
+    p.onClick = (x, y) => { const h = hit(x, y); if (h) { const l = COURSE.all.find(l => l.n === first[h]); location.href = `${l.n}-${l.slug}.html`; } };
+    p.render(p => {
+      for (const [a, b] of edges) {
+        const A = B[a], C = B[b], x0 = A.x + W, y0 = A.y + H / 2, x1 = C.x, y1 = C.y + H / 2;
+        const goesUp = a === "P3" && b === "P7", skip = a === "P1" && b === "P6";
+        if (goesUp) { p.path([[x0, y0], [400, 60], [x1 - 10, y1 + 10]], { color: "muted", width: 1.5, dash: [4, 4] }); p.arrow(x1 - 12, y1 + 8, x1, y1 + 4, { color: "muted", width: 1.5 }); }
+        else if (skip) { p.path([[x0, y0], [430, 380], [x1 - 10, y1 - 8]], { color: "muted", width: 1.5, dash: [4, 4] }); p.arrow(x1 - 12, y1 - 7, x1, y1 - 3, { color: "muted", width: 1.5 }); }
+        else if (a === "P6" && b === "P7") p.arrow(A.x + W / 2, A.y, C.x + W / 2, C.y + H, { color: "muted", width: 1.8 });
+        else p.arrow(x0, y0, x1, y1, { color: "muted", width: 1.8 });
+      }
+      for (const [k, b] of Object.entries(B)) {
+        p.rect(b.x, b.y, b.x + W, b.y + H, { color: b.c, fill: b.c, fillAlpha: hover === k ? .35 : .14, width: hover === k ? 3 : 1.5 });
+        p.label(b.x + 12, b.y + H - 22, b.t, { color: "fg", font: "600 14px -apple-system, sans-serif" });
+        p.label(b.x + 12, b.y + 18, "lessons " + b.l, { color: "muted", font: "12px -apple-system, sans-serif" });
+      }
+      p.label(400, 52, "KL, likelihood", { color: "muted", align: "center", font: "11px sans-serif" });
+      p.label(430, 392, "dot products, SVD → attention, LoRA", { color: "muted", align: "center", font: "11px sans-serif" });
+    });
+  }
+
+  // ---------- temperature teaser ----------
+  {
+    const words = ["mat", "floor", "couch", "roof", "table", "moon", "keyboard"], logits = [3.2, 2.4, 2.1, 1.2, 1.0, -0.5, 0.6];
+    let T = 1;
+    const p = new Plot("#fig-temp", { xmin: -0.2, xmax: words.length + 0.2, ymin: -0.12, ymax: 1 });
+    slider("#ctl-temp", { label: "temperature T ", min: 0.05, max: 3, step: 0.05, value: 1 }, v => { T = v; p.render(); });
+    p.render(p => {
+      const pr = LA.softmax(logits, T);
+      p.line(-0.2, 0, words.length + 0.2, 0, { color: "axis", width: 1 });
+      p.bars(pr, { labels: words, values: true, color: words.map((_, i) => i === 0 ? "c2" : "c1") });
+      p.label(0.05, 0.94, `P(next word | "The cat sat on the"),  T = ${T.toFixed(2)}`, { color: "muted", font: "12px sans-serif" });
+    });
+  }
+});
+</script>
+</body>
+</html>

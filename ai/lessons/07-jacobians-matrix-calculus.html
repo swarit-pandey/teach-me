@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jacobians & matrix calculus</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="07">
+<main>
+
+<div class="kicker">Part 2 · Calculus</div>
+<h1>Jacobians &amp; matrix calculus</h1>
+<p class="lede">A neural network is a pipeline of vector-to-vector functions ending in one number, the loss. The derivative of each stage is a matrix, the Jacobian. The chain rule becomes matrix multiplication, and doing that multiplication in the right order is the whole trick behind backpropagation.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Explain the Jacobian as the best local <em>linear map</em> of a vector function, and compute it.</li>
+    <li>Apply the multivariable chain rule as a product of Jacobians, checking dimensions as you go.</li>
+    <li>Derive gradients of $\mathbf w\cdot\mathbf x$, $A\mathbf x$, $\mathbf x^\top A\mathbf x$, $\|A\mathbf x-\mathbf b\|^2$ and of a loss with respect to a weight matrix, using the rule "the gradient has the shape of the parameter".</li>
+    <li>Derive the softmax Jacobian $\operatorname{diag}(\mathbf p) - \mathbf p\mathbf p^\top$.</li>
+    <li>Run a forward and backward pass through a small computation graph by hand, and explain why reverse mode (vector–Jacobian products) is the right choice for a scalar loss.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="jacobian">1. The Jacobian: the derivative of a vector function</h2>
+<p>Lesson 05 had $f:\mathbb{R}\to\mathbb{R}$, whose derivative is a number. Lesson 06 had $f:\mathbb{R}^n\to\mathbb{R}$, whose derivative is the gradient vector. Now take the general case $\mathbf f:\mathbb{R}^n\to\mathbb{R}^m$, with $n$ inputs and $m$ outputs, like a layer of a network. Each output $f_i$ has its own gradient. Stack those gradients as <b>rows</b> and you get the $m\times n$ <b>Jacobian matrix</b>:</p>
+$$J = \frac{\partial\mathbf f}{\partial\mathbf x} = \begin{bmatrix} \partial f_1/\partial x_1 & \cdots & \partial f_1/\partial x_n\\ \vdots & & \vdots\\ \partial f_m/\partial x_1 & \cdots & \partial f_m/\partial x_n\end{bmatrix}, \qquad J_{ij} = \frac{\partial f_i}{\partial x_j}.$$
+<p>Row $i$ says how output $i$ responds to every input. Column $j$ says how every output responds to input $j$. And the familiar linear approximation still holds, now with a matrix–vector product:</p>
+$$\boxed{\;\mathbf f(\mathbf x + \mathbf d) \approx \mathbf f(\mathbf x) + J(\mathbf x)\,\mathbf d\;}$$
+<p>Lesson 02 showed that a matrix <em>is</em> a linear map. So the Jacobian is the <b>best linear map approximating $\mathbf f$ near $\mathbf x$</b>. Zoom in on any smooth map, however curvy, and it looks like a matrix acting on the plane: grid squares become parallelograms. The determinant of $J$ is the local area scale factor (lesson 03).</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-jac-in" width="380" height="380"></canvas></div>
+    <div><canvas id="fig-jac-out" width="380" height="380"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-jac"></div>
+  <div class="readout" id="out-jac"></div>
+  <div class="caption"><b>Try it:</b> left, the input plane, with a small square neighbourhood around the draggable point. Right, the output plane under $\mathbf f(x,y) = (x + 0.6\sin y,\; y + 0.3x^2)$, zoomed in on $\mathbf f(\text{point})$. The <span style="color:var(--c2)">orange</span> curves are the true image of the little grid. The <span style="color:var(--c1)">blue</span> parallelogram is what the Jacobian alone predicts. Shrink the neighbourhood: the curved image straightens and snaps onto the parallelogram. Drag the point and watch $J$ (and its determinant, the area scale) change from place to place.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: polar coordinates</div>
+  <p>$\mathbf f(r,\theta) = (r\cos\theta,\; r\sin\theta)$. Differentiate each output by each input:</p>
+  $$J = \begin{bmatrix} \cos\theta & -r\sin\theta \\ \sin\theta & r\cos\theta\end{bmatrix}, \qquad \det J = r\cos^2\theta + r\sin^2\theta = r.$$
+  <p>The determinant $r$ is the familiar factor in $dA = r\,dr\,d\theta$: a small rectangle in $(r,\theta)$ maps to a patch $r$ times larger in area, because circles get longer as $r$ grows.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="chain">2. The chain rule is matrix multiplication</h2>
+<p>Compose $\mathbf u = \mathbf f(\mathbf x)$ (with $\mathbf f:\mathbb{R}^n\to\mathbb{R}^m$) and $\mathbf y = \mathbf g(\mathbf u)$ (with $\mathbf g:\mathbb{R}^m\to\mathbb{R}^k$). Each is approximately linear near the point. Linear maps compose by multiplying their matrices (lesson 03). So:</p>
+$$\boxed{\;J_{\mathbf g\circ\mathbf f}(\mathbf x) = J_{\mathbf g}\big(\mathbf f(\mathbf x)\big)\;J_{\mathbf f}(\mathbf x)\;}\qquad (k\times n) = (k\times m)(m\times n).$$
+<p><b>Derivation.</b> $\mathbf g(\mathbf f(\mathbf x+\mathbf d)) \approx \mathbf g(\mathbf f(\mathbf x) + J_{\mathbf f}\mathbf d) \approx \mathbf g(\mathbf f(\mathbf x)) + J_{\mathbf g}J_{\mathbf f}\,\mathbf d$. $\blacksquare$ It's lesson 05's "rates multiply", except the rates are now matrices. As before, the outer Jacobian is evaluated at the inner value $\mathbf u = \mathbf f(\mathbf x)$.</p>
+<p>Written entry by entry, the matrix product is a sum over the intermediate variables:</p>
+$$\frac{\partial y_i}{\partial x_j} = \sum_{l=1}^{m}\frac{\partial y_i}{\partial u_l}\,\frac{\partial u_l}{\partial x_j}.$$
+<p>Read it as: <b>add up the effect along every path</b> from $x_j$ to $y_i$. If $x_j$ influences $y_i$ through three different intermediates, all three contributions add. This "sum over paths" is what makes the backward pass in section 6 work when one value feeds several later ones.</p>
+
+<div class="callout key">
+<p>Use the dimensions as a spell-checker. $J_{\mathbf g}J_{\mathbf f}$ is $(k\times m)(m\times n)$, which works. $J_{\mathbf f}J_{\mathbf g}$ would be $(m\times n)(k\times m)$, which doesn't even multiply unless $n = k$. Most matrix-calculus mistakes show up as a shape mismatch.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="vectors">3. Gradients with respect to vectors</h2>
+<p>Machine learning mostly needs one special case: a <b>scalar</b> loss $L$ of a vector or matrix. Its Jacobian is a single row ($1\times n$). By convention we store it as a column with the same shape as $\mathbf x$, and call it the gradient $\nabla_{\mathbf x}L$ (lesson 06). The cleanest way to find one is the <b>differential trick</b>: perturb $\mathbf x$ by $d\mathbf x$, expand $dL$ to first order, and arrange it as $dL = \mathbf g\cdot d\mathbf x$. Then $\mathbf g = \nabla_{\mathbf x}L$, since that's the linear approximation from lesson 06.</p>
+
+<table>
+  <tr><th>Function</th><th>First-order change</th><th>Derivative</th></tr>
+  <tr><td>$L = \mathbf w\cdot\mathbf x$</td><td>$dL = \mathbf w\cdot d\mathbf x$</td><td>$\nabla_{\mathbf x}L = \mathbf w$ (and $\nabla_{\mathbf w}L = \mathbf x$)</td></tr>
+  <tr><td>$\mathbf y = A\mathbf x$</td><td>$d\mathbf y = A\,d\mathbf x$</td><td>Jacobian $= A$</td></tr>
+  <tr><td>$L = \mathbf x^\top A\mathbf x$</td><td>$dL = d\mathbf x^\top A\mathbf x + \mathbf x^\top A\,d\mathbf x = \mathbf x^\top(A^\top + A)\,d\mathbf x$</td><td>$\nabla L = (A + A^\top)\mathbf x$ ($=2A\mathbf x$ if symmetric)</td></tr>
+  <tr><td>$L = \|A\mathbf x - \mathbf b\|^2$</td><td>$\mathbf r = A\mathbf x - \mathbf b$; $dL = 2\mathbf r\cdot d\mathbf r = 2\mathbf r^\top A\,d\mathbf x$</td><td>$\nabla L = 2A^\top(A\mathbf x - \mathbf b)$</td></tr>
+</table>
+
+<p>In the third row, $d\mathbf x^\top A\mathbf x$ is a scalar, so it equals its own transpose $\mathbf x^\top A^\top d\mathbf x$. The fourth row is the chain rule in action: the scalar $L = \|\mathbf r\|^2$ has gradient $2\mathbf r$ with respect to $\mathbf r$, and $\mathbf r$ has Jacobian $A$. Multiply: $(2\mathbf r^\top)A$ is a row vector, and transposing it gives $2A^\top\mathbf r$. Notice the pattern that will repeat all the way through backprop: <b>the upstream gradient gets multiplied by the transpose of the local Jacobian</b>.</p>
+
+<p>Setting the least-squares gradient to zero gives the <b>normal equations</b> $A^\top A\,\mathbf x = A^\top\mathbf b$: the closed-form solution of linear regression you'll implement in lesson 13. Alternatively, follow the gradient downhill:</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-ls-data" width="380" height="340"></canvas></div>
+    <div><canvas id="fig-ls-w" width="380" height="340"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-ls"></div>
+  <div class="readout" id="out-ls"></div>
+  <div class="caption"><b>Try it:</b> right, the loss $L(\mathbf w) = \|A\mathbf w - \mathbf b\|^2$ over the two parameters of a line $\hat y = w_0 + w_1x$ (row $i$ of $A$ is $(1, x_i)$). Drag $\mathbf w$; the left panel shows the line and the <span style="color:var(--c4)">residuals</span> $r_i$. The <span style="color:var(--c2)">arrow</span> is $-\nabla L = -2A^\top\mathbf r$: each data point pushes $\mathbf w$ in the direction of its row $(1, x_i)$, weighted by its residual, and the arrow is the sum of these pushes. It's always perpendicular to the contour. Press "gradient step" a few times, or "solve" to jump to the normal-equation solution, where the arrow vanishes.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="matrices">4. Gradients with respect to matrices, and the shape rule</h2>
+<p>Network weights are matrices. Take one linear layer and a squared-error loss:</p>
+$$\mathbf z = W\mathbf x\quad(W\text{ is } m\times n),\qquad L = \tfrac12\|\mathbf z - \mathbf y\|^2.$$
+<p>The gradient $\partial L/\partial W$ is the $m\times n$ array of numbers $\partial L/\partial W_{ij}$. <b>It has the same shape as $W$</b>, because there's one partial derivative per parameter, and that's what the update $W \leftarrow W - \eta\,\partial L/\partial W$ needs. Derive it entry by entry. $W_{ij}$ only affects $z_i = \sum_j W_{ij}x_j$, with $\partial z_i/\partial W_{ij} = x_j$. And $\partial L/\partial z_i = z_i - y_i =: \delta_i$. So</p>
+$$\frac{\partial L}{\partial W_{ij}} = \delta_i\,x_j \quad\Longrightarrow\quad \boxed{\;\frac{\partial L}{\partial W} = \boldsymbol\delta\,\mathbf x^\top\;}\quad (m\times1)(1\times n) = m\times n.$$
+<p>An outer product: "upstream gradient times input". You saw its one-neuron version in lesson 05, problem 6. The gradient with respect to the <em>input</em> is $\partial L/\partial\mathbf x = W^\top\boldsymbol\delta$, the transpose rule again.</p>
+
+<div class="callout intuition">
+<p><b>The shape rule as a derivation shortcut.</b> For a batch, $Z = XW$ with $X$ of shape $N\times n$ (one example per row), $W$ of shape $n\times m$, and upstream gradient $G = \partial L/\partial Z$ of shape $N\times m$. The answer for $\partial L/\partial W$ must be $n\times m$ and must be built from $X$ and $G$. The only product of those that has that shape is $X^\top G$. Likewise $\partial L/\partial X$ must be $N\times n$: that's $G\,W^\top$. Each is easy to confirm with indices, and the shapes alone point to the right answer far more often than not.</p>
+</div>
+
+<div class="callout warning">
+<p>A bias $\mathbf b$ that's broadcast over the batch ($Z = XW + \mathbf b$) gets the gradient <b>summed over the batch</b>: $\partial L/\partial\mathbf b = \sum_{\text{rows}} G$. That's the sum over paths from section 2: one $\mathbf b$ feeds all $N$ rows. Forgetting the sum (or using a mean when the loss already averages) is a classic backprop bug.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="softmax">5. The softmax Jacobian</h2>
+<p>Softmax turns a vector of scores (logits) into probabilities (lesson 14, and every attention layer in lesson 22):</p>
+$$p_i = \frac{e^{z_i}}{\sum_k e^{z_k}}.$$
+<p>Every output depends on every input (through the denominator), so the Jacobian is full. Let $S = \sum_k e^{z_k}$, so $\partial S/\partial z_j = e^{z_j}$. Quotient rule:</p>
+$$\frac{\partial p_i}{\partial z_j} = \frac{\delta_{ij}e^{z_i}\,S - e^{z_i}e^{z_j}}{S^2} = p_i\,\delta_{ij} - p_ip_j \qquad\Longrightarrow\qquad \boxed{\;J = \operatorname{diag}(\mathbf p) - \mathbf p\mathbf p^\top\;}$$
+<p>($\delta_{ij}$ is 1 if $i=j$, else 0.) Three properties are worth checking against the figure:</p>
+<ul>
+  <li>$J$ is symmetric.</li>
+  <li>Every row and column sums to 0. The probabilities always sum to 1, so if one goes up, others must go down by the same total.</li>
+  <li>$J\mathbf 1 = \mathbf 0$: adding the same constant to every logit changes nothing. That's why the "subtract the max" trick for numerical stability is free.</li>
+</ul>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-sm-bars" width="380" height="320"></canvas></div>
+    <div><canvas id="fig-sm-jac" width="380" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-sm"></div>
+  <div class="readout" id="out-sm"></div>
+  <div class="caption"><b>Try it:</b> move the logit sliders. Left: logits (outlined) and probabilities (filled). Right: the Jacobian $\partial p_i/\partial z_j$ (blue positive, pink negative). Raising your own logit raises your probability (positive diagonal) and lowers everyone else's (negative off-diagonal). Make one logit dominate: the whole Jacobian fades toward 0. A saturated softmax barely passes gradient, which is the same trouble as a saturated sigmoid (lesson 05), and the reason attention scores are scaled by $1/\sqrt{d}$ (lesson 22).</div>
+</div>
+
+<div class="callout ml">
+<p>In practice softmax is followed by cross-entropy, $L = -\log p_y$ for the true class $y$. Chaining the two Jacobians collapses to something beautifully simple: $\nabla_{\mathbf z}L = \mathbf p - \mathbf e_y$, "predicted minus true" (problem 8). You'll derive and use it in lesson 14, and frameworks fuse the two operations for exactly this reason.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="graph">6. A computation graph, forward and backward</h2>
+<p>Put it together on the smallest interesting model: two linear layers and a squared error.</p>
+$$\mathbf h = W_1\mathbf x, \qquad \hat y = \mathbf w_2\cdot\mathbf h, \qquad L = \tfrac12(\hat y - y)^2.$$
+<p>The <b>forward pass</b> computes and stores each intermediate value. The <b>backward pass</b> starts from $\partial L/\partial L = 1$ and walks the graph in reverse. At each node it multiplies the incoming gradient by the transpose of that node's local Jacobian, and each parameter's gradient comes out in its own shape. We write $\bar v$ for $\partial L/\partial v$ (the "adjoint" of $v$):</p>
+$$\bar{\hat y} = \hat y - y,\qquad \bar{\mathbf w}_2 = \bar{\hat y}\,\mathbf h,\qquad \bar{\mathbf h} = \bar{\hat y}\,\mathbf w_2,\qquad \bar W_1 = \bar{\mathbf h}\,\mathbf x^\top,\qquad \bar{\mathbf x} = W_1^\top\bar{\mathbf h}.$$
+
+<div class="figure">
+  <canvas id="fig-graph" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-graph"></div>
+  <div class="readout" id="out-graph"></div>
+  <div class="caption"><b>Try it:</b> press "next" to step through the forward pass (values in the boxes) and then the backward pass (<span style="color:var(--c4)">gradients</span> below the boxes). Each step's arithmetic is shown in the readout. Change the target $y$ and step through again: when $\hat y = y$ every gradient is zero. Check the shape rule on every parameter: $\bar W_1$ is 2×2 like $W_1$, and $\bar{\mathbf w}_2$ has 2 entries like $\mathbf w_2$.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: the numbers in the figure (target $y = 1$)</div>
+  <p>$\mathbf x = (1, 2)$, $W_1 = \begin{bmatrix}0.5 & -1\\ 1.5 & 0.5\end{bmatrix}$, $\mathbf w_2 = (1, 0.5)$.</p>
+  <p><b>Forward.</b> $\mathbf h = W_1\mathbf x = (0.5 - 2,\; 1.5 + 1) = (-1.5, 2.5)$. $\hat y = 1(-1.5) + 0.5(2.5) = -0.25$. $L = \tfrac12(-1.25)^2 = 0.78125$.</p>
+  <p><b>Backward.</b> $\bar{\hat y} = -0.25 - 1 = -1.25$. Then $\bar{\mathbf w}_2 = -1.25\,(-1.5, 2.5) = (1.875, -3.125)$ and $\bar{\mathbf h} = -1.25\,(1, 0.5) = (-1.25, -0.625)$.</p>
+  <p>$\bar W_1 = \bar{\mathbf h}\,\mathbf x^\top = \begin{bmatrix}-1.25 & -2.5\\ -0.625 & -1.25\end{bmatrix}$, and $\bar{\mathbf x} = W_1^\top\bar{\mathbf h} = (0.5(-1.25) + 1.5(-0.625),\; -1(-1.25) + 0.5(-0.625)) = (-1.5625, 0.9375)$.</p>
+  <p>Sanity check by intuition: $\hat y = -0.25$ is below the target $1$, so descent should raise $\hat y$. The first entry of $\bar{\mathbf w}_2$ is $+1.875$, so gradient descent <em>decreases</em> $w_{2,1}$. Since $h_1 = -1.5$ is negative, decreasing $w_{2,1}$ does raise $\hat y = w_{2,1}h_1 + w_{2,2}h_2$. ✓ The more reliable check is numerical: nudge $(W_1)_{11}$ up by $10^{-6}$ and $L$ changes by $-1.25\times10^{-6}$, matching $(\bar W_1)_{11} = -1.25$. The workbook automates this "gradient check".</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="reverse">7. Why reverse mode: vector–Jacobian products</h2>
+<p>For a pipeline $\mathbf x\to\mathbf u_1\to\cdots\to L$, the chain rule says the full derivative is a product $J_L\,J_{L-1}\cdots J_1$, where $J_L$ is a single row because the loss is a scalar. Matrix multiplication is associative, so we can evaluate the product in any order, but the cost differs enormously:</p>
+<ul>
+  <li><b>Forward mode</b> (right to left): $J_2J_1$ first, then $J_3(J_2J_1)$, and so on. Every intermediate is a full Jacobian with one column per input: <b>matrix × matrix</b> at every step. Equivalently, push one input direction forward at a time (a Jacobian–vector product), once per input.</li>
+  <li><b>Reverse mode</b> (left to right): $J_L J_{L-1}$ is a row vector times a matrix, and the result is again a row vector. Every step is a <b>vector × matrix</b> product (a vector–Jacobian product, VJP). That's exactly the "upstream gradient times local Jacobian" of section 6.</li>
+</ul>
+<p>With $n$ parameters and $m$ outputs, forward mode costs about $n$ passes and reverse mode about $m$ passes. A network has $n$ in the millions or billions and $m = 1$. Reverse mode gets <em>every</em> parameter's gradient for roughly the cost of one extra forward pass. The catch is memory: the backward pass needs the intermediate values from the forward pass, so they must all be stored.</p>
+
+<div class="figure">
+  <canvas id="fig-modes" width="680" height="330"></canvas>
+  <div class="controls" id="ctl-modes"></div>
+  <div class="readout" id="out-modes"></div>
+  <div class="caption"><b>Try it:</b> a chain of Jacobians for a network with $n$ inputs, hidden width $d$, and $m$ outputs, drawn to (log) scale at the top. The bars compare the multiply–adds needed to get the full derivative by forward mode versus reverse mode. Set $m = 1$ (a scalar loss) and raise $n$: reverse mode wins by a factor of $n$. Now flip it, with one input and many outputs, and forward mode wins. Frameworks offer both (<code>jvp</code> and <code>vjp</code> in JAX and PyTorch), but training always uses reverse.</div>
+</div>
+
+<div class="callout ml">
+<p>This is backpropagation, discovered several times and popularised for neural networks in 1986. In lesson 17 you'll build "micrograd", a tiny autograd engine. Every operation records its inputs on the forward pass and knows its own VJP. Calling <code>loss.backward()</code> walks the recorded graph in reverse, summing gradients where paths merge. Everything you need for it is in this lesson.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Compute the Jacobian of $\mathbf f(x,y) = (x^2y,\; x + 3y)$ at $(1, 2)$. Enter its entries row by row.</p>
+<div class="numcheck" data-answer="4,1,1,3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Row 1 is the gradient of $x^2y$: $(2xy, x^2) = (4, 1)$. Row 2 is the gradient of $x + 3y$: $(1, 3)$. So $J = \begin{bmatrix}4&1\\1&3\end{bmatrix}$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Let $A = \begin{bmatrix}1&2\\3&4\\5&6\end{bmatrix}$ and $L(\mathbf x) = \mathbf 1^\top A\mathbf x$ (the sum of the entries of $A\mathbf x$). Find $\nabla_{\mathbf x}L$. What shape must it have?</p>
+<div class="numcheck" data-answer="9,12"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$L = (A^\top\mathbf 1)\cdot\mathbf x$, so $\nabla L = A^\top\mathbf 1$, the column sums: $(1+3+5, 2+4+6) = (9, 12)$. It has 2 entries, like $\mathbf x$. Using the transpose rule: the upstream gradient for $A\mathbf x$ is $\mathbf 1$ (3 entries), and the local Jacobian is $A$, so the gradient is $A^\top\mathbf 1$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Fit a line $\hat y = w_0 + w_1x$ to the points $(0,1), (1,2), (2,2)$ by least squares, $L(\mathbf w) = \|A\mathbf w - \mathbf b\|^2$. (a) Compute $\nabla L$ at $\mathbf w = (0,0)$. (b) Solve the normal equations for the optimal $\mathbf w$. Enter the answer to (a).</p>
+<div class="numcheck" data-answer="-10,-12"></div>
+<details class="hint"><summary>Hint</summary><p>$A = \begin{bmatrix}1&0\\1&1\\1&2\end{bmatrix}$, $\mathbf b = (1,2,2)$. Compute $A^\top\mathbf b$ and $A^\top A$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) At $\mathbf w = 0$ the residual is $-\mathbf b$, so $\nabla L = -2A^\top\mathbf b = -2(5, 6) = (-10, -12)$. Both components are negative, so gradient descent increases both intercept and slope. Sensible, since the data lies above the zero line.</p>
+<p>(b) $A^\top A = \begin{bmatrix}3&3\\3&5\end{bmatrix}$, $A^\top\mathbf b = (5,6)$. Solving: $\mathbf w = \tfrac16\begin{bmatrix}5&-3\\-3&3\end{bmatrix}(5,6) = (7/6, 1/2)$. Check: the residuals $(1 - 7/6,\ 2 - 5/3,\ 2 - 13/6) = (-1/6, 1/3, -1/6)$ sum to 0 and are orthogonal to $(0,1,2)$. That's $A^\top\mathbf r = \mathbf 0$, which is exactly what $\nabla L = 0$ means.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Compute the softmax Jacobian at $\mathbf z = (0, 0, 0)$. Enter a diagonal entry and an off-diagonal entry.</p>
+<div class="numcheck" data-answer="0.222222,-0.111111" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf p = (\tfrac13,\tfrac13,\tfrac13)$. Diagonal: $p_i - p_i^2 = \tfrac13 - \tfrac19 = \tfrac29$. Off-diagonal: $-p_ip_j = -\tfrac19$. Each row: $\tfrac29 - \tfrac19 - \tfrac19 = 0$ ✓.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · derivation</span>
+<p>Derive $\nabla_{\mathbf x}(\mathbf x^\top A\mathbf x) = (A + A^\top)\mathbf x$ in index notation (no differentials), and explain why only the symmetric part of $A$ matters for the value of $\mathbf x^\top A\mathbf x$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf x^\top A\mathbf x = \sum_{i,j}x_iA_{ij}x_j$. Differentiating by $x_k$ with the product rule, the terms with $i = k$ give $\sum_jA_{kj}x_j = (A\mathbf x)_k$ and those with $j = k$ give $\sum_ix_iA_{ik} = (A^\top\mathbf x)_k$. Sum: $((A + A^\top)\mathbf x)_k$. Write $A = S + K$ with $S = \tfrac12(A + A^\top)$ symmetric and $K = \tfrac12(A - A^\top)$ antisymmetric. Then $\mathbf x^\top K\mathbf x$ is a scalar equal to its own transpose $\mathbf x^\top K^\top\mathbf x = -\mathbf x^\top K\mathbf x$, so it's zero. The gradient $(A + A^\top)\mathbf x = 2S\mathbf x$ agrees.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Run the computation graph of section 6 with $\mathbf x = (2, -1)$, $W_1 = \begin{bmatrix}1&0\\1&1\end{bmatrix}$, $\mathbf w_2 = (2, -1)$, target $y = 0$. Find $L$ and $\bar W_1 = \partial L/\partial W_1$. Enter $\bar W_1$ row by row.</p>
+<div class="numcheck" data-answer="12,-6,-6,3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Forward: $\mathbf h = (2, 2 - 1) = (2, 1)$, $\hat y = 4 - 1 = 3$, $L = 4.5$. Backward: $\bar{\hat y} = 3$, $\bar{\mathbf h} = 3\mathbf w_2 = (6, -3)$, $\bar W_1 = \bar{\mathbf h}\mathbf x^\top = \begin{bmatrix}12 & -6\\ -6 & 3\end{bmatrix}$. (Also $\bar{\mathbf w}_2 = 3\mathbf h = (6, 3)$.) Note that $\bar W_1$ has rank 1: for a single example, every weight gradient of a linear layer is an outer product.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · conceptual</span>
+<p>A model has $10^8$ parameters and a scalar loss. One forward pass costs $F$ FLOPs. Roughly how much does it cost to get the full gradient (a) with finite differences, (b) with forward-mode differentiation, (c) with reverse mode? Why is (a) still useful?</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) Central differences need 2 forward passes per parameter: $2\times10^8F$. (b) Forward mode needs one JVP per input direction, each a small constant times $F$: about $10^8F$. (c) Reverse mode needs one forward and one backward pass, about $2$–$3F$ in total, independent of the parameter count. Finite differences are still the gold-standard <em>test</em>: check a handful of random entries of your hand-written or autograd gradient, in float64 (lesson 05, section 7).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>Let $L = -\log p_y$ with $\mathbf p = \operatorname{softmax}(\mathbf z)$. Using the chain rule with the softmax Jacobian, show $\nabla_{\mathbf z}L = \mathbf p - \mathbf e_y$. Evaluate it for $\mathbf z = (1, 2, 0.5)$ and $y = 0$ (first class).</p>
+<div class="numcheck" data-answer="-0.768776,0.628532,0.140244" data-tol="1e-4"></div>
+<details class="hint"><summary>Hint</summary><p>$\partial L/\partial\mathbf p$ is zero except entry $y$, which is $-1/p_y$. Multiply that row vector by $J$: only row $y$ of $J$ survives.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\bar{\mathbf p} = -\mathbf e_y/p_y$. Then $\bar{\mathbf z} = J^\top\bar{\mathbf p} = J\bar{\mathbf p}$ (J is symmetric) $= -\tfrac{1}{p_y}\times(\text{column } y \text{ of } J)$. Column $y$ of $\operatorname{diag}(\mathbf p) - \mathbf p\mathbf p^\top$ is $p_y\mathbf e_y - p_y\mathbf p$. Dividing by $-p_y$: $\bar{\mathbf z} = \mathbf p - \mathbf e_y$. For $\mathbf z = (1, 2, 0.5)$: $\mathbf p \approx (0.2312, 0.6285, 0.1402)$, so $\bar{\mathbf z}\approx(-0.7688, 0.6285, 0.1402)$. The gradient pushes the true class's logit up and the others down, in proportion to how wrong the prediction is.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>For the batched layer $Z = XW$ ($X$: $N\times n$, $W$: $n\times m$) with upstream gradient $G = \partial L/\partial Z$, prove $\partial L/\partial W = X^\top G$ and $\partial L/\partial X = GW^\top$ in index notation.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$Z_{ab} = \sum_kX_{ak}W_{kb}$. By the chain rule (sum over all paths, i.e. all entries of $Z$): $\dfrac{\partial L}{\partial W_{ij}} = \sum_{a,b}G_{ab}\dfrac{\partial Z_{ab}}{\partial W_{ij}} = \sum_{a,b}G_{ab}X_{ai}\delta_{bj} = \sum_aX_{ai}G_{aj} = (X^\top G)_{ij}$. Similarly $\dfrac{\partial L}{\partial X_{ij}} = \sum_{a,b}G_{ab}\delta_{ai}W_{jb} = \sum_bG_{ib}W_{jb} = (GW^\top)_{ij}$. The sum over $a$ in the first formula is a sum over the batch: every example contributes its own outer product $\mathbf x_a\mathbf g_a^\top$.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">A layer has weight matrix $W$ of shape 128×64. What is the shape of $\partial L/\partial W$ for a scalar loss $L$?</div>
+  <div class="opts">
+    <button data-k="a">64×128, the transpose</button>
+    <button data-k="b">128×64</button>
+    <button data-k="c">a vector with 8192 entries, the size of the Jacobian row</button>
+    <button data-k="d">depends on the batch size</button>
+  </div>
+  <div class="explain">One partial derivative per parameter, arranged like the parameter, so you can write $W \leftarrow W - \eta\,\partial L/\partial W$. (Option c has the right number of entries but the wrong arrangement. The batch size gets summed out.)</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">What does the Jacobian of $\tanh$ applied elementwise to a vector of length $n$ look like?</div>
+  <div class="opts">
+    <button data-k="a">A full $n\times n$ matrix</button>
+    <button data-k="b">A single row vector</button>
+    <button data-k="c">A diagonal matrix with entries $1 - \tanh^2(x_i)$</button>
+    <button data-k="d">The identity matrix</button>
+  </div>
+  <div class="explain">Output $i$ depends only on input $i$, so all off-diagonal partials are zero. That's why elementwise ops are applied in backprop with an elementwise multiply instead of a matrix product.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">$\mathbf u = \mathbf f(\mathbf x)$ with $\mathbf x\in\mathbb R^3$, $\mathbf u\in\mathbb R^5$, and $\mathbf y = \mathbf g(\mathbf u)\in\mathbb R^2$. Which expression is the Jacobian of $\mathbf y$ with respect to $\mathbf x$?</div>
+  <div class="opts">
+    <button data-k="a">$J_{\mathbf g}(\mathbf u)\,J_{\mathbf f}(\mathbf x)$, shape 2×3</button>
+    <button data-k="b">$J_{\mathbf f}(\mathbf x)\,J_{\mathbf g}(\mathbf u)$, shape 5×5</button>
+    <button data-k="c">$J_{\mathbf g}(\mathbf x)\,J_{\mathbf f}(\mathbf x)$, shape 2×3</button>
+    <button data-k="d">$J_{\mathbf f}^\top J_{\mathbf g}^\top$, shape 3×2</button>
+  </div>
+  <div class="explain">Outer Jacobian (2×5) at the inner value $\mathbf u$, times inner Jacobian (5×3). Option (c) has the right shape but evaluates $J_{\mathbf g}$ at the wrong point: the vector version of lesson 05's classic slip. (d) is the transpose of the answer, which is what you multiply upstream gradients by in the backward pass, but it isn't the Jacobian itself.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Why does every deep-learning framework compute gradients in reverse mode?</div>
+  <div class="opts">
+    <button data-k="a">It's more numerically accurate than forward mode.</button>
+    <button data-k="b">It uses less memory than forward mode.</button>
+    <button data-k="c">Forward mode can't handle nonlinear functions.</button>
+    <button data-k="d">The loss is a single scalar, so one backward pass of vector–Jacobian products yields the gradient for all parameters at once.</button>
+  </div>
+  <div class="explain">Cost scales with the number of outputs in reverse mode and the number of inputs in forward mode. For one loss and millions of parameters, the choice is clear. Reverse mode actually uses <em>more</em> memory (it stores activations), and both modes are exact.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Jacobian</td><td>$J_{ij} = \partial f_i/\partial x_j$, $m\times n$</td><td>best local linear map</td></tr>
+  <tr><td>Chain rule</td><td>$J_{\mathbf g\circ\mathbf f} = J_{\mathbf g}(\mathbf f(\mathbf x))\,J_{\mathbf f}(\mathbf x)$</td><td>compose linear maps = multiply matrices</td></tr>
+  <tr><td>Common gradients</td><td>$\nabla(\mathbf w\cdot\mathbf x) = \mathbf w$, $\nabla(\mathbf x^\top A\mathbf x) = (A+A^\top)\mathbf x$, $\nabla\|A\mathbf x-\mathbf b\|^2 = 2A^\top(A\mathbf x-\mathbf b)$</td><td>derive with $dL = \mathbf g\cdot d\mathbf x$</td></tr>
+  <tr><td>Linear layer</td><td>$\bar W = \boldsymbol\delta\mathbf x^\top$ (batch: $X^\top G$), $\bar{\mathbf x} = W^\top\boldsymbol\delta$</td><td>gradient has the parameter's shape</td></tr>
+  <tr><td>Softmax</td><td>$J = \operatorname{diag}(\mathbf p) - \mathbf p\mathbf p^\top$</td><td>symmetric; rows sum to 0</td></tr>
+  <tr><td>Reverse mode</td><td>$\bar{\mathbf u}_{k-1} = J_k^\top\bar{\mathbf u}_k$</td><td>one backward pass gets all gradients of a scalar</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 07: build it</h3>
+  <p>Open <code>workbooks/07_jacobians_matrix_calculus/exercises.py</code>. You'll write a numerical Jacobian, then analytic Jacobians for affine, elementwise and softmax maps, and check the chain rule as a matrix product. Next come the least-squares gradient and the outer-product gradient of a linear layer. The main event is a complete manual forward and backward pass for a 2-layer tanh network in NumPy, verified with a gradient checker you write yourself and then used to train the network. Stretch: measure forward- vs reverse-mode cost on a chain of Jacobians. Grade yourself with:</p>
+  <pre><code>./course check 07</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Kaare Brandt Petersen &amp; Michael Syskind Pedersen, <em>The Matrix Cookbook</em>: a reference table of matrix derivatives.</li>
+  <li>Andrej Karpathy, Stanford CS231n notes, "Backpropagation, Intuitions" and "Derivatives, Backpropagation, and Vectorization".</li>
+  <li>Baydin et al., "Automatic Differentiation in Machine Learning: a Survey", <em>JMLR</em> (2018): forward vs reverse mode in depth.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, LA, fmt } = Course;
+  const ctl = id => document.getElementById(id);
+  const vec = (v, d = 3) => "(" + v.map(x => fmt(x, d)).join(", ") + ")";
+  const mat = (M, d = 3) => "[" + M.map(r => vec(r, d).slice(1, -1)).join("; ") + "]";
+
+  // ---------- fig: Jacobian as local linear map ----------
+  {
+    const F = (x, y) => [x + 0.6 * Math.sin(y), y + 0.3 * x * x];
+    const J = (x, y) => [[1, 0.6 * Math.cos(y)], [0.6 * x, 1]];
+    const pin = new Plot("#fig-jac-in", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const pout = new Plot("#fig-jac-out", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const P = { x: 1.2, y: 1.0, color: "fg", constrain: (x, y) => [Math.max(-2.4, Math.min(2.4, x)), Math.max(-2.4, Math.min(2.4, y))] };
+    let s = 0.6; const out = ctl("out-jac");
+    slider("#ctl-jac", { label: "neighbourhood size ", min: 0.02, max: 1.2, step: 0.01, value: 0.6 }, v => { s = v; pin.render(); });
+    const N = 6;
+    pin.draggable([P]).render(p => {
+      p.grid({ step: 0.5 }).axes({ step: 1 });
+      p.rect(P.x - s, P.y - s, P.x + s, P.y + s, { fill: "c2", fillAlpha: .12, color: "c2", width: 1.5 });
+      for (let i = 1; i < N; i++) { const t = -s + 2 * s * i / N; p.line(P.x + t, P.y - s, P.x + t, P.y + s, { color: "c2", width: .8, alpha: .6 }); p.line(P.x - s, P.y + t, P.x + s, P.y + t, { color: "c2", width: .8, alpha: .6 }); }
+      p.drawHandles(); p.label(8, 14, "input plane (x, y)", { px: true, color: "muted", font: "12px sans-serif" });
+      pout.render();
+    });
+    pout.render(q => {
+      const c = F(P.x, P.y), Jm = J(P.x, P.y), w = 1.9 * s * Math.max(1, Math.hypot(Jm[0][0], Jm[1][0]), Math.hypot(Jm[0][1], Jm[1][1]));
+      q.setView(c[0] - w, c[0] + w, c[1] - w, c[1] + w, true);
+      // background: image of the coarse global grid (to show the warp)
+      for (let g = -3; g <= 3; g += 0.5) {
+        const a = [], b = [];
+        for (let t = -3; t <= 3.001; t += 0.05) { a.push(F(g, t)); b.push(F(t, g)); }
+        q.path(a, { color: "grid", width: 1 }); q.path(b, { color: "grid", width: 1 });
+      }
+      // linear prediction: parallelogram
+      const L = (dx, dy) => [c[0] + Jm[0][0] * dx + Jm[0][1] * dy, c[1] + Jm[1][0] * dx + Jm[1][1] * dy];
+      q.polygon([L(-s, -s), L(s, -s), L(s, s), L(-s, s)], { fill: "c1", fillAlpha: .1, color: "c1", width: 2 });
+      for (let i = 1; i < N; i++) { const t = -s + 2 * s * i / N; q.path([L(t, -s), L(t, s)], { color: "c1", width: 1, alpha: .6, dash: [4, 3] }); q.path([L(-s, t), L(s, t)], { color: "c1", width: 1, alpha: .6, dash: [4, 3] }); }
+      // true image of the little grid
+      let err = 0;
+      for (let i = 0; i <= N; i++) {
+        const t = -s + 2 * s * i / N, a = [], b = [];
+        for (let k = 0; k <= 40; k++) { const u = -s + 2 * s * k / 40; a.push(F(P.x + t, P.y + u)); b.push(F(P.x + u, P.y + t)); const e1 = F(P.x + t, P.y + u), l1 = L(t, u); err = Math.max(err, Math.hypot(e1[0] - l1[0], e1[1] - l1[1])); }
+        q.path(a, { color: "c2", width: i % N === 0 ? 2.2 : 1.2 }); q.path(b, { color: "c2", width: i % N === 0 ? 2.2 : 1.2 });
+      }
+      q.point(c[0], c[1], { r: 5, color: "fg" });
+      q.label(8, 14, "output plane f(x, y), zoomed", { px: true, color: "muted", font: "12px sans-serif" });
+      const det = LA.det2(Jm);
+      out.textContent = `point (${P.x.toFixed(2)}, ${P.y.toFixed(2)}) → f = ${vec(c, 3)}\n` +
+        `J = [[${Jm[0][0].toFixed(3)}, ${Jm[0][1].toFixed(3)}], [${Jm[1][0].toFixed(3)}, ${Jm[1][1].toFixed(3)}]]   det J = ${det.toFixed(3)} (local area scale)\n` +
+        `worst gap between true image and J·d: ${err.toExponential(2)}   = ${(err / s).toFixed(4)} × size   (→ 0 as size → 0)`;
+    });
+  }
+
+  // ---------- fig: least squares gradient ----------
+  {
+    const xs = [-2, -1, 0, 0.5, 1.5, 2.5], ys = [-1.1, 0.0, 0.3, 1.2, 1.6, 2.6];
+    const A = xs.map(x => [1, x]);
+    const loss = (w0, w1) => xs.reduce((s, x, i) => s + (w0 + w1 * x - ys[i]) ** 2, 0);
+    const grad = (w0, w1) => { const r = xs.map((x, i) => w0 + w1 * x - ys[i]); return [2 * r.reduce((s, v) => s + v, 0), 2 * r.reduce((s, v, i) => s + v * xs[i], 0)]; };
+    const AtA = LA.matmul(LA.T(A), A), Atb = LA.matvec(LA.T(A), ys), det = LA.det2(AtA);
+    const sol = [(AtA[1][1] * Atb[0] - AtA[0][1] * Atb[1]) / det, (-AtA[1][0] * Atb[0] + AtA[0][0] * Atb[1]) / det];
+    const pd = new Plot("#fig-ls-data", { xmin: -3, xmax: 3.5, ymin: -3, ymax: 4 });
+    const pw = new Plot("#fig-ls-w", { xmin: -2, xmax: 3, ymin: -1.5, ymax: 2.5 });
+    const W = { x: -1, y: -0.8, color: "fg", constrain: (x, y) => [Math.max(-1.9, Math.min(2.9, x)), Math.max(-1.4, Math.min(2.4, y))] };
+    const out = ctl("out-ls");
+    const lev = [0.5, 1, 2, 4, 7, 11, 16, 24, 35, 50, 70, 95];
+    button("#ctl-ls", "gradient step (lr 0.03)", () => { const g = grad(W.x, W.y); W.x -= 0.03 * g[0]; W.y -= 0.03 * g[1]; pw.render(); });
+    button("#ctl-ls", "solve (normal equations)", () => { W.x = sol[0]; W.y = sol[1]; pw.render(); });
+    pw.draggable([W]).render(p => {
+      p.field((a, b) => Math.log(1 + loss(a, b)), { cmap: "seq", res: 4, alpha: .6 });
+      p.contour(loss, lev, { color: "muted", width: 1, res: 4 });
+      p.axes({ step: 1, xlabel: "w₀ (intercept)", ylabel: "w₁ (slope)" });
+      p.point(sol[0], sol[1], { r: 4, color: "c3" });
+      const g = grad(W.x, W.y), n = Math.hypot(g[0], g[1]), sc = Math.min(0.06, 1.2 / (n || 1));
+      p.arrow(W.x, W.y, W.x - sc * g[0], W.y - sc * g[1], { color: "c2", width: 3, label: "−∇L" });
+      p.drawHandles();
+      pd.render();
+    });
+    pd.render(p => {
+      p.grid({ step: 1 }).axes({ step: 1, xlabel: "x", ylabel: "y" });
+      p.ray(0, W.x, 1, W.y, { color: "c1", width: 2.5 });
+      xs.forEach((x, i) => { const yh = W.x + W.y * x; p.line(x, ys[i], x, yh, { color: "c4", width: 2 }); p.point(x, ys[i], { r: 5, color: "fg" }); });
+      const r = xs.map((x, i) => W.x + W.y * x - ys[i]), g = grad(W.x, W.y);
+      out.textContent = `w = ${vec([W.x, W.y])}   L = ${loss(W.x, W.y).toFixed(4)}   residuals r = ${vec(r, 2)}\n` +
+        `∇L = 2Aᵀr = (2·Σrᵢ, 2·Σrᵢxᵢ) = ${vec(g, 3)}   ‖∇L‖ = ${Math.hypot(g[0], g[1]).toExponential(2)}   (normal-equation solution w* = ${vec(sol, 3)})`;
+    });
+  }
+
+  // ---------- fig: softmax Jacobian ----------
+  {
+    const z = [2, 1, 0.2, -1];
+    const pb = new Plot("#fig-sm-bars", { xmin: -0.3, xmax: 4.3, ymin: -3.4, ymax: 4.2 });
+    const pj = new Plot("#fig-sm-jac", { xmin: 0, xmax: 10, ymin: 0, ymax: 10 });
+    const out = ctl("out-sm");
+    z.forEach((v, i) => slider("#ctl-sm", { label: `z${i + 1} `, min: -3, max: 4, step: 0.1, value: v }, x => { z[i] = x; pb.render(); }));
+    pb.render(p => {
+      const pr = LA.softmax(z);
+      p.line(-0.3, 0, 4.3, 0, { color: "axis", width: 1 });
+      for (let k = -3; k <= 4; k++) if (k) p.label(-0.25, k, String(k), { color: "muted", font: "10px sans-serif" });
+      z.forEach((v, i) => { p.rect(i + 0.12, 0, i + 0.88, v, { fill: "c5", fillAlpha: 0.05, color: "c5", width: 1.5, dash: [4, 3] }); });
+      p.bars(pr.map(v => 3 * v), { color: ["c1", "c2", "c3", "c6"], fillAlpha: .8, gap: 0.25 });
+      pr.forEach((v, i) => { p.label(i + 0.5, 3 * v, "p=" + v.toFixed(2), { align: "center", dy: -9, font: "11px sans-serif" }); p.label(i + 0.5, -3.4, "z" + (i + 1), { align: "center", dy: -9, color: "muted", font: "12px sans-serif" }); });
+      p.label(30, 14, "logits z (dashed), probabilities p (bars, ×3)", { px: true, color: "muted", font: "12px sans-serif" });
+      pj.render();
+      const J = pr.map((pi, i) => pr.map((pj_, j) => (i === j ? pi : 0) - pi * pj_));
+      out.textContent = `p = ${vec(pr, 3)}   (sum ${pr.reduce((a, b) => a + b, 0).toFixed(3)})\n` +
+        `row sums of J: ${vec(J.map(r => r.reduce((a, b) => a + b, 0)), 6)}    largest |entry|: ${Math.max(...J.flat().map(Math.abs)).toFixed(3)} (max possible 0.25)`;
+    });
+    pj.render(p => {
+      const pr = LA.softmax(z), J = pr.map((pi, i) => pr.map((pk, j) => (i === j ? pi : 0) - pi * pk));
+      p.heatmap(J, { x0: 1.6, x1: 9.6, y0: 0.4, y1: 8.4, cmap: "div", vmin: -0.25, vmax: 0.25, values: true, digits: 3, font: "11px ", rowLabels: ["∂p1", "∂p2", "∂p3", "∂p4"], colLabels: ["∂z1", "∂z2", "∂z3", "∂z4"] });
+      p.label(8, 14, "J = diag(p) − ppᵀ", { px: true, color: "muted", font: "12px sans-serif" });
+    });
+  }
+
+  // ---------- fig: computation graph step-through ----------
+  {
+    const x = [1, 2], W1 = [[0.5, -1], [1.5, 0.5]], w2 = [1, 0.5];
+    let y = 1, step = 0;
+    const p = new Plot("#fig-graph", { xmin: 0, xmax: 680, ymin: 0, ymax: 340 });
+    const out = ctl("out-graph");
+    const nodes = {
+      x: { x: 90, y: 245, name: "x", al: "left" }, W1: { x: 90, y: 85, name: "W₁", al: "left", w: 150 }, h: { x: 270, y: 170, name: "h = W₁x" },
+      w2: { x: 270, y: 290, name: "w₂" }, yh: { x: 440, y: 170, name: "ŷ = w₂·h" }, y: { x: 440, y: 50, name: "target y" }, L: { x: 605, y: 170, name: "L = ½(ŷ−y)²" },
+    };
+    const edges = [["x", "h"], ["W1", "h"], ["h", "yh"], ["w2", "yh"], ["yh", "L"], ["y", "L"]];
+    const calc = () => {
+      const h = LA.matvec(W1, x), yh = LA.dot(w2, h), L = 0.5 * (yh - y) ** 2, dyh = yh - y;
+      const dw2 = h.map(v => dyh * v), dh = w2.map(v => dyh * v), dW1 = dh.map(a => x.map(b => a * b)), dx = LA.matvec(LA.T(W1), dh);
+      return { h, yh, L, dyh, dw2, dh, dW1, dx };
+    };
+    const S = [
+      ["start", [], [], "Inputs and parameters are known. Press next to run the forward pass."],
+      ["fwd h", ["h"], [], c => `forward: h = W₁x = (${W1[0][0]}·${x[0]} + ${W1[0][1]}·${x[1]}, ${W1[1][0]}·${x[0]} + ${W1[1][1]}·${x[1]}) = ${vec(c.h)}   (stored for later)`],
+      ["fwd yh", ["h", "yh"], [], c => `forward: ŷ = w₂·h = ${w2[0]}·${fmt(c.h[0])} + ${w2[1]}·${fmt(c.h[1])} = ${fmt(c.yh, 4)}`],
+      ["fwd L", ["h", "yh", "L"], [], c => `forward: L = ½(ŷ − y)² = ½(${fmt(c.yh, 4)} − ${y})² = ${fmt(c.L, 5)}`],
+      ["bwd L", ["h", "yh", "L"], ["L"], c => `backward: start with ∂L/∂L = 1`],
+      ["bwd yh", ["h", "yh", "L"], ["L", "yh"], c => `backward: ∂L/∂ŷ = ŷ − y = ${fmt(c.dyh, 4)}   (local derivative of ½(ŷ−y)², times upstream 1)`],
+      ["bwd h w2", ["h", "yh", "L"], ["L", "yh", "h", "w2"], c => `backward through ŷ = w₂·h:  ∂L/∂w₂ = (∂L/∂ŷ)·h = ${vec(c.dw2)}   ∂L/∂h = (∂L/∂ŷ)·w₂ = ${vec(c.dh)}`],
+      ["bwd W1 x", ["h", "yh", "L"], ["L", "yh", "h", "w2", "W1", "x"], c => `backward through h = W₁x:\n  ∂L/∂W₁ = (∂L/∂h) xᵀ = ${mat(c.dW1)}   (2×2, like W₁)\n  ∂L/∂x  = W₁ᵀ (∂L/∂h) = ${vec(c.dx, 4)}\nDone: every gradient from ONE backward pass.`],
+    ];
+    const box = (n, val, grad, active, gactive) => {
+      const w = n.w || 120, hgt = 50;
+      p.rect(n.x - w / 2, n.y - hgt / 2, n.x + w / 2, n.y + hgt / 2, { fill: active ? "c1" : "panel", fillAlpha: active ? .14 : .9, color: gactive ? "c4" : active ? "c1" : "muted", width: gactive || active ? 2 : 1 });
+      p.label(n.x, n.y + 10, n.name, { align: "center", font: "600 12px sans-serif" });
+      p.label(n.x, n.y - 9, val, { align: "center", color: active ? "fg" : "muted", font: "11px ui-monospace, Menlo, monospace" });
+      if (grad) p.label(n.al === "left" ? n.x - w / 2 : n.x, n.ga === "above" ? n.y + hgt / 2 + 11 : n.y - hgt / 2 - 11, grad, { align: n.al || "center", color: "c4", font: "600 11px ui-monospace, Menlo, monospace" });
+    };
+    const render = () => p.render();
+    button("#ctl-graph", "← prev", () => { step = Math.max(0, step - 1); render(); });
+    button("#ctl-graph", "next →", () => { step = Math.min(S.length - 1, step + 1); render(); });
+    button("#ctl-graph", "reset", () => { step = 0; render(); });
+    slider("#ctl-graph", { label: "target y ", min: -2, max: 2, step: 0.05, value: 1 }, v => { y = v; render(); });
+    p.render(p => {
+      const c = calc(), st = S[step], fw = st[1], bw = st[2];
+      edges.forEach(([a, b]) => { const A = nodes[a], B = nodes[b]; p.arrow(A.x + (A.w || 120) / 2, A.y, B.x - 61, B.y, { color: bw.includes(a) && bw.includes(b) ? "c4" : "muted", width: 1.5, head: 8 }); });
+      const val = { x: vec(x, 1), W1: mat(W1, 1), h: fw.includes("h") ? vec(c.h, 2) : "?", w2: vec(w2, 1), yh: fw.includes("yh") ? fmt(c.yh, 4) : "?", y: fmt(y, 2), L: fw.includes("L") ? fmt(c.L, 4) : "?" };
+      const grd = { L: "∂L/∂L = 1", yh: "∂L/∂ŷ = " + fmt(c.dyh, 3), h: "∂L/∂h = " + vec(c.dh, 3), w2: "∂L/∂w₂ = " + vec(c.dw2, 3), W1: "∂L/∂W₁ = " + mat(c.dW1, 2), x: "∂L/∂x = " + vec(c.dx, 3) };
+      Object.entries(nodes).forEach(([k, n]) => box(n, val[k], bw.includes(k) ? grd[k] : "", fw.includes(k) || ["x", "W1", "w2", "y"].includes(k), bw.includes(k)));
+      p.label(8, 14, `step ${step} / ${S.length - 1}: ${step === 0 ? "ready" : step <= 3 ? "forward pass" : "backward pass"}`, { px: true, color: step > 3 ? "c4" : "c1" });
+      out.textContent = typeof st[3] === "function" ? st[3](c) : st[3];
+    });
+  }
+
+  // ---------- fig: forward vs reverse mode cost ----------
+  {
+    let n = 1000, d = 100, m = 1, layers = 4;
+    const p = new Plot("#fig-modes", { xmin: 0, xmax: 680, ymin: 0, ymax: 330 });
+    const out = ctl("out-modes");
+    const ex = v => Math.round(10 ** v);
+    slider("#ctl-modes", { label: "inputs n = 10^", min: 0, max: 6, step: 0.5, value: 3, digits: 1 }, v => { n = ex(v); p.render(); });
+    slider("#ctl-modes", { label: "outputs m = 10^", min: 0, max: 6, step: 0.5, value: 0, digits: 1 }, v => { m = ex(v); p.render(); });
+    slider("#ctl-modes", { label: "hidden d = 10^", min: 1, max: 4, step: 0.5, value: 2, digits: 1 }, v => { d = ex(v); p.render(); });
+    slider("#ctl-modes", { label: "layers ", min: 2, max: 8, step: 1, value: 4, digits: 0 }, v => { layers = v; p.render(); });
+    const big = v => v >= 1e4 ? v.toExponential(1).replace("e+", "e") : String(v);
+    p.render(p => {
+      const dims = [n]; for (let k = 1; k < layers; k++) dims.push(d); dims.push(m);
+      // matrices J_L ... J_1 drawn right-to-left, side length ~ log scale
+      const side = v => 14 + 22 * Math.log10(v);
+      let xc = 660; const yc = 235;
+      p.label(10, 318, "the chain of Jacobians  J_L ⋯ J₂ J₁  (box sides ∝ log of each dimension; pink = last layer)", { color: "muted", font: "12px sans-serif" });
+      const items = [];
+      for (let k = 1; k <= layers; k++) items.push({ r: dims[k], c: dims[k - 1], k });
+      const total = items.reduce((s, it) => s + side(it.c) + 12, 0), scale = Math.min(1, 640 / total);
+      xc = 20 + Math.min(640, total * scale);
+      items.forEach(it => { const w = side(it.c) * scale, h = side(it.r) * scale; xc -= w + 12 * scale; p.rect(xc, yc - h / 2, xc + w, yc + h / 2, { fill: it.k === layers ? "c4" : "c1", fillAlpha: .25, color: it.k === layers ? "c4" : "c1", width: 1.2 }); if (w > 24) p.label(xc + w / 2, yc, "J" + it.k, { align: "center", font: "11px sans-serif" }); });
+      const pass = dims.slice(1).reduce((s, v, i) => s + v * dims[i], 0);
+      const fwd = n * pass, rev = m * pass, lmax = Math.max(Math.log10(fwd), Math.log10(rev), 6);
+      const bar = (y, val, col, name) => { const w = 380 * Math.log10(val) / lmax; p.rect(170, y - 13, 170 + w, y + 13, { fill: col, fillAlpha: .7, color: col, width: 1 }); p.label(160, y, name, { align: "right", font: "12px sans-serif" }); p.label(178 + w, y, big(val) + " mult-adds", { font: "11px ui-monospace, Menlo, monospace" }); };
+      bar(95, fwd, "c2", `forward mode (${big(n)} JVPs)`); bar(55, rev, "c4", `reverse mode (${big(m)} VJPs)`);
+      p.label(170, 125, "log scale →", { color: "muted", font: "11px sans-serif" });
+      const ratio = fwd / rev;
+      out.textContent = `layer sizes: ${dims.map(big).join(" → ")}    one pass ≈ ${big(pass)} mult-adds\n` +
+        `full Jacobian (${big(m)}×${big(n)}): forward ≈ n·pass = ${big(fwd)}   reverse ≈ m·pass = ${big(rev)}   → ${ratio >= 1 ? "reverse is " + fmt(ratio, 0) + "× cheaper" : "forward is " + fmt(1 / ratio, 0) + "× cheaper"}`;
+    });
+  }
+});
+</script>
+</body>
+</html>

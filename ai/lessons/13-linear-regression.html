@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linear regression from scratch</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="13">
+<main>
+
+<div class="kicker">Part 4 · Machine learning in code</div>
+<h1>Linear regression from scratch</h1>
+<p class="lede">Your first complete machine-learning model: a model with parameters, a loss that scores them, and two ways to find the best ones. Gradient descent walks downhill; the normal equations jump straight to the bottom. Everything in this lesson reappears inside deep networks. Every layer is a linear model, every training loop is this gradient-descent loop, and badly scaled inputs slow down a transformer for the same reason they slow down a line fit.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Write the model $\hat y = X\mathbf{w} + b$ in matrix form and explain the mean-squared-error loss, including why <em>squares</em> (Gaussian MLE).</li>
+    <li>Derive $\nabla L = \tfrac{2}{n}A^\top(A\boldsymbol\theta - \mathbf{y})$ and train with gradient descent.</li>
+    <li>Derive the normal equations two ways, by setting the gradient to zero and by orthogonal projection, and solve them without ever inverting a matrix.</li>
+    <li>Explain, using the condition number, why feature scaling can make gradient descent 100× faster.</li>
+    <li>Fit curves with polynomial features, and measure fit quality with $R^2$.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="model">1. The model</h2>
+<p>You have $n$ examples. Each has $d$ input <b>features</b> $\mathbf{x}_i \in \mathbb{R}^d$ (size, age and location of a house) and a real-valued <b>target</b> $y_i$ (its price). <b>Linear regression</b> predicts with a weighted sum plus an offset:</p>
+$$\hat y_i = \mathbf{w}\cdot\mathbf{x}_i + b = w_1 x_{i1} + \cdots + w_d x_{id} + b.$$
+<p>The <b>weights</b> $\mathbf{w}$ say how much each feature matters, and the <b>bias</b> $b$ is the prediction when all features are zero. Stack the examples as rows of a data matrix $X \in \mathbb{R}^{n\times d}$ and all $n$ predictions come out of one matrix–vector product (lesson 03):</p>
+$$\hat{\mathbf{y}} = X\mathbf{w} + b\,\mathbf{1}.$$
+<p>One trick tidies everything up. Prepend a column of ones to $X$ to get $A = [\mathbf{1}\;X] \in \mathbb{R}^{n\times(d+1)}$, and collect the parameters as $\boldsymbol\theta = (b, w_1, \dots, w_d)$. Then $\hat{\mathbf{y}} = A\boldsymbol\theta$, and the bias is just the weight on a feature that's always 1.</p>
+<div class="callout ml">
+<p>A layer of a neural network (lesson 16) computes $XW + \mathbf{b}$, which is linear regression with many outputs at once, followed by a non-linearity. The last layer of a regression network is exactly this lesson's model, applied to features the earlier layers learned.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="loss">2. The loss: mean squared error</h2>
+<p>For given parameters, the <b>residual</b> $r_i = \hat y_i - y_i$ is how far off prediction $i$ is. We summarize all of them with the <b>mean squared error</b>:</p>
+$$L(\mathbf{w}, b) = \frac1n\sum_{i=1}^n (\hat y_i - y_i)^2 = \frac1n\,\|A\boldsymbol\theta - \mathbf{y}\|^2.$$
+<p>Why squares, and not absolute values or fourth powers? There are three reasons, from shallow to deep:</p>
+<ul>
+  <li><b>Smoothness.</b> $r^2$ is differentiable everywhere, and $L$ is a quadratic bowl in $\boldsymbol\theta$ with a single minimum and no local traps.</li>
+  <li><b>Closed form.</b> A quadratic's gradient is linear, so setting it to zero gives a linear system (section 5).</li>
+  <li><b>Probability.</b> Assume $y_i = \mathbf{w}\cdot\mathbf{x}_i + b + \varepsilon_i$ with Gaussian noise $\varepsilon_i\sim\mathcal N(0,\sigma^2)$ (lesson 09). The negative log-likelihood (lesson 10) is $-\log p(\mathbf{y}) = \frac{n}{2}\log(2\pi\sigma^2) + \frac{1}{2\sigma^2}\sum_i r_i^2$. The first term doesn't depend on $\boldsymbol\theta$, so <b>maximum likelihood = least squares</b>. MSE is the loss you get if you believe the noise is Gaussian. If you instead assume Laplace noise, MLE gives absolute error.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-fit" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-fit"></div>
+  <div class="readout" id="out-fit"></div>
+  <div class="caption"><b>Try it:</b> drag the data points. Each pink square has side $|r_i|$, so its area is $r_i^2$, and the total pink area is $n\cdot\text{MSE}$. The blue line is the least-squares fit: the line with the smallest total area. Tick "fit by hand" and drag the two orange handles to try to beat it (you can't). Then drag one point far away and watch it pull the whole line. Squares punish big residuals hard, so least squares is sensitive to outliers.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gradient">3. The gradient</h2>
+<p>To go downhill we need $\nabla L$ (lessons 06–07). We'll derive it two ways. First, component by component. For one weight $w_j$, the chain rule (lesson 05) on each squared residual gives</p>
+$$\frac{\partial L}{\partial w_j} = \frac1n\sum_i 2\,r_i\,\frac{\partial r_i}{\partial w_j} = \frac2n\sum_i r_i\,x_{ij}, \qquad \frac{\partial L}{\partial b} = \frac2n\sum_i r_i.$$
+<p>Stacking over $j$, $\sum_i r_i x_{ij}$ is the $j$-th entry of $X^\top\mathbf{r}$. So:</p>
+$$\boxed{\;\nabla_{\mathbf w} L = \frac2n X^\top(\hat{\mathbf y} - \mathbf y),\qquad \frac{\partial L}{\partial b} = \frac2n\,\mathbf{1}^\top(\hat{\mathbf y} - \mathbf y)\;}\qquad\text{or together}\qquad \nabla_{\boldsymbol\theta}L = \frac2n A^\top(A\boldsymbol\theta - \mathbf y).$$
+<p>Second, the matrix-calculus way (lesson 07). Expand $L = \frac1n(\boldsymbol\theta^\top A^\top A\boldsymbol\theta - 2\mathbf{y}^\top A\boldsymbol\theta + \mathbf{y}^\top\mathbf{y})$ and use $\nabla_{\boldsymbol\theta}(\boldsymbol\theta^\top M\boldsymbol\theta) = 2M\boldsymbol\theta$ for symmetric $M$ and $\nabla(\mathbf{c}^\top\boldsymbol\theta) = \mathbf{c}$. That gives the same answer, $\frac2n(A^\top A\boldsymbol\theta - A^\top\mathbf y)$. Differentiate once more to get the <b>Hessian</b>:</p>
+$$H = \nabla^2 L = \frac2n A^\top A.$$
+<p>$H$ is constant (the loss is exactly quadratic) and positive semi-definite, since $\mathbf v^\top A^\top A\mathbf v = \|A\mathbf v\|^2 \ge 0$. So the bowl is convex, and any point where the gradient vanishes is a global minimum. $H$'s eigenvalues will control how fast gradient descent goes (section 6).</p>
+<div class="callout intuition">
+<p>Read $X^\top\mathbf r$ as a weighted vote. Each example pushes weight $w_j$ by (its error) × (its feature value). A big error on an example with a big $x_{ij}$ moves $w_j$ a lot. Examples where feature $j$ is zero don't move $w_j$ at all. You'll see the same "error × input" shape in logistic regression (lesson 14) and in every backprop weight gradient (lesson 17).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gd">4. Gradient descent on the loss surface</h2>
+<p>Gradient descent (lesson 06) repeats one update:</p>
+$$\boldsymbol\theta \leftarrow \boldsymbol\theta - \eta\,\nabla L(\boldsymbol\theta) = \boldsymbol\theta - \eta\,\frac2n A^\top(A\boldsymbol\theta - \mathbf y).$$
+<p>In code this is the training loop you'll write a thousand times, in miniature:</p>
+<pre><code>w, b = np.zeros(d), 0.0
+for step in range(steps):
+    r  = X @ w + b - y                # forward: residuals (n,)
+    dw = 2 / n * X.T @ r              # backward: gradient (d,)
+    db = 2 / n * r.sum()
+    w -= lr * dw;  b -= lr * db       # update</code></pre>
+<p>Because the model has only two parameters when $d=1$, we can draw the whole loss surface over the $(w, b)$ plane as contour lines and watch the path.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-gd" width="380" height="380"></canvas></div>
+    <div><canvas id="fig-gd-data" width="380" height="380"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-gd"></div>
+  <div class="readout" id="out-gd"></div>
+  <div class="caption"><b>Try it:</b> press <b>play</b>. Left: MSE contours over $(w, b)$, the GD path, and the minimum ★. Right: the line for the current $(w,b)$. Click the contour plot to restart from another point. With <b>raw x</b> (features in $[0, 10]$), the bowl is a long thin valley. A safe learning rate crawls along it, and nudging the rate above $2/\lambda_{\max}$ makes it explode. Switch to <b>standardized x</b>: the contours become circles and GD reaches the minimum in a few steps. Section 6 explains why.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="normal">5. The closed form: normal equations</h2>
+<h3>Way 1: set the gradient to zero</h3>
+<p>The minimum of a convex bowl is where $\nabla L = 0$:</p>
+$$\frac2n A^\top(A\boldsymbol\theta - \mathbf y) = 0 \quad\Longleftrightarrow\quad \boxed{\;A^\top A\,\boldsymbol\theta = A^\top\mathbf y\;}$$
+<p>These are the <b>normal equations</b>: a $(d+1)\times(d+1)$ linear system. If the columns of $A$ are independent (no feature is a linear combination of the others, lesson 03), then $A^\top A$ is invertible and the solution is unique.</p>
+
+<h3>Way 2: project y onto the column space</h3>
+<p>Now a picture that needs no calculus. Think of $\mathbf y$ as one point in $\mathbb R^n$, with one axis per example. As $\boldsymbol\theta$ ranges over all values, $A\boldsymbol\theta$ sweeps out the <b>column space</b> of $A$: a $(d+1)$-dimensional flat subspace of $\mathbb R^n$ (lesson 03). Minimizing $\|A\boldsymbol\theta - \mathbf y\|$ means finding the point in that subspace <em>closest</em> to $\mathbf y$. By the geometry of lesson 01, the closest point is the <b>orthogonal projection</b>, and the leftover residual must be perpendicular to the subspace, meaning perpendicular to every column of $A$:</p>
+$$A^\top(\mathbf y - A\boldsymbol\theta) = \mathbf 0 \quad\Longleftrightarrow\quad A^\top A\,\boldsymbol\theta = A^\top\mathbf y.$$
+<p>That's the same equation. It is lesson 01's $\operatorname{proj}_{\mathbf a}\mathbf b = \frac{\mathbf a\cdot\mathbf b}{\mathbf a\cdot\mathbf a}\mathbf a$, generalized from a line to a subspace. The "normal" in the name is that orthogonality.</p>
+
+<div class="figure">
+  <canvas id="fig-proj" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-proj"></div>
+  <div class="readout" id="out-proj"></div>
+  <div class="caption"><b>Try it:</b> three data points at $x = 1, 2, 3$ make $\mathbf y \in \mathbb R^3$, one axis per data point. The shaded plane is the column space of $A$, spanned by $\mathbf 1 = (1,1,1)$ and $\mathbf x = (1,2,3)$, the set of every prediction a line can make. Move the $y_i$ sliders. The fitted predictions $\hat{\mathbf y}$ are always the foot of the perpendicular from $\mathbf y$, and the readout confirms $A^\top\mathbf e = 0$. Rotate the view to convince yourself the dashed residual really is perpendicular to the plane. When the three points lie on a line, $\mathbf y$ sits in the plane and the residual vanishes.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: four points</div>
+  <p>Fit a line to $(1,1), (2,3), (3,2), (4,5)$. With $A = [\mathbf 1\;\mathbf x]$:</p>
+  $$A^\top A = \begin{bmatrix} n & \sum x_i \\ \sum x_i & \sum x_i^2\end{bmatrix} = \begin{bmatrix} 4 & 10 \\ 10 & 30\end{bmatrix},\qquad A^\top\mathbf y = \begin{bmatrix}\sum y_i \\ \sum x_i y_i\end{bmatrix} = \begin{bmatrix} 11 \\ 33\end{bmatrix}.$$
+  <p>The determinant is $4\cdot30 - 10\cdot10 = 20$. By Cramer's rule (fine for 2×2), $b = (30\cdot11 - 10\cdot33)/20 = 0$ and $w = (4\cdot33 - 10\cdot11)/20 = 22/20 = 1.1$. So $\hat y = 1.1x$.</p>
+  <p>The predictions are $(1.1, 2.2, 3.3, 4.4)$ and the residuals $\mathbf y - \hat{\mathbf y} = (-0.1, 0.8, -1.3, 0.6)$. Check orthogonality: they sum to $0$ (perpendicular to $\mathbf 1$), and $1(-0.1) + 2(0.8) + 3(-1.3) + 4(0.6) = 0$ (perpendicular to $\mathbf x$). ✓ MSE $= (0.01 + 0.64 + 1.69 + 0.36)/4 = 0.675$.</p>
+</div>
+
+<h3>Solving it in practice: never invert</h3>
+<p>The textbook formula $\boldsymbol\theta = (A^\top A)^{-1}A^\top\mathbf y$ is for derivations. In code, use <code>np.linalg.solve(A.T @ A, A.T @ y)</code>. It does one LU factorization instead of computing a full inverse, and it is faster and more accurate. Better still is <code>np.linalg.lstsq(A, y)</code>, which uses an orthogonal factorization (QR or SVD, lesson 04) of $A$ itself. Forming $A^\top A$ <em>squares</em> the condition number (section 6), so a problem that's merely touchy becomes hopeless in floating point. The workbook has you write the QR route yourself.</p>
+
+<h3>How good is the fit? $R^2$</h3>
+<p>MSE has units (dollars squared), which makes it hard to read on its own. The <b>coefficient of determination</b> compares it with the dumbest baseline, always predicting the mean $\bar y$:</p>
+$$R^2 = 1 - \frac{\sum_i (y_i - \hat y_i)^2}{\sum_i (y_i - \bar y)^2}.$$
+<p>$R^2 = 1$ is a perfect fit. $R^2 = 0$ is no better than the mean. On new data, $R^2$ can go negative. In the worked example, $\sum(y_i - \bar y)^2 = 8.75$ and $\sum r_i^2 = 2.7$, so $R^2 = 1 - 2.7/8.75 \approx 0.691$: the line explains about 69% of the variance in $y$.</p>
+
+<table>
+  <tr><th></th><th>Normal equations / lstsq</th><th>Gradient descent</th></tr>
+  <tr><td>Cost</td><td>$O(nd^2 + d^3)$ once</td><td>$O(nd)$ per step × many steps</td></tr>
+  <tr><td>Hyperparameters</td><td>none</td><td>learning rate, number of steps</td></tr>
+  <tr><td>Exact?</td><td>yes (up to rounding)</td><td>approaches it</td></tr>
+  <tr><td>Scales to</td><td>$d$ up to ~10⁴</td><td>any $d$; works with mini-batches and streaming data</td></tr>
+  <tr><td>Generalizes to</td><td>only quadratic losses</td><td><b>every model in this course</b></td></tr>
+</table>
+<p>The last row is why we bother with GD at all. Logistic regression (lesson 14) has no closed form, and neither does any neural network.</p>
+
+<!-- ============================================================ -->
+<h2 id="scaling">6. Feature scaling and the condition number</h2>
+<p>Why did GD crawl with raw features? Near the minimum $\boldsymbol\theta^*$, write the error as $\boldsymbol\delta = \boldsymbol\theta - \boldsymbol\theta^*$. Since $\nabla L = H\boldsymbol\delta$ exactly for a quadratic, one GD step gives</p>
+$$\boldsymbol\delta \leftarrow (I - \eta H)\,\boldsymbol\delta.$$
+<p>Decompose $\boldsymbol\delta$ along the eigenvectors of $H$ (lesson 04). Along an eigenvector with eigenvalue $\lambda$, each step multiplies the error by $(1 - \eta\lambda)$. Two consequences:</p>
+<ul>
+  <li><b>Stability</b> needs $|1 - \eta\lambda| \lt 1$ for every eigenvalue, so $\eta \lt 2/\lambda_{\max}$. The steepest direction caps the step size.</li>
+  <li><b>Speed</b> along the flattest direction is $1 - \eta\lambda_{\min} \ge 1 - 2\lambda_{\min}/\lambda_{\max}$. The number of steps needed grows like the <b>condition number</b> $\kappa = \lambda_{\max}/\lambda_{\min}$.</li>
+</ul>
+<p>Geometrically, $\kappa$ is how elongated the contour ellipses are: their axis lengths scale like $1/\sqrt{\lambda}$. A large $\kappa$ means a long thin valley. The step size you'd like for crossing the valley is far too large for walking down its length.</p>
+
+<div class="example">
+  <div class="label">Worked example: why raw features are slow</div>
+  <p>One feature, uniformly spread over $[0, 10]$, so $\bar x = 5$ and $\overline{x^2} = 100/3$. With $A = [\mathbf 1\;\mathbf x]$,</p>
+  $$H = \frac2n A^\top A = 2\begin{bmatrix} 1 & \bar x \\ \bar x & \overline{x^2}\end{bmatrix} = 2\begin{bmatrix} 1 & 5 \\ 5 & 33.3\end{bmatrix}.$$
+  <p>Its eigenvalues are about $68.2$ and $0.489$, so $\kappa \approx 139$ and the largest stable learning rate is $2/68.2 \approx 0.029$.</p>
+  <p><b>Center</b> the feature ($x - \bar x$). The off-diagonal $\bar x$ becomes 0 and $H = 2\,\mathrm{diag}(1, \operatorname{Var}x) = \mathrm{diag}(2, 16.7)$, so $\kappa = 8.3$. <b>Standardize</b> it ($(x-\bar x)/s$). Now $H = 2I$, $\kappa = 1$, and the contours are circles. With $\eta = 1/2$, $I - \eta H = 0$: GD lands on the minimum in <em>one step</em>.</p>
+</div>
+
+<div class="callout warning">
+<p>Compute the mean and standard deviation <b>on the training set only</b>, then apply those same numbers to validation and test data (lesson 15). Recomputing them on test data leaks information and quietly changes what the model sees. The workbook's <code>Standardizer</code> has separate <code>fit</code> and <code>transform</code> for this reason. It also has <code>unscale</code>, which converts the learned weights back to raw units so you can interpret them.</p>
+</div>
+<div class="callout ml">
+<p>This is the first reason deep learning normalizes everything: inputs, activations (BatchNorm, LayerNorm, lesson 18), and even gradients (Adam's per-parameter scaling is a cheap diagonal fix for bad conditioning). Different scales across directions in parameter space mean slow, unstable training, whether the model has 2 parameters or 2 billion.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="poly">7. Polynomial features: curves with a linear model</h2>
+<p>"Linear" regression means linear in the <em>parameters</em>, not in the input. Nothing stops us from inventing new features. Replace $x$ with $(x, x^2, \dots, x^p)$ and fit</p>
+$$\hat y = w_1 x + w_2 x^2 + \cdots + w_p x^p + b.$$
+<p>It's still $A\boldsymbol\theta$ with a bigger $A$, so the normal equations, GD and everything above still apply. The model can now bend.</p>
+
+<div class="figure">
+  <canvas id="fig-poly" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-poly"></div>
+  <div class="readout" id="out-poly"></div>
+  <div class="caption"><b>Try it:</b> raise the degree. Training error falls every time, because each extra feature can only help the fit. At degree 7 with 8 points the curve passes through every point exactly (zero error) and swings wildly in between. Would you trust its prediction at $x = 9.5$? Drag a point and watch the high-degree curve react everywhere. Lesson 15 turns this unease into a measurement.</div>
+</div>
+
+<p>Two practical notes. First, powers of $x$ have wildly different scales ($10$ vs $10^7$ for $x=10$, $p=7$), and they are nearly collinear, since $x^6$ and $x^7$ look alike. That gives a terribly conditioned $A$. Rescale $x$ to $[-1, 1]$ before taking powers, and solve with <code>lstsq</code>/QR. The figure does both. Second, with $d$ input features, all degree-2 terms (squares and pairwise products) already number $d(d+1)/2$. Hand-crafted feature expansion doesn't scale. That's the opening for neural networks, which <em>learn</em> their features (lesson 16).</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Fit $\hat y = wx + b$ to the points $(0, 1), (1, 2), (2, 4)$ by least squares. Enter $w, b$.</p>
+<div class="numcheck" data-answer="1.5,0.833333" data-tol="1e-3"></div>
+<details class="hint"><summary>Hint</summary><p>For one feature the normal equations reduce to $w = \sum(x_i-\bar x)(y_i - \bar y) / \sum (x_i - \bar x)^2$ and $b = \bar y - w\bar x$ (problem 3).</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\bar x = 1$, $\bar y = 7/3$. Deviations: $x - \bar x = (-1, 0, 1)$ and $y - \bar y = (-4/3, -1/3, 5/3)$. Then $w = (4/3 + 0 + 5/3)/2 = 3/2$ and $b = 7/3 - 3/2 = 5/6 \approx 0.833$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>What is the training MSE of the fit in problem 1?</p>
+<div class="numcheck" data-answer="0.055556" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Predictions: $5/6, 7/3, 23/6$. Residuals $y - \hat y = (1/6, -1/3, 1/6)$. Squares: $1/36 + 4/36 + 1/36 = 6/36 = 1/6$. Divide by $n=3$: $1/18 \approx 0.0556$. Note that the residuals sum to 0 and are orthogonal to $\mathbf x = (0,1,2)$: $0 - 1/3 + 1/3 = 0$ ✓.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core · derivation</span>
+<p>For a single feature, write out the two normal equations and solve them to show $b = \bar y - w\bar x$ and $w = \dfrac{\sum_i (x_i - \bar x)(y_i - \bar y)}{\sum_i (x_i - \bar x)^2} = \dfrac{\operatorname{Cov}(x,y)}{\operatorname{Var}(x)}$. What does the first equation say about the fitted line and the point $(\bar x, \bar y)$?</p>
+<details class="solution"><summary>Solution</summary>
+<p>The first row of $A^\top A\boldsymbol\theta = A^\top\mathbf y$ is $nb + w\sum x_i = \sum y_i$. Divide by $n$: $b + w\bar x = \bar y$. So the fitted line always passes through the centroid $(\bar x, \bar y)$, and $b = \bar y - w\bar x$. The second row is $b\sum x_i + w\sum x_i^2 = \sum x_i y_i$. Substitute $b$: $w(\sum x_i^2 - n\bar x^2) = \sum x_i y_i - n\bar x\bar y$. Both sides are $n\times$ the (biased) variance and covariance, since $\sum x_i^2 - n\bar x^2 = \sum(x_i-\bar x)^2$ and $\sum x_iy_i - n\bar x\bar y = \sum (x_i-\bar x)(y_i-\bar y)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Starting from $w = b = 0$ on the data of problem 1, take <b>one</b> gradient-descent step with $\eta = 0.1$. Enter the new $w, b$.</p>
+<div class="numcheck" data-answer="0.666667,0.466667" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>At zero, the residuals are $\hat y - y = -\mathbf y = (-1, -2, -4)$. Then $\partial L/\partial w = \frac23\sum r_i x_i = \frac23(0 - 2 - 8) = -20/3$, and $\partial L/\partial b = \frac23(-7) = -14/3$. The step gives $w = 0.1\cdot 20/3 \approx 0.667$ and $b = 0.1\cdot14/3 \approx 0.467$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Using the worked example of section 6 (one raw feature uniform on $[0,10]$, $H = 2\begin{bmatrix}1&5\\5&33.3\end{bmatrix}$), what is the largest learning rate for which GD converges? What about after <em>centering</em> only?</p>
+<div class="numcheck" data-answer="0.0293" data-tol="0.01"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\eta \lt 2/\lambda_{\max}$. The eigenvalues of $\begin{bmatrix}1&5\\5&100/3\end{bmatrix}$ are $\frac{34.33 \pm \sqrt{32.33^2 + 100}}{2} \approx 34.09$ and $0.244$. Times 2: $\lambda_{\max} \approx 68.18$, so $\eta \lt 0.0293$. After centering, $H = \mathrm{diag}(2, 2\cdot 8.33)$, $\lambda_{\max} = 16.7$ and $\eta \lt 0.12$, four times larger. Standardizing allows $\eta \lt 1$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · proof</span>
+<p>Let $P = A(A^\top A)^{-1}A^\top$ (the "hat matrix", since $\hat{\mathbf y} = P\mathbf y$). Show that (a) $P^2 = P$ and $P^\top = P$, (b) $I - P$ maps $\mathbf y$ to the residual, and $A^\top(I-P) = 0$, and (c) if $A$ contains a column of ones, the residuals sum to zero.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $P^2 = A(A^\top A)^{-1}(A^\top A)(A^\top A)^{-1}A^\top = P$. Projecting twice changes nothing. $P^\top = P$ because $(A^\top A)^{-1}$ is symmetric. (b) $\mathbf y - \hat{\mathbf y} = (I - P)\mathbf y$, and $A^\top - A^\top A(A^\top A)^{-1}A^\top = A^\top - A^\top = 0$. (c) The row of $A^\top(I-P)\mathbf y = 0$ that belongs to the ones column reads $\mathbf 1^\top\mathbf e = \sum_i e_i = 0$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · conceptual</span>
+<p>You add a new feature to a linear regression (even pure random noise) and refit. Prove that the <em>training</em> MSE cannot go up. Why does this make training $R^2$ a poor way to choose features?</p>
+<details class="solution"><summary>Solution</summary>
+<p>The old solution is still available: set the new weight to 0. The new minimum is over a strictly larger set of parameter values, so it's $\le$ the old minimum. In projection terms, the column space only grows, so $\mathbf y$ can only get closer to it. Training $R^2$ therefore always rewards more features, including useless ones. You need held-out data to tell real improvement from memorizing noise (lesson 15).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>With $d = 10$ input features, how many features does a full degree-2 polynomial expansion have (all $x_j$, all $x_j^2$ and all products $x_jx_k$ with $j\lt k$, excluding the constant)?</p>
+<div class="numcheck" data-answer="65"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$d$ linear terms, $d$ squares, $\binom d2 = 45$ products: $10 + 10 + 45 = 65 = d + d(d+1)/2$. Degree $p$ in $d$ variables gives $\binom{d+p}{p} - 1$ features, which explodes combinatorially. For $d=784$ (MNIST pixels) and $p=2$ it's already 308,504.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch · derivation</span>
+<p>Show that with standardized features (each column of $X$ has mean 0 and variance 1) that are also mutually uncorrelated, the Hessian is $H = 2I$, and that GD with $\eta = 1/2$ reaches the exact minimum in a single step from any starting point.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\frac1n A^\top A$ has entries $\frac1n\sum_i 1 = 1$, $\frac1n\sum_i x_{ij} = 0$ (mean 0), $\frac1n\sum_i x_{ij}^2 = 1$ (variance 1), and $\frac1n\sum_i x_{ij}x_{ik} = 0$ (uncorrelated). So it's $I$, and $H = 2I$. The error update is $\boldsymbol\delta \leftarrow (I - \eta H)\boldsymbol\delta = (1 - 2\eta)\boldsymbol\delta$, which is $0$ for $\eta = 1/2$. Decorrelating features as well ("whitening", via PCA, lesson 04) makes the bowl perfectly round.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">Why does minimizing MSE correspond to maximum likelihood?</div>
+  <div class="opts">
+    <button data-k="a">Because squares are always positive.</button>
+    <button data-k="b">It doesn't; MSE is just a convenient heuristic.</button>
+    <button data-k="c">If the noise is Gaussian, the negative log-likelihood is a constant plus the sum of squared residuals over $2\sigma^2$.</button>
+    <button data-k="d">Because the residuals of the MLE always sum to zero.</button>
+  </div>
+  <div class="explain">$-\log \mathcal N(y\mid\hat y,\sigma^2) = \tfrac12\log 2\pi\sigma^2 + (y-\hat y)^2/2\sigma^2$. Summing over examples and dropping constants leaves the squared error. A different noise model gives a different loss: Laplace noise gives absolute error.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">At the least-squares solution, the residual vector $\mathbf e = \mathbf y - A\boldsymbol\theta$ is…</div>
+  <div class="opts">
+    <button data-k="a">zero.</button>
+    <button data-k="b">orthogonal to every column of $A$.</button>
+    <button data-k="c">parallel to $\mathbf y$.</button>
+    <button data-k="d">orthogonal to $\mathbf y$.</button>
+  </div>
+  <div class="explain">That's the normal equations, $A^\top\mathbf e = 0$. It's zero only if $\mathbf y$ lies exactly in the column space. It's generally <em>not</em> orthogonal to $\mathbf y$ itself; it's orthogonal to $\hat{\mathbf y}$.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">GD on raw features is slow. You standardize the features and it converges in a few steps. What changed?</div>
+  <div class="opts">
+    <button data-k="a">The minimum of the loss moved closer to the origin.</button>
+    <button data-k="b">The loss became convex.</button>
+    <button data-k="c">The gradient became larger everywhere.</button>
+    <button data-k="d">The Hessian's condition number dropped toward 1, so one learning rate suits every direction.</button>
+  </div>
+  <div class="explain">The loss was convex already. Scaling changes the <em>shape</em> of the bowl, from a long valley to a round dish. Since $\eta \lt 2/\lambda_{\max}$ while progress depends on $\lambda_{\min}$, the ratio $\kappa$ sets the number of steps.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">Which is the right way to compute the least-squares weights in NumPy?</div>
+  <div class="opts">
+    <button data-k="a"><code>np.linalg.lstsq(A, y, rcond=None)[0]</code></button>
+    <button data-k="b"><code>np.linalg.inv(A.T @ A) @ A.T @ y</code></button>
+    <button data-k="c"><code>np.linalg.inv(A) @ y</code></button>
+    <button data-k="d"><code>A.T @ y / (A.T @ A)</code></button>
+  </div>
+  <div class="explain">(b) is mathematically right but numerically worse: it forms an explicit inverse and squares the condition number. (c) fails, because $A$ is $n\times(d+1)$ and not square. (d) is element-wise division of a vector by a matrix. Broadcasting will happily give you nonsense (lesson 12).</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Model</td><td>$\hat{\mathbf y} = X\mathbf w + b = A\boldsymbol\theta$</td><td>weighted sum of features</td></tr>
+  <tr><td>Loss</td><td>$L = \frac1n\|A\boldsymbol\theta - \mathbf y\|^2$</td><td>Gaussian negative log-likelihood, up to constants</td></tr>
+  <tr><td>Gradient</td><td>$\frac2n A^\top(A\boldsymbol\theta - \mathbf y)$</td><td>error × input, summed</td></tr>
+  <tr><td>Normal equations</td><td>$A^\top A\boldsymbol\theta = A^\top\mathbf y$</td><td>residual ⟂ column space</td></tr>
+  <tr><td>Hessian</td><td>$\frac2n A^\top A$</td><td>bowl shape; $\eta \lt 2/\lambda_{\max}$</td></tr>
+  <tr><td>Condition number</td><td>$\kappa = \lambda_{\max}/\lambda_{\min}$</td><td>GD steps ∝ κ; standardize to shrink it</td></tr>
+  <tr><td>$R^2$</td><td>$1 - \text{SS}_{\text{res}}/\text{SS}_{\text{tot}}$</td><td>fraction of variance explained</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 13: build it</h3>
+  <p>Open <code>workbooks/13_linear_regression/exercises.py</code>. You'll implement <code>predict</code>, a shape-checked <code>mse</code>, its gradient (verified against finite differences), a GD training loop that records its loss history, the normal equations with <code>np.linalg.solve</code>, <code>r2_score</code>, a train-only <code>Standardizer</code> that can map weights back to raw units, <code>polynomial_features</code> and <code>condition_number</code>. The stretch part builds least squares from QR and your own back-substitution. Grade yourself with:</p>
+  <pre><code>./course check 13</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Gilbert Strang, <em>Introduction to Linear Algebra</em>, §4.3 "Least squares approximations".</li>
+  <li>Hastie, Tibshirani &amp; Friedman, <em>The Elements of Statistical Learning</em>, ch. 3.</li>
+  <li>Andrew Ng, CS229 lecture notes 1 (linear regression, normal equations, probabilistic interpretation).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt } = Course;
+  const checkbox = (host, text, on) => { const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.addEventListener("change", () => on(cb.checked)); lab.append(cb, " " + text); document.querySelector(host).appendChild(lab); return cb; };
+  // least squares via modified Gram-Schmidt QR: A (m x k array of rows), y (m) -> theta (k)
+  function lstsq(A, y) {
+    const m = A.length, k = A[0].length, Q = A.map(r => r.slice()), R = [...Array(k)].map(() => new Array(k).fill(0));
+    for (let j = 0; j < k; j++) {
+      for (let i = 0; i < j; i++) { let d = 0; for (let r = 0; r < m; r++) d += Q[r][i] * Q[r][j]; R[i][j] += d; for (let r = 0; r < m; r++) Q[r][j] -= d * Q[r][i]; }
+      let nrm = 0; for (let r = 0; r < m; r++) nrm += Q[r][j] ** 2; nrm = Math.sqrt(nrm) || 1e-12; R[j][j] = nrm; for (let r = 0; r < m; r++) Q[r][j] /= nrm;
+    }
+    const z = new Array(k).fill(0); for (let j = 0; j < k; j++) for (let r = 0; r < m; r++) z[j] += Q[r][j] * y[r];
+    const th = new Array(k).fill(0);
+    for (let i = k - 1; i >= 0; i--) { let s = z[i]; for (let j = i + 1; j < k; j++) s -= R[i][j] * th[j]; th[i] = Math.abs(R[i][i]) > 1e-10 ? s / R[i][i] : 0; }
+    return th;
+  }
+  const fit1 = pts => { const n = pts.length, mx = pts.reduce((s, p) => s + p.x, 0) / n, my = pts.reduce((s, p) => s + p.y, 0) / n; let sxy = 0, sxx = 0; pts.forEach(p => { sxy += (p.x - mx) * (p.y - my); sxx += (p.x - mx) ** 2; }); const w = sxx > 1e-12 ? sxy / sxx : 0; return [w, my - w * mx]; };
+
+  // ---------- fig: fit & residual squares ----------
+  {
+    const p = new Plot("#fig-fit", { xmin: -0.5, xmax: 10.5, ymin: -0.5, ymax: 6.5, equal: true });
+    const pts = [[1, 1.2], [2.2, 1.6], [3.5, 3.1], [5, 2.6], [6.2, 4.2], [7.5, 3.9], [9, 5.3]].map(([x, y]) => ({ x, y, color: "c1", r: 6 }));
+    const h1 = { x: 1, y: 0.8, color: "c2", constrain: (x, y) => [1, y] }, h2 = { x: 9, y: 4.2, color: "c2", constrain: (x, y) => [9, y] };
+    let hand = false; const out = document.getElementById("out-fit");
+    checkbox("#ctl-fit", "fit by hand", v => { hand = v; p.draggable(hand ? [...pts, h1, h2] : pts); p.render(); });
+    button("#ctl-fit", "snap handles to best fit", () => { const [w, b] = fit1(pts); h1.y = w * 1 + b; h2.y = w * 9 + b; p.render(); });
+    p.draggable(pts).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1, stepY: 1, xlabel: "x", ylabel: "y" });
+      const [wo, bo] = fit1(pts);
+      const [w, b] = hand ? [(h2.y - h1.y) / 8, h1.y - (h2.y - h1.y) / 8] : [wo, bo];
+      let sse = 0, sseo = 0;
+      pts.forEach(q => {
+        const yh = w * q.x + b, r = q.y - yh; sse += r * r; sseo += (q.y - wo * q.x - bo) ** 2;
+        const s = Math.abs(r);
+        p.polygon([[q.x, q.y], [q.x, yh], [q.x + s, yh], [q.x + s, q.y]], { fill: "c4", fillAlpha: .18, color: "c4", width: 1 });
+      });
+      if (hand) p.fn(x => wo * x + bo, { color: "c1", width: 1.5, dash: [6, 5], alpha: .6 });
+      p.fn(x => w * x + b, { color: hand ? "c2" : "c1", width: 2.5 });
+      p.drawHandles();
+      const n = pts.length;
+      out.textContent = (hand ? `your line:  y = ${w.toFixed(3)} x + ${b.toFixed(3)}   MSE = ${(sse / n).toFixed(4)}\n` : "") +
+        `best fit:   y = ${wo.toFixed(3)} x + ${bo.toFixed(3)}   MSE = ${(sseo / n).toFixed(4)}   (total square area = ${sseo.toFixed(3)})`;
+    });
+  }
+
+  // ---------- fig: GD on the loss surface ----------
+  {
+    const R = Course.rng(11), N = 20, xs = [], ys = [];
+    for (let i = 0; i < N; i++) { const x = R.uniform(0, 10); xs.push(x); ys.push(0.5 * x + 1 + R.normal(0, 0.7)); }
+    const mx = xs.reduce((a, b) => a + b) / N, sx = Math.sqrt(xs.reduce((a, x) => a + (x - mx) ** 2, 0) / N);
+    const modes = { raw: { f: x => x, lr: 0.02, label: "raw x" }, center: { f: x => x - mx, lr: 0.08, label: "centered x" }, std: { f: x => (x - mx) / sx, lr: 0.3, label: "standardized x" } };
+    let mode = "raw", lr = modes.raw.lr, S, opt, start, path, t, H;
+    const p = new Plot("#fig-gd", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 }), q = new Plot("#fig-gd-data", { xmin: -0.5, xmax: 10.5, ymin: -1, ymax: 8 });
+    const out = document.getElementById("out-gd");
+    const L = (w, b) => w * w * S.zz + 2 * w * b * S.z + b * b - 2 * w * S.zy - 2 * b * S.y + S.yy;
+    function setup() {
+      const zs = xs.map(modes[mode].f);
+      S = { z: 0, zz: 0, zy: 0, y: 0, yy: 0 }; zs.forEach((z, i) => { S.z += z / N; S.zz += z * z / N; S.zy += z * ys[i] / N; S.y += ys[i] / N; S.yy += ys[i] ** 2 / N; });
+      const det = S.zz - S.z * S.z, w = (S.zy - S.z * S.y) / det, b = S.y - w * S.z; opt = [w, b];
+      const tr = 2 * (1 + S.zz), dd = 4 * det, disc = Math.sqrt(Math.max(0, tr * tr / 4 - dd)); H = [tr / 2 + disc, tr / 2 - disc];
+      const span = 3; p.setView(w - span, w + span, b - span, b + span, true);
+      start = [w - 2, b + 2.2]; reset();
+    }
+    function reset() { path = [start.slice()]; t = 0; anim.stop(); render(); }
+    function step() {
+      const [w, b] = path[path.length - 1], gw = 2 * (w * S.zz + b * S.z - S.zy), gb = 2 * (w * S.z + b - S.y);
+      path.push([w - lr * gw, b - lr * gb]); t++;
+      if (path.length > 400) path.splice(1, 1);
+    }
+    const anim = Course.animator(() => { step(); render(); const [w, b] = path[path.length - 1]; return t < 3000 && isFinite(L(w, b)) && L(w, b) < 1e8 && Math.hypot(w - opt[0], b - opt[1]) > 1e-6; });
+    const lrLab = document.createElement("span");
+    const sl = slider("#ctl-gd", { label: "log₁₀ learning rate ", min: -3, max: 0.2, step: 0.01, value: Math.log10(lr), digits: 2 }, v => { lr = 10 ** v; render(); });
+    select("#ctl-gd", "features ", Object.entries(modes).map(([k, m]) => [k, m.label]), v => { mode = v; lr = modes[v].lr; sl.set(Math.log10(lr)); setup(); });
+    button("#ctl-gd", "▶ play", () => anim.start()); button("#ctl-gd", "step", () => { step(); render(); }); button("#ctl-gd", "reset", reset);
+    p.onClick = (x, y) => { start = [x, y]; reset(); };
+    function render() {
+      p.render(p => {
+        const Lmin = L(...opt), levels = [...Array(16).keys()].map(k => Lmin + 0.03 * Math.pow(1.9, k));
+        p.field((w, b) => Math.log(L(w, b) - Lmin + 0.02), { cmap: "seq", alpha: .4, res: 5 });
+        p.contour(L, levels, { color: "muted", width: 1, res: 4 });
+        p.path(path.filter(([w, b]) => isFinite(w) && Math.abs(w) < 1e6 && Math.abs(b) < 1e6), { color: "c4", width: 2 });
+        path.slice(-60).forEach(([w, b]) => { if (isFinite(w)) p.point(w, b, { r: 2.5, color: "c4" }); });
+        p.label(opt[0], opt[1], "★", { align: "center", color: "c3", font: "700 18px sans-serif" });
+        p.label(8, 14, "w →", { px: true, color: "muted", font: "12px sans-serif" }); p.label(8, 30, "b ↑", { px: true, color: "muted", font: "12px sans-serif" });
+        p.label(p.W - 8, 14, modes[mode].label, { px: true, align: "right", color: "muted", font: "12px sans-serif" });
+      });
+      const [w, b] = path[path.length - 1];
+      q.render(q => {
+        q.grid({ step: 1 }).axes({ step: 2, stepY: 2 });
+        xs.forEach((x, i) => q.point(x, ys[i], { r: 3.5, color: "c1" }));
+        const f = modes[mode].f;
+        if (isFinite(w) && Math.abs(w) < 1e6) q.fn(x => w * f(x) + b, { color: "c4", width: 2.5 });
+        q.fn(x => opt[0] * f(x) + opt[1], { color: "c3", width: 1.2, dash: [5, 4] });
+      });
+      const lval = L(w, b), lim = 2 / H[0];
+      out.textContent = `step ${t}   w = ${fmt(w)}  b = ${fmt(b)}   MSE = ${isFinite(lval) ? lval.toPrecision(4) : "∞"}   (min ${L(...opt).toFixed(4)})\n` +
+        `learning rate ${lr.toPrecision(3)}   eigenvalues of H: ${H[0].toFixed(2)}, ${H[1].toFixed(3)}   κ = ${(H[0] / H[1]).toFixed(1)}   stable if lr < 2/λmax = ${lim.toPrecision(3)}` +
+        (lr >= lim ? "   ⚠ unstable" : "");
+    }
+    setup();
+  }
+
+  // ---------- fig: projection in R^3 ----------
+  {
+    const p = new Plot("#fig-proj", { xmin: -5, xmax: 5, ymin: -2.6, ymax: 4.4, equal: true });
+    let y = [1, 4, 1.5], az = -0.9; const el = 0.42, out = document.getElementById("out-proj");
+    ["y₁ ", "y₂ ", "y₃ "].forEach((lab, i) => slider("#ctl-proj", { label: lab, min: -1, max: 5, step: 0.1, value: y[i] }, v => { y[i] = v; p.render(); }));
+    slider("#ctl-proj", { label: "rotate ", min: -3.1, max: 3.1, step: 0.01, value: az }, v => { az = v; p.render(); });
+    const sc = 0.95, P3 = ([X, Y, Z]) => { const u = X * Math.cos(az) - Y * Math.sin(az), dep = X * Math.sin(az) + Y * Math.cos(az); return [sc * u - 0.5, sc * (Z * Math.cos(el) - dep * Math.sin(el)) - 1.2]; };
+    const a1 = [1, 1, 1], a2 = [1, 2, 3];
+    p.render(p => {
+      // normal equations 2x2
+      const g11 = 3, g12 = 6, g22 = 14, r1 = y[0] + y[1] + y[2], r2 = y[0] + 2 * y[1] + 3 * y[2], det = g11 * g22 - g12 * g12;
+      const b = (g22 * r1 - g12 * r2) / det, w = (g11 * r2 - g12 * r1) / det, yh = [0, 1, 2].map(i => b + w * a2[i]), e = y.map((v, i) => v - yh[i]);
+      // axes
+      const ax = [[5, 0, 0, "y₁"], [0, 5, 0, "y₂"], [0, 0, 5, "y₃"]];
+      ax.forEach(([X, Y, Z, l]) => { const [x0, y0] = P3([0, 0, 0]), [x1, y1] = P3([X, Y, Z]); p.arrow(x0, y0, x1, y1, { color: "muted", width: 1.2 }); p.label(x1, y1, l, { color: "muted", dx: 6, dy: -6, font: "12px sans-serif" }); });
+      // plane patch: s*a1 + t*a2 around the projection
+      const corner = (s, t) => P3([0, 1, 2].map(i => s * a1[i] + t * a2[i]));
+      const s0 = b, t0 = w, ext = 1.6;
+      p.polygon([corner(s0 - ext, t0 - .8), corner(s0 + ext, t0 - .8), corner(s0 + ext, t0 + .8), corner(s0 - ext, t0 + .8)], { fill: "c1", fillAlpha: .12, color: "c1", width: 1, alpha: .5 });
+      const [ox, oy] = P3([0, 0, 0]);
+      const [p1x, p1y] = P3(a1), [p2x, p2y] = P3(a2);
+      p.arrow(ox, oy, p1x, p1y, { color: "c1", width: 2, label: "1" }); p.arrow(ox, oy, p2x, p2y, { color: "c1", width: 2, label: "x" });
+      const [yx, yy] = P3(y), [hx, hy] = P3(yh);
+      p.arrow(ox, oy, hx, hy, { color: "c3", width: 3 }); p.label(hx, hy, "ŷ", { color: "c3", dx: 8, dy: 10 });
+      p.arrow(ox, oy, yx, yy, { color: "c2", width: 3 }); p.label(yx, yy, "y", { color: "c2", dx: 6, dy: -8 });
+      p.line(hx, hy, yx, yy, { color: "c4", width: 2, dash: [5, 4] });
+      const ne = Math.hypot(...e), nh = Math.hypot(...yh);
+      if (ne > 0.3 && nh > 0.3) { // right-angle marker at y-hat
+        const k = 0.28, ue = e.map(v => v / ne), uh = yh.map(v => -v / nh), at = (a, c) => P3(yh.map((v, i) => v + a * ue[i] + c * uh[i]));
+        p.path([at(k, 0), at(k, k), at(0, k)], { color: "c4", width: 1.2 });
+      }
+      if (Math.hypot(...e) > 0.05) p.label((hx + yx) / 2, (hy + yy) / 2, "e", { color: "c4", dx: 8 });
+      const dot1 = e[0] + e[1] + e[2], dot2 = e[0] + 2 * e[1] + 3 * e[2];
+      out.textContent = `fit: b = ${b.toFixed(3)}, w = ${w.toFixed(3)}    ŷ = (${yh.map(v => v.toFixed(2)).join(", ")})    e = y − ŷ = (${e.map(v => v.toFixed(2)).join(", ")})\n` +
+        `Aᵀe = (1·e, x·e) = (${(Math.abs(dot1) < 5e-13 ? 0 : dot1).toFixed(6)}, ${(Math.abs(dot2) < 5e-13 ? 0 : dot2).toFixed(6)})   ‖e‖² = ${(e[0] ** 2 + e[1] ** 2 + e[2] ** 2).toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: polynomial features ----------
+  {
+    const p = new Plot("#fig-poly", { xmin: -0.3, xmax: 10.3, ymin: -3, ymax: 7 });
+    const pts = [[0.5, 1.0], [1.8, 2.4], [3.0, 2.2], [4.2, 3.6], [5.5, 3.1], [6.6, 4.4], [7.9, 3.6], [9.2, 4.9]].map(([x, y]) => ({ x, y, color: "c1", r: 6 }));
+    let deg = 1; const out = document.getElementById("out-poly");
+    slider("#ctl-poly", { label: "degree p ", min: 1, max: 7, step: 1, value: 1, digits: 0 }, v => { deg = v; p.render(); });
+    const u = x => (x - 5) / 5; // rescale to [-1, 1] before powers
+    p.draggable(pts).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const A = pts.map(q => [...Array(deg + 1).keys()].map(k => u(q.x) ** k)), th = lstsq(A, pts.map(q => q.y));
+      const f = x => th.reduce((s, c, k) => s + c * u(x) ** k, 0);
+      let sse = 0; pts.forEach(q => sse += (q.y - f(q.x)) ** 2);
+      p.fn(x => { const v = f(x); return Math.abs(v) < 50 ? v : NaN; }, { color: "c2", width: 2.5, samples: 600 });
+      p.drawHandles();
+      out.textContent = `degree ${deg}: ${deg + 1} parameters for ${pts.length} points    training MSE = ${(sse / pts.length).toFixed(4)}` + (deg + 1 >= pts.length ? "   (interpolates every point)" : "") +
+        `\nprediction at x = 9.5: ${f(9.5).toFixed(2)}`;
+    });
+  }
+});
+</script>
+</body>
+</html>

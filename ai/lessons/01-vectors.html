@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vectors & the dot product</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="01">
+<main>
+
+<div class="kicker">Part 1 · Linear algebra</div>
+<h1>Vectors &amp; the dot product</h1>
+<p class="lede">Every piece of data a model touches — an image, a word, a user — becomes a list of numbers. Treat that list as an arrow in space and you get geometry: lengths, angles, similarity. The dot product is the single most-used operation in all of deep learning.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Move fluently between the three views of a vector: arrow, list of numbers, point in data space.</li>
+    <li>Add, scale and combine vectors, and say what the <em>span</em> of a set of vectors is.</li>
+    <li>Compute norms, dot products, angles and projections — and explain each geometrically.</li>
+    <li>Explain why cosine similarity is how embeddings are compared (and why attention is built on dot products).</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="what">1. What is a vector?</h2>
+<p>A <b>vector</b> is an ordered list of numbers. In two dimensions, $\mathbf{v} = (3, 2)$ — or written as a column,</p>
+$$\mathbf{v} = \begin{bmatrix} 3 \\ 2 \end{bmatrix}.$$
+<p>There are three equally valid ways to picture it, and fluency means switching between them without effort:</p>
+<table>
+  <tr><th>View</th><th>Picture</th><th>Where you'll meet it</th></tr>
+  <tr><td>Arrow</td><td>Go 3 right, 2 up. Only direction and length matter — you can slide it anywhere.</td><td>Gradients, forces, directions in embedding space</td></tr>
+  <tr><td>List of numbers</td><td><code>[3, 2]</code> — an array in memory.</td><td>Every tensor in every model</td></tr>
+  <tr><td>Point</td><td>The tip of the arrow when its tail is at the origin.</td><td>A data point: one house, one image, one word</td></tr>
+</table>
+<p>The power of the idea is that it doesn't stop at 2 or 3 dimensions. A 28×28 grayscale image is a vector with 784 numbers. A word in GPT-2 is a vector with 768 numbers. You can't draw 768-dimensional arrows, but <b>every formula in this lesson works unchanged in any number of dimensions</b>. We build intuition in 2-D and trust the algebra for the rest.</p>
+<p>Notation: we write vectors in bold ($\mathbf{v}$), their components with subscripts ($v_1, v_2, \dots, v_n$), and say $\mathbf{v} \in \mathbb{R}^n$ ("v is in R-n") when it has $n$ real components.</p>
+
+<!-- ============================================================ -->
+<h2 id="add-scale">2. Adding and scaling</h2>
+<p>Two operations define everything else. <b>Addition</b> is component-wise; geometrically it's "tip-to-tail": walk along $\mathbf{u}$, then along $\mathbf{v}$.</p>
+$$\mathbf{u} + \mathbf{v} = \begin{bmatrix} u_1 + v_1 \\ u_2 + v_2 \end{bmatrix}$$
+<p><b>Scalar multiplication</b> stretches (or flips, if negative) a vector: $c\,\mathbf{v} = (c v_1, c v_2)$.</p>
+
+<div class="figure">
+  <canvas id="fig-add" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-add"></div>
+  <div class="readout" id="out-add"></div>
+  <div class="caption"><b>Try it:</b> drag the dots at the arrow tips to move <span style="color:var(--c1)">u</span> and <span style="color:var(--c2)">v</span>. The faint parallelogram shows that $\mathbf{u}+\mathbf{v} = \mathbf{v}+\mathbf{u}$: either path lands on the same tip. Use the slider to scale $\mathbf{v}$ by $c$ — try a negative $c$.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="span">3. Linear combinations and span</h2>
+<p>Combine both operations and you get a <b>linear combination</b>:</p>
+$$a\,\mathbf{u} + b\,\mathbf{v}, \qquad a, b \in \mathbb{R}.$$
+<p>The set of <em>every</em> vector you can reach this way is the <b>span</b> of $\mathbf{u}$ and $\mathbf{v}$. In 2-D, two vectors that don't point along the same line span the entire plane — you can reach any point. If they are <em>collinear</em> (one is a multiple of the other), you're stuck on a line: the second vector added nothing new. We say they are <b>linearly dependent</b>.</p>
+
+<div class="figure">
+  <canvas id="fig-span" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-span"></div>
+  <div class="readout" id="out-span"></div>
+  <div class="caption"><b>Try it:</b> move $a$ and $b$ to reach different points. Tick "show span" to light up many combinations. Then drag $\mathbf{v}$ until it lines up with $\mathbf{u}$ and watch the span collapse to a line.</div>
+</div>
+
+<div class="callout ml">
+<p>A neural network layer outputs linear combinations of learned vectors, followed by a non-linearity. Whether the vectors a model learns are independent or redundant is a question about span. In lesson 04 you'll measure this with <em>rank</em> and the SVD.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="norm">4. Length: the norm</h2>
+<p>By Pythagoras, the length of $\mathbf{v} = (v_1, v_2)$ is $\sqrt{v_1^2 + v_2^2}$. In $n$ dimensions the same formula holds and is called the <b>Euclidean</b> or <b>L2 norm</b>:</p>
+$$\|\mathbf{v}\|_2 = \sqrt{v_1^2 + v_2^2 + \cdots + v_n^2} = \sqrt{\textstyle\sum_i v_i^2}.$$
+<p>A vector with norm 1 is a <b>unit vector</b>. Any non-zero vector can be <b>normalized</b>: $\hat{\mathbf{v}} = \mathbf{v} / \|\mathbf{v}\|$ keeps the direction and throws away the length.</p>
+<p>There are other ways to measure size. The <b>L1 norm</b> $\|\mathbf{v}\|_1 = \sum_i |v_i|$ is "taxicab" distance, and the <b>L∞ norm</b> is $\max_i |v_i|$. The cleanest way to see the difference is to draw every vector of norm exactly 1, the "unit ball", under each norm:</p>
+
+<div class="figure">
+  <canvas id="fig-norm" width="680" height="360"></canvas>
+  <div class="controls" id="ctl-norm"></div>
+  <div class="caption">Unit balls for L1 (diamond), L2 (circle), and L∞ (square). Slide $p$ to see the general $L^p$ norm $\big(\sum_i |v_i|^p\big)^{1/p}$ morph between them. You'll meet L1 and L2 again as <em>regularizers</em> in lesson 15. L1's sharp corners on the axes are why it produces sparse weights.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="dot">5. The dot product</h2>
+<p>The <b>dot product</b> of two vectors multiplies matching components and adds up the results:</p>
+$$\mathbf{a}\cdot\mathbf{b} = a_1 b_1 + a_2 b_2 + \cdots + a_n b_n = \sum_{i=1}^n a_i b_i.$$
+<p>It takes two vectors and returns one number. Algebraically that's all it is. The surprise is what the number means geometrically:</p>
+$$\boxed{\;\mathbf{a}\cdot\mathbf{b} = \|\mathbf{a}\|\,\|\mathbf{b}\|\cos\theta\;}$$
+<p>where $\theta$ is the angle between them. So the dot product measures <b>how much two vectors point the same way</b>, scaled by their lengths:</p>
+<ul>
+  <li>$\mathbf{a}\cdot\mathbf{b} > 0$: angle under 90°, broadly the same direction.</li>
+  <li>$\mathbf{a}\cdot\mathbf{b} = 0$: exactly perpendicular (<b>orthogonal</b>).</li>
+  <li>$\mathbf{a}\cdot\mathbf{b} < 0$: angle over 90°, pointing apart.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-dot" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-dot"></div>
+  <div class="readout" id="out-dot"></div>
+  <div class="caption"><b>Try it:</b> drag $\mathbf{a}$ and $\mathbf{b}$. The shaded arc shows $\theta$. Its color tracks the sign of the dot product (blue positive, pink negative). The dashed segment is the <em>projection</em> of $\mathbf{b}$ onto $\mathbf{a}$ (section 6). Check that both formulas always agree.</div>
+</div>
+
+<h3>Why do the two formulas agree?</h3>
+<p>The proof is short and worth owning. Apply the law of cosines to the triangle with sides $\mathbf{a}$, $\mathbf{b}$, and $\mathbf{a}-\mathbf{b}$:</p>
+$$\|\mathbf{a}-\mathbf{b}\|^2 = \|\mathbf{a}\|^2 + \|\mathbf{b}\|^2 - 2\|\mathbf{a}\|\|\mathbf{b}\|\cos\theta.$$
+<p>Now expand the left side algebraically, using $\|\mathbf{x}\|^2 = \mathbf{x}\cdot\mathbf{x}$ and the fact that the dot product distributes like ordinary multiplication:</p>
+$$\|\mathbf{a}-\mathbf{b}\|^2 = (\mathbf{a}-\mathbf{b})\cdot(\mathbf{a}-\mathbf{b}) = \|\mathbf{a}\|^2 - 2\,\mathbf{a}\cdot\mathbf{b} + \|\mathbf{b}\|^2.$$
+<p>Set the two expressions equal. Everything cancels except $-2\,\mathbf{a}\cdot\mathbf{b} = -2\|\mathbf{a}\|\|\mathbf{b}\|\cos\theta$. $\blacksquare$</p>
+
+<div class="callout key">
+<p>Since $|\cos\theta| \le 1$, we get the <b>Cauchy–Schwarz inequality</b> for free: $|\mathbf{a}\cdot\mathbf{b}| \le \|\mathbf{a}\|\|\mathbf{b}\|$, with equality exactly when the vectors are parallel. It's the reason cosine similarity always lies in $[-1, 1]$.</p>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Let $\mathbf{a} = (3, 4)$ and $\mathbf{b} = (4, -3)$. Then $\mathbf{a}\cdot\mathbf{b} = 3\cdot4 + 4\cdot(-3) = 0$, so they are perpendicular, even though neither lies on an axis.</p>
+  <p>Now $\mathbf{c} = (1, 1)$: $\mathbf{a}\cdot\mathbf{c} = 7$, $\|\mathbf{a}\| = 5$, $\|\mathbf{c}\| = \sqrt2$, so $\cos\theta = 7/(5\sqrt2) \approx 0.990$, giving $\theta \approx 8.1°$. Nearly the same direction.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="projection">6. Projection: the shadow of one vector on another</h2>
+<p>How much of $\mathbf{b}$ points along $\mathbf{a}$? Shine a light perpendicular to $\mathbf{a}$ and look at $\mathbf{b}$'s shadow. The shadow's signed length is the <b>scalar projection</b> $\|\mathbf{b}\|\cos\theta = \dfrac{\mathbf{a}\cdot\mathbf{b}}{\|\mathbf{a}\|}$. Point that length along $\hat{\mathbf{a}}$ and you get the <b>vector projection</b>:</p>
+$$\operatorname{proj}_{\mathbf{a}}\mathbf{b} = \frac{\mathbf{a}\cdot\mathbf{b}}{\mathbf{a}\cdot\mathbf{a}}\;\mathbf{a}.$$
+<p>The leftover $\mathbf{b} - \operatorname{proj}_{\mathbf{a}}\mathbf{b}$ is perpendicular to $\mathbf{a}$ (problem 4 asks you to prove it). This decomposes $\mathbf{b}$ into a part along $\mathbf{a}$ and a part orthogonal to it. That decomposition is the core of least-squares regression (lesson 13) and of the Gram–Schmidt process.</p>
+
+<!-- ============================================================ -->
+<h2 id="cosine">7. Cosine similarity: comparing meanings</h2>
+<p>If you only care about direction and not length, normalize both vectors first. That gives <b>cosine similarity</b>:</p>
+$$\cos(\mathbf{a}, \mathbf{b}) = \frac{\mathbf{a}\cdot\mathbf{b}}{\|\mathbf{a}\|\,\|\mathbf{b}\|} \in [-1, 1].$$
+<p>Language models map words (and sentences, images and code) to <b>embedding vectors</b>, arranged so that related meanings point in similar directions. Search engines, recommendation systems and retrieval-augmented generation all rank results by cosine similarity. Below is a toy 2-D "embedding space". Real ones have hundreds of dimensions, but the arithmetic is identical.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-emb" width="420" height="380"></canvas></div>
+    <div><canvas id="fig-emb-heat" width="380" height="380"></canvas></div>
+  </div>
+  <div class="caption">Left: word vectors (drag any of them). Click a word to make it the query; the bars on its arrow show its cosine similarity to every other word. Right: the full matrix of pairwise cosine similarities. Notice the matrix is symmetric and its diagonal is all 1s. Why? (Problem 6.)</div>
+</div>
+
+<div class="callout ml">
+<p>A transformer's <b>attention</b> (lesson 22) works the same way. Each token emits a <em>query</em> vector, and every token emits a <em>key</em> vector. The model computes the dot product of the query with every key, and a large dot product means "pay attention here". You've just learned the core operation of GPT.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="highdim">8. Into high dimensions</h2>
+<p>Everything above works in $\mathbb{R}^n$. One fact here surprises everyone: <b>in high dimensions, random vectors are almost always nearly orthogonal.</b> If you draw two random directions in $\mathbb{R}^{768}$, their cosine similarity is almost certainly within about $\pm 0.1$ of zero. Slide $n$ and watch the distribution of cosine similarities between random pairs squeeze toward 0:</p>
+<div class="figure">
+  <canvas id="fig-hd" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-hd"></div>
+  <div class="caption">Histogram of cosine similarity between 2000 pairs of random Gaussian vectors in $\mathbb{R}^n$. Its spread shrinks like $1/\sqrt{n}$, which is why a high-dimensional space has room for a huge number of almost-independent "concept directions".</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+<p>Do these with pencil and paper before opening the solutions. The struggle is where the learning happens.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Let $\mathbf{u} = (2, -1, 3)$ and $\mathbf{v} = (1, 4, 0)$. Compute $\mathbf{u}+\mathbf{v}$, $3\mathbf{u} - 2\mathbf{v}$, $\mathbf{u}\cdot\mathbf{v}$, and $\|\mathbf{u}\|$.</p>
+<p>Enter $\mathbf{u}\cdot\mathbf{v}$:</p><div class="numcheck" data-answer="-2"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf{u}+\mathbf{v} = (3, 3, 3)$. $3\mathbf{u}-2\mathbf{v} = (6,-3,9)-(2,8,0) = (4,-11,9)$. $\mathbf{u}\cdot\mathbf{v} = 2 - 4 + 0 = -2$. $\|\mathbf{u}\| = \sqrt{4+1+9} = \sqrt{14}\approx 3.742$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Find the angle (in degrees) between $\mathbf{a} = (1, 0)$ and $\mathbf{b} = (1, \sqrt3)$.</p>
+<div class="numcheck" data-answer="60" data-tol="0.01"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf{a}\cdot\mathbf{b} = 1$, $\|\mathbf{a}\|=1$, $\|\mathbf{b}\| = \sqrt{1+3} = 2$. $\cos\theta = 1/2$, so $\theta = 60°$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>For what value of $k$ are $(k, 2, -1)$ and $(3, k, 4)$ orthogonal?</p>
+<div class="numcheck" data-answer="0.8"></div>
+<details class="hint"><summary>Hint</summary><p>Orthogonal means the dot product is zero. Write it out; it's linear in $k$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$3k + 2k - 4 = 0 \Rightarrow 5k = 4 \Rightarrow k = 0.8$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>Show that $\mathbf{r} = \mathbf{b} - \operatorname{proj}_{\mathbf{a}}\mathbf{b}$ is orthogonal to $\mathbf{a}$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf{a}\cdot\mathbf{r} = \mathbf{a}\cdot\mathbf{b} - \dfrac{\mathbf{a}\cdot\mathbf{b}}{\mathbf{a}\cdot\mathbf{a}}\,(\mathbf{a}\cdot\mathbf{a}) = \mathbf{a}\cdot\mathbf{b} - \mathbf{a}\cdot\mathbf{b} = 0.$ The coefficient $\frac{\mathbf{a}\cdot\mathbf{b}}{\mathbf{a}\cdot\mathbf{a}}$ is exactly the one that makes the residual orthogonal. Equivalently, it's the $c$ that minimizes $\|\mathbf{b} - c\mathbf{a}\|^2$. Try deriving it that way too by expanding and setting the derivative in $c$ to zero.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · proof</span>
+<p>(a) Prove $\|\mathbf{a}+\mathbf{b}\|^2 = \|\mathbf{a}\|^2 + 2\,\mathbf{a}\cdot\mathbf{b} + \|\mathbf{b}\|^2$. (b) Use it and Cauchy–Schwarz to prove the <b>triangle inequality</b> $\|\mathbf{a}+\mathbf{b}\| \le \|\mathbf{a}\| + \|\mathbf{b}\|$. Draw the picture that makes this obvious.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $(\mathbf{a}+\mathbf{b})\cdot(\mathbf{a}+\mathbf{b}) = \mathbf{a}\cdot\mathbf{a} + \mathbf{a}\cdot\mathbf{b} + \mathbf{b}\cdot\mathbf{a} + \mathbf{b}\cdot\mathbf{b}$, and the dot product is symmetric.</p>
+<p>(b) $\|\mathbf{a}+\mathbf{b}\|^2 = \|\mathbf{a}\|^2 + 2\mathbf{a}\cdot\mathbf{b} + \|\mathbf{b}\|^2 \le \|\mathbf{a}\|^2 + 2\|\mathbf{a}\|\|\mathbf{b}\| + \|\mathbf{b}\|^2 = (\|\mathbf{a}\|+\|\mathbf{b}\|)^2$. Take square roots, which preserves order for non-negative numbers. Picture: one side of a triangle is never longer than the other two combined.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Let $E$ be the $n\times n$ matrix of pairwise cosine similarities between $n$ word vectors. Explain why (a) $E$ is symmetric, (b) its diagonal is all 1s, and (c) if every vector is first normalized to unit length and stacked as the rows of a matrix $W$, then $E = W W^\top$. (Part (c) uses matrix products, which lesson 03 covers. Come back to it then if it's unclear now.)</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\mathbf{a}\cdot\mathbf{b} = \mathbf{b}\cdot\mathbf{a}$. (b) $\cos(\mathbf{a},\mathbf{a}) = \|\mathbf{a}\|^2/\|\mathbf{a}\|^2 = 1$. (c) Entry $(i,j)$ of $WW^\top$ is row $i$ of $W$ dotted with column $j$ of $W^\top$, which is row $j$ of $W$: that's $\hat{\mathbf{w}}_i\cdot\hat{\mathbf{w}}_j$. Computing all similarities is a single matrix multiply, and that's exactly how attention scores are computed in bulk.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">stretch</span>
+<p>The vectors $(1,1,0)$, $(1,-1,0)$, $(0,0,1)$ are mutually orthogonal. Write $\mathbf{x} = (3, 1, 2)$ as a linear combination of them <em>without</em> solving a system of equations. Use projections.</p>
+<div class="numcheck" data-answer="2,1,2" data-tol="1e-6"></div>
+<details class="hint"><summary>Hint</summary><p>For an orthogonal basis, the coefficient on $\mathbf{q}_i$ is $\mathbf{x}\cdot\mathbf{q}_i / \mathbf{q}_i\cdot\mathbf{q}_i$. Enter the three coefficients separated by commas.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$c_1 = (3+1)/2 = 2$, $c_2 = (3-1)/2 = 1$, $c_3 = 2/1 = 2$. Check: $2(1,1,0) + 1(1,-1,0) + 2(0,0,1) = (3,1,2)$. ✓ Orthogonal bases make coordinates trivial, which is why so much of numerical linear algebra tries to find one.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">Two embedding vectors have a large dot product but a cosine similarity of 0.05. What's going on?</div>
+  <div class="opts">
+    <button data-k="a">They point in nearly the same direction.</button>
+    <button data-k="b">The dot product must have been computed wrong; the two can't disagree like that.</button>
+    <button data-k="c">At least one vector is very long. Their directions are nearly orthogonal, but the lengths inflate the dot product.</button>
+    <button data-k="d">They are linearly dependent.</button>
+  </div>
+  <div class="explain">$\mathbf{a}\cdot\mathbf{b} = \|\mathbf{a}\|\|\mathbf{b}\|\cos\theta$. Cosine strips the lengths away and leaves only direction. That's why retrieval systems usually normalize embeddings first.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">In $\mathbb{R}^3$, what is the span of $(1,2,3)$ and $(2,4,6)$?</div>
+  <div class="opts">
+    <button data-k="a">All of $\mathbb{R}^3$</button>
+    <button data-k="b">A line through the origin</button>
+    <button data-k="c">A plane through the origin</button>
+    <button data-k="d">Just the two points</button>
+  </div>
+  <div class="explain">The second vector is $2\times$ the first, so all their combinations are multiples of $(1,2,3)$. That's a line.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">You double the length of $\mathbf{a}$. What happens to $\operatorname{proj}_{\mathbf{a}}\mathbf{b}$?</div>
+  <div class="opts">
+    <button data-k="a">Nothing. The projection depends only on the direction of a.</button>
+    <button data-k="b">It doubles.</button>
+    <button data-k="c">It halves.</button>
+    <button data-k="d">It quadruples.</button>
+  </div>
+  <div class="explain">$\frac{(2\mathbf{a})\cdot\mathbf{b}}{(2\mathbf{a})\cdot(2\mathbf{a})}(2\mathbf{a}) = \frac{4\,\mathbf{a}\cdot\mathbf{b}}{4\,\mathbf{a}\cdot\mathbf{a}}\mathbf{a}$. The shadow on a line doesn't care how long the arrow defining the line is.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Norm</td><td>$\|\mathbf{v}\| = \sqrt{\sum v_i^2}$</td><td>length</td></tr>
+  <tr><td>Dot product</td><td>$\sum a_i b_i = \|\mathbf{a}\|\|\mathbf{b}\|\cos\theta$</td><td>alignment × lengths</td></tr>
+  <tr><td>Cosine similarity</td><td>$\frac{\mathbf{a}\cdot\mathbf{b}}{\|\mathbf{a}\|\|\mathbf{b}\|}$</td><td>alignment only, in $[-1,1]$</td></tr>
+  <tr><td>Projection</td><td>$\frac{\mathbf{a}\cdot\mathbf{b}}{\mathbf{a}\cdot\mathbf{a}}\mathbf{a}$</td><td>the part of $\mathbf{b}$ along $\mathbf{a}$</td></tr>
+  <tr><td>Span</td><td>$\{a\mathbf{u} + b\mathbf{v}\}$</td><td>everything reachable by combining</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 01: build it</h3>
+  <p>Open <code>workbooks/01_vectors/exercises.py</code>. You'll implement <code>dot</code>, <code>norm</code>, <code>cosine_similarity</code>, <code>angle_degrees</code>, <code>project</code>, <code>orthogonal_decomposition</code>, and a tiny <code>nearest_words</code> search over a word-embedding table, using plain Python loops first and then a vectorized NumPy version. Grade yourself with:</p>
+  <pre><code>./course check 01</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>3Blue1Brown, <em>Essence of Linear Algebra</em>, ch. 1–3 and 9 (dot products and duality).</li>
+  <li>Gilbert Strang, <em>Introduction to Linear Algebra</em>, ch. 1.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, LA, fmt } = Course;
+
+  // ---------- fig: add & scale ----------
+  {
+    const p = new Plot("#fig-add", { xmin: -6, xmax: 6, ymin: -4, ymax: 4, equal: true });
+    const u = { x: 3, y: 1, color: "c1", snap: 0.5 }, v = { x: 1, y: 2.5, color: "c2", snap: 0.5 };
+    let c = 1; const out = document.getElementById("out-add");
+    slider("#ctl-add", { label: "c (scales v) ", min: -2, max: 2, step: 0.1, value: 1 }, val => { c = val; p.render(); });
+    p.draggable([u, v]).render(p => {
+      p.grid().axes();
+      const cv = [c * v.x, c * v.y], s = [u.x + cv[0], u.y + cv[1]];
+      p.polygon([[0, 0], [u.x, u.y], s, cv], { fill: "c3", fillAlpha: .07, stroke: false });
+      p.arrow(u.x, u.y, s[0], s[1], { color: "c2", dash: [5, 4], width: 1.5, alpha: .6 });
+      p.arrow(cv[0], cv[1], s[0], s[1], { color: "c1", dash: [5, 4], width: 1.5, alpha: .6 });
+      p.arrow(0, 0, s[0], s[1], { color: "c3", width: 3, label: c === 1 ? "u + v" : "u + cv" });
+      p.arrow(0, 0, u.x, u.y, { color: "c1", width: 3, label: "u" });
+      if (c !== 1) p.arrow(0, 0, v.x, v.y, { color: "c2", width: 1.5, alpha: .35 });
+      p.arrow(0, 0, cv[0], cv[1], { color: "c2", width: 3, label: c === 1 ? "v" : "cv" });
+      p.drawHandles();
+      out.textContent = `u = (${fmt(u.x)}, ${fmt(u.y)})   ${c === 1 ? "v" : "cv"} = (${fmt(cv[0])}, ${fmt(cv[1])})   sum = (${fmt(s[0])}, ${fmt(s[1])})`;
+    });
+  }
+
+  // ---------- fig: span ----------
+  {
+    const p = new Plot("#fig-span", { xmin: -6, xmax: 6, ymin: -4, ymax: 4, equal: true });
+    const u = { x: 2, y: 0.5, color: "c1", snap: 0.25 }, v = { x: 0.5, y: 1.5, color: "c2", snap: 0.25 };
+    let a = 1, b = 1, show = false; const out = document.getElementById("out-span");
+    slider("#ctl-span", { label: "a ", min: -3, max: 3, step: 0.1, value: 1 }, x => { a = x; p.render(); });
+    slider("#ctl-span", { label: "b ", min: -3, max: 3, step: 0.1, value: 1 }, x => { b = x; p.render(); });
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox";
+    cb.addEventListener("change", () => { show = cb.checked; p.render(); }); lab.append(cb, " show span"); document.getElementById("ctl-span").appendChild(lab);
+    p.draggable([u, v]).render(p => {
+      p.grid().axes();
+      const det = u.x * v.y - u.y * v.x, dependent = Math.abs(det) < 0.05;
+      if (show) {
+        if (dependent) { const d = Math.hypot(u.x, u.y) > 1e-9 ? [u.x, u.y] : [v.x, v.y]; p.ray(0, 0, d[0], d[1], { color: "c5", width: 6, alpha: .25 }); }
+        else for (let i = -12; i <= 12; i++) for (let j = -12; j <= 12; j++) { const x = i / 2 * u.x + j / 2 * v.x, y = i / 2 * u.y + j / 2 * v.y; if (Math.abs(x) < 7 && Math.abs(y) < 5) p.point(x, y, { r: 2, color: "c5", alpha: .45 }); }
+      }
+      const au = [a * u.x, a * u.y], t = [au[0] + b * v.x, au[1] + b * v.y];
+      p.arrow(0, 0, au[0], au[1], { color: "c1", width: 2, alpha: .55 });
+      p.arrow(au[0], au[1], t[0], t[1], { color: "c2", width: 2, alpha: .55 });
+      p.arrow(0, 0, u.x, u.y, { color: "c1", width: 3, label: "u" });
+      p.arrow(0, 0, v.x, v.y, { color: "c2", width: 3, label: "v" });
+      p.point(t[0], t[1], { r: 6, color: "c3", label: "au + bv" });
+      p.drawHandles();
+      out.textContent = `${fmt(a)}·u + ${fmt(b)}·v = (${fmt(t[0])}, ${fmt(t[1])})` + (dependent ? "    ⚠ u and v are collinear: span is just a line" : "    u, v independent: span is the whole plane");
+    });
+  }
+
+  // ---------- fig: norms ----------
+  {
+    const p = new Plot("#fig-norm", { xmin: -1.7, xmax: 1.7, ymin: -1.3, ymax: 1.3, equal: true });
+    let pp = 3;
+    const ball = (q) => { const pts = []; for (let i = 0; i <= 720; i++) { const t = i / 720 * 2 * Math.PI, c = Math.cos(t), s = Math.sin(t); const r = Math.pow(Math.pow(Math.abs(c), q) + Math.pow(Math.abs(s), q), -1 / q); pts.push([r * c, r * s]); } return pts; };
+    slider("#ctl-norm", { label: "p ", min: 0.5, max: 10, step: 0.1, value: 3 }, x => { pp = x; p.render(); });
+    p.render(p => {
+      p.grid({ step: .5 }).axes({ step: .5 });
+      p.polygon([[1, 0], [0, 1], [-1, 0], [0, -1]], { color: "c2", fill: "c2", fillAlpha: .06 });
+      p.circle(0, 0, 1, { color: "c1" });
+      p.polygon([[1, 1], [-1, 1], [-1, -1], [1, -1]], { color: "c3", fill: "c3", fillAlpha: .04 });
+      p.path(ball(pp), { color: "c5", width: 3, close: true });
+      p.label(.45, .62, "L1", { color: "c2" }); p.label(.74, .78, "L2", { color: "c1" }); p.label(1.05, 1.1, "L∞", { color: "c3" });
+      p.label(-1.6, 1.15, "Lp, p = " + pp.toFixed(1), { color: "c5" });
+    });
+  }
+
+  // ---------- fig: dot product ----------
+  {
+    const p = new Plot("#fig-dot", { xmin: -5, xmax: 5, ymin: -3.5, ymax: 3.5, equal: true });
+    const a = { x: 3.5, y: 1, color: "c1" }, b = { x: 1.5, y: 2.5, color: "c2" }; const out = document.getElementById("out-dot");
+    p.draggable([a, b]).render(p => {
+      p.grid().axes();
+      const A = [a.x, a.y], B = [b.x, b.y], d = LA.dot(A, B), na = LA.norm(A), nb = LA.norm(B);
+      const cos = d / (na * nb || 1), th = Math.acos(Math.max(-1, Math.min(1, cos)));
+      // angle arc
+      const a0 = Math.atan2(a.y, a.x), b0 = Math.atan2(b.y, b.x); let da = b0 - a0; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+      const arc = [[0, 0]]; for (let i = 0; i <= 40; i++) { const t = a0 + da * i / 40; arc.push([.8 * Math.cos(t), .8 * Math.sin(t)]); }
+      p.polygon(arc, { fill: d >= 0 ? "c1" : "c4", fillAlpha: .25, stroke: false });
+      // projection of b onto a
+      const k = d / (na * na || 1), pr = [k * a.x, k * a.y];
+      p.ray(0, 0, a.x, a.y, { color: "muted", width: 1, dash: [2, 4], alpha: .6 });
+      p.line(b.x, b.y, pr[0], pr[1], { color: "muted", width: 1.5, dash: [4, 4] });
+      p.line(0, 0, pr[0], pr[1], { color: "c5", width: 6, alpha: .45 });
+      p.arrow(0, 0, a.x, a.y, { color: "c1", width: 3, label: "a" });
+      p.arrow(0, 0, b.x, b.y, { color: "c2", width: 3, label: "b" });
+      p.label(pr[0], pr[1], "proj", { color: "c5", dx: 6, dy: 14, font: "12px sans-serif" });
+      p.drawHandles();
+      out.textContent =
+        `a·b = (${fmt(a.x)})(${fmt(b.x)}) + (${fmt(a.y)})(${fmt(b.y)}) = ${d.toFixed(3)}\n` +
+        `|a||b|cosθ = ${na.toFixed(3)} × ${nb.toFixed(3)} × ${cos.toFixed(3)} = ${(na * nb * cos).toFixed(3)}     θ = ${(th * 180 / Math.PI).toFixed(1)}°` +
+        (Math.abs(cos) < 0.02 ? "   ⟂ orthogonal!" : "");
+    });
+  }
+
+  // ---------- fig: embeddings ----------
+  {
+    const words = [["king", 2.6, 2.4], ["queen", 1.6, 3.0], ["man", 2.8, 0.6], ["woman", 1.8, 1.3], ["apple", -2.6, 0.9], ["banana", -2.4, 1.6], ["car", 0.6, -2.6], ["truck", 1.3, -2.5]]
+      .map(([w, x, y], i) => ({ w, x, y, color: ["c1", "c1", "c3", "c3", "c2", "c2", "c5", "c5"][i] }));
+    let q = 0;
+    const p = new Plot("#fig-emb", { xmin: -3.6, xmax: 3.6, ymin: -3.3, ymax: 3.6, equal: true });
+    const h = new Plot("#fig-emb-heat", { xmin: 0, xmax: 10, ymin: 0, ymax: 10 });
+    const cosm = () => words.map(a => words.map(b => LA.dot([a.x, a.y], [b.x, b.y]) / (LA.norm([a.x, a.y]) * LA.norm([b.x, b.y]) || 1)));
+    p.onClick = (x, y) => { let best = 0, bd = 1e9; words.forEach((w, i) => { const dd = Math.hypot(w.x - x, w.y - y); if (dd < bd) { bd = dd; best = i; } }); q = best; p.render(); };
+    p.draggable(words, () => h.render()).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const C = cosm();
+      words.forEach((w, i) => {
+        p.arrow(0, 0, w.x, w.y, { color: w.color, width: i === q ? 3.5 : 1.8, alpha: i === q ? 1 : .7 });
+        p.label(w.x, w.y, w.w + (i === q ? "" : `  ${C[q][i].toFixed(2)}`), { color: w.color, dx: 8, dy: -10, bg: true, font: (i === q ? "700 " : "") + "12px sans-serif" });
+      });
+      p.label(8, 14, `query: "${words[q].w}"  (click a word)`, { px: true, color: "muted", font: "12px sans-serif" });
+      h.render();
+    });
+    h.render(h => { h.heatmap(cosm(), { x0: 2.2, x1: 9.8, y0: 0.2, y1: 7.8, cmap: "div", vmin: -1, vmax: 1, values: true, digits: 1, font: "10px ", rowLabels: words.map(w => w.w), colLabels: words.map(w => w.w.slice(0, 3)) }); });
+  }
+
+  // ---------- fig: high-dim cosine histogram ----------
+  {
+    const p = new Plot("#fig-hd", { xmin: -1.05, xmax: 1.05, ymin: -0.6, ymax: 10 });
+    let n = 2; const R = Course.rng(7);
+    slider("#ctl-hd", { label: "dimension n ", min: 1, max: 10, step: 1, value: 1, digits: 0 }, k => { n = [2, 3, 5, 10, 20, 50, 100, 300, 768, 2000][k - 1]; lab.textContent = "n = " + n; p.render(); });
+    const lab = document.createElement("span"); lab.className = "val"; lab.textContent = "n = 2"; document.getElementById("ctl-hd").appendChild(lab);
+    p.render(p => {
+      const bins = new Array(42).fill(0), N = 2000;
+      for (let t = 0; t < N; t++) { let d = 0, na = 0, nb = 0; for (let i = 0; i < n; i++) { const x = R.normal(), y = R.normal(); d += x * y; na += x * x; nb += y * y; } const c = d / Math.sqrt(na * nb); bins[Math.min(41, Math.floor((c + 1.05) / 2.1 * 42))]++; }
+      const w = 2.1 / 42, ymax = Math.max(...bins) / (N * w);
+      p.setView(-1.05, 1.05, -0.06 * ymax * 1.15, ymax * 1.15);
+      p.line(-1.05, 0, 1.05, 0, { color: "axis", width: 1 });
+      bins.forEach((c, i) => { const x0 = -1.05 + i * w; p.rect(x0 + w * .08, 0, x0 + w * .92, c / (N * w), { fill: "c1", fillAlpha: .7, color: "c1", width: 1 }); });
+      [-1, -0.5, 0, 0.5, 1].forEach(t => p.label(t, 0, String(t), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      p.label(-1, ymax * 1.05, "cosine similarity of random pairs, n = " + n, { color: "muted", font: "12px sans-serif" });
+    });
+  }
+});
+</script>
+</body>
+</html>

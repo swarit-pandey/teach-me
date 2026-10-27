@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Derivatives & the chain rule</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="05">
+<main>
+
+<div class="kicker">Part 2 · Calculus</div>
+<h1>Derivatives &amp; the chain rule</h1>
+<p class="lede">Training a neural network means asking one question millions of times: "if I nudge this number a little, how much does the loss change?" That ratio is a derivative. The chain rule tells you how to get it through a long pipeline of functions, and that is all backpropagation is.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Define the derivative as the limit of secant slopes, and explain it as the <em>best local linear approximation</em>.</li>
+    <li>Derive the power, product, quotient, exp and log rules instead of memorising them.</li>
+    <li>Use the chain rule as "multiply the rates of change along the pipeline", and differentiate sigmoid, tanh and ReLU.</li>
+    <li>Estimate derivatives numerically, and explain why the error is smallest at a step size around $10^{-8}$ (forward) or $10^{-5}$ (central).</li>
+    <li>Run Newton's method and explain why its number of correct digits doubles every step.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="secant">1. From average slope to instantaneous slope</h2>
+<p>You already know the slope of a line: rise over run. A curve doesn't have a single slope, but you can ask for the <em>average</em> slope between two points on it. Pick a point $x$ and a step $h$. The line through $(x, f(x))$ and $(x+h, f(x+h))$ is a <b>secant</b>, and its slope is the <b>difference quotient</b></p>
+$$\frac{f(x+h) - f(x)}{h}.$$
+<p>Now shrink $h$. The second point slides along the curve toward the first, and the secant swings around until it just grazes the curve at $x$. That limiting line is the <b>tangent</b>, and its slope is the <b>derivative</b>:</p>
+$$\boxed{\;f'(x) = \lim_{h\to 0} \frac{f(x+h) - f(x)}{h}\;}$$
+
+<div class="figure">
+  <canvas id="fig-secant" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-secant"></div>
+  <div class="readout" id="out-secant"></div>
+  <div class="caption"><b>Try it:</b> drag the <span style="color:var(--c1)">blue point</span> along the curve and slide $h$ toward 0 (or press "shrink h"). The <span style="color:var(--c2)">orange secant</span> converges to the <span style="color:var(--c3)">green tangent</span>. Watch the readout: the gap between the secant slope and $f'(x)$ shrinks roughly in proportion to $h$. Try a negative $h$ too: the secant approaches the same tangent from the other side.</div>
+</div>
+
+<p>Notation varies, and you'll see all of these: $f'(x)$, $\dfrac{df}{dx}$, $\dfrac{d}{dx}f(x)$. Leibniz's $\frac{dy}{dx}$ is the most suggestive: "a tiny change in $y$ divided by the tiny change in $x$ that caused it". It's not literally a fraction, but it behaves like one often enough that the notation earns its keep (you'll see this in the chain rule).</p>
+
+<div class="example">
+  <div class="label">Worked example: $f(x) = x^3$ at $x = 2$</div>
+  <p>Expand the numerator: $(2+h)^3 = 8 + 12h + 6h^2 + h^3$. So</p>
+  $$\frac{(2+h)^3 - 8}{h} = \frac{12h + 6h^2 + h^3}{h} = 12 + 6h + h^2.$$
+  <p>At $h = 0.1$ the secant slope is $12.61$. At $h = 0.01$ it is $12.0601$. As $h\to0$ the extra terms vanish and $f'(2) = 12$. Notice the error $6h + h^2$ is dominated by $6h$: it is <em>proportional to $h$</em>. Hold on to that; it comes back in section 7.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="linear">2. The derivative is the best linear approximation</h2>
+<p>Here's the view of the derivative that generalises to everything in the rest of the course (gradients in lesson 06, Jacobians in lesson 07). Rearrange the definition. For small $h$,</p>
+$$f(x+h) \approx f(x) + f'(x)\,h.$$
+<p>The right-hand side is a straight line in $h$. Among all lines through $(x, f(x))$, the tangent is the one whose error shrinks <em>faster than $h$</em>: the error divided by $h$ goes to zero. Any other slope $m$ leaves an error of about $(f'(x) - m)h$, which only shrinks as fast as $h$ itself.</p>
+<p>Geometrically: <b>zoom in far enough on a smooth curve and it looks straight</b>. The line it looks like is the tangent.</p>
+
+<div class="figure">
+  <canvas id="fig-zoom" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-zoom"></div>
+  <div class="readout" id="out-zoom"></div>
+  <div class="caption"><b>Try it:</b> slide the zoom. The window is always centred on the <span style="color:var(--c1)">point</span>, and the shaded sliver is the gap between the curve and the <span style="color:var(--c3)">tangent</span>. Each 10× zoom shrinks the window 10×, but the worst gap shrinks about 100×. So relative to the window, the curve becomes indistinguishable from its tangent. Move $x$ anywhere: this curve is smooth everywhere, so it straightens out everywhere. That is what "differentiable" means. (A kink like the one in $|x|$ at 0 never straightens, however far you zoom.)</div>
+</div>
+
+<div class="callout intuition">
+<p>The gap shrinks like $h^2$ because the next term of the approximation is $\tfrac12 f''(x)h^2$ (Taylor's theorem). The second derivative $f''$ measures <b>curvature</b>: how fast the slope itself changes. Lesson 06 extends this to the Hessian, the matrix of second derivatives, and it explains why some learning rates diverge.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="fprime">3. The derivative is itself a function</h2>
+<p>Compute $f'(x)$ at every $x$ and you get a new function $f'$. Its graph tells you, at a glance, where $f$ rises ($f'>0$), falls ($f'\lt 0$), and flattens out ($f'=0$). Flat points are where minima and maxima live, which is why optimisation is the hunt for zeros of the derivative.</p>
+
+<div class="figure">
+  <canvas id="fig-ff-top" width="680" height="260"></canvas>
+  <canvas id="fig-ff-bot" width="680" height="200" style="margin-top:.4rem"></canvas>
+  <div class="controls" id="ctl-ff"></div>
+  <div class="readout" id="out-ff"></div>
+  <div class="caption"><b>Try it:</b> drag the point on the top plot. The <span style="color:var(--c3)">tangent's slope</span> on top is the <span style="color:var(--c2)">height</span> of $f'$ directly below. Find where $f'$ crosses zero and check that $f$ has a peak or valley there. Then switch to $|x|$: at the kink the slope jumps, so $f'$ is undefined at 0. This is what ReLU looks like too (section 6).</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rules">4. The rules, derived</h2>
+<p>You rarely evaluate the limit by hand. Instead you use a handful of rules, each a two-line consequence of the definition. Knowing <em>why</em> they hold means you can rebuild any you forget.</p>
+
+<h3>Linearity</h3>
+<p>$(af + bg)' = af' + bg'$. The limit of a sum is the sum of the limits. Differentiation is a <b>linear operator</b>, the same kind of object as a matrix in lesson 02.</p>
+
+<h3>Power rule: $(x^n)' = n x^{n-1}$</h3>
+<p>By the binomial theorem, $(x+h)^n = x^n + n x^{n-1}h + \binom{n}{2}x^{n-2}h^2 + \cdots$. Subtract $x^n$ and divide by $h$: every term but $n x^{n-1}$ still carries an $h$, so it vanishes in the limit. (This argument needs $n$ to be a positive integer. The rule holds for every real $n$, including $(\sqrt x)' = \tfrac{1}{2\sqrt x}$ and $(1/x)' = -1/x^2$; the log trick below proves it.)</p>
+
+<h3>Product rule: $(fg)' = f'g + fg'$</h3>
+<p>Picture $f(x)\,g(x)$ as the area of a rectangle with sides $f$ and $g$. Nudge $x$: the sides grow by $\Delta f \approx f'h$ and $\Delta g \approx g'h$. The new area adds two thin strips, $g\,\Delta f$ and $f\,\Delta g$, plus a tiny corner $\Delta f\,\Delta g$ of size $h^2$, which disappears after dividing by $h$. What's left is $f'g + fg'$.</p>
+
+<h3>Exponential: $(e^x)' = e^x$</h3>
+<p>$\dfrac{e^{x+h} - e^x}{h} = e^x\cdot\dfrac{e^h - 1}{h}$. The fraction on the right doesn't depend on $x$ at all; it's the slope of $e^x$ at 0. The number $e \approx 2.71828$ is <em>defined</em> as the base that makes that slope exactly 1. So $e^x$ is the function that is its own derivative: its growth rate equals its value. More generally $(a^x)' = a^x \ln a$.</p>
+
+<h3>Logarithm: $(\ln x)' = 1/x$</h3>
+<p>Let $y = \ln x$, so $x = e^y$. Differentiate both sides with respect to $x$, using the chain rule (section 5) on the right: $1 = e^y\, y'$. So $y' = 1/e^y = 1/x$. Now the general power rule: $x^n = e^{n\ln x}$, so $(x^n)' = e^{n\ln x}\cdot \tfrac{n}{x} = n x^{n-1}$ for any real $n$.</p>
+
+<h3>Quotient rule: $(f/g)' = (f'g - fg')/g^2$</h3>
+<p>Write $f/g = f\cdot g^{-1}$. Product rule, then the power rule plus chain rule on $g^{-1}$: $f'g^{-1} + f\cdot(-g^{-2}g') = (f'g - fg')/g^2$.</p>
+
+<table>
+  <tr><th>$f(x)$</th><th>$f'(x)$</th><th>$f(x)$</th><th>$f'(x)$</th></tr>
+  <tr><td>$x^n$</td><td>$n x^{n-1}$</td><td>$\sin x$</td><td>$\cos x$</td></tr>
+  <tr><td>$e^x$</td><td>$e^x$</td><td>$\cos x$</td><td>$-\sin x$</td></tr>
+  <tr><td>$\ln x$</td><td>$1/x$</td><td>$|x|$</td><td>$\operatorname{sign}(x)$, undefined at 0</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="chain">5. The chain rule: rates multiply</h2>
+<p>Most functions in ML are <b>compositions</b>: a pipeline where each stage's output is the next stage's input. Write $u = g(x)$ and $y = f(u)$, so $y = f(g(x))$. How fast does $y$ change with $x$?</p>
+<p>Think in rates. If $u$ changes 3 times as fast as $x$, and $y$ changes 2 times as fast as $u$, then $y$ changes $2\times3 = 6$ times as fast as $x$. Rates of change <b>multiply</b> along a chain:</p>
+$$\boxed{\;\frac{dy}{dx} = \frac{dy}{du}\cdot\frac{du}{dx} = f'(g(x))\; g'(x)\;}$$
+<p><b>Derivation.</b> Use the linear approximation twice. Nudge $x$ by $h$: then $u$ moves by $k \approx g'(x)\,h$. A nudge of $k$ in $u$ moves $y$ by about $f'(u)\,k = f'(g(x))\,g'(x)\,h$. Divide by $h$. $\blacksquare$</p>
+
+<div class="figure">
+  <canvas id="fig-chain" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-chain"></div>
+  <div class="readout" id="out-chain"></div>
+  <div class="caption"><b>Try it:</b> three number lines on the same scale: $x$, then $u = g(x) = \tfrac12x^2 - 1$, then $y = f(u) = 2\sin u$. A small nudge $\Delta x$ (the arrow on the top line) gets stretched by $g'(x)$ on the way to the middle line, then by $f'(u)$ on the way to the bottom. Move $x$ and watch the arrow grow, shrink, or <em>flip direction</em> (a negative derivative reverses it). Shrink $\Delta x$ and the measured ratio $\Delta y/\Delta x$ converges to the product $f'(u)\,g'(x)$.</div>
+</div>
+
+<div class="callout warning">
+<p>The most common slip: writing $f'(x)\,g'(x)$. The outer derivative is evaluated at the <b>inner value</b> $u = g(x)$, not at $x$. In code this means: run the pipeline forward first and remember the intermediate values, because the backward pass needs them. That is exactly what an autograd engine stores (lesson 17).</p>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: the Gaussian bump $y = e^{-x^2/2}$</div>
+  <p>Split it into stages: $u = -x^2/2$, then $y = e^u$.</p>
+  <p>Local rates: $\dfrac{du}{dx} = -x$ and $\dfrac{dy}{du} = e^u$.</p>
+  <p>Multiply: $\dfrac{dy}{dx} = e^u\cdot(-x) = -x\,e^{-x^2/2}$.</p>
+  <p>At $x = 1$: $u = -0.5$, $e^{-0.5} \approx 0.6065$, so $y'(1) \approx -0.6065$. The bump is falling there, as it should be to the right of its peak. At $x = 0$ the derivative is $0$: the peak.</p>
+</div>
+
+<p>Longer chains just keep multiplying. For $y = f_3(f_2(f_1(x)))$ with intermediate values $u_1 = f_1(x)$, $u_2 = f_2(u_1)$:</p>
+$$\frac{dy}{dx} = f_3'(u_2)\cdot f_2'(u_1)\cdot f_1'(x).$$
+<p>A deep network is a chain of 10, 100 or 1000 stages. Its derivative is a product of that many factors, which is why the <em>size</em> of each factor matters so much (next section).</p>
+
+<!-- ============================================================ -->
+<h2 id="activations">6. Derivatives of activation functions</h2>
+<p>Neural networks (lesson 16) alternate linear maps with simple nonlinear functions called <b>activations</b>. You will differentiate these constantly, so derive them once now.</p>
+<p><b>Sigmoid</b> $\sigma(z) = \dfrac{1}{1+e^{-z}}$. Write it as $(1+e^{-z})^{-1}$ and apply the chain rule:</p>
+$$\sigma'(z) = -(1+e^{-z})^{-2}\cdot(-e^{-z}) = \frac{1}{1+e^{-z}}\cdot\frac{e^{-z}}{1+e^{-z}} = \sigma(z)\,\big(1-\sigma(z)\big).$$
+<p>The last step uses $\frac{e^{-z}}{1+e^{-z}} = 1 - \frac{1}{1+e^{-z}}$. The result is lovely for code: once you've computed $\sigma(z)$ on the forward pass, the derivative costs one multiply.</p>
+<p><b>Tanh</b> $\tanh z = \dfrac{e^z - e^{-z}}{e^z + e^{-z}}$ has $\tanh'(z) = 1 - \tanh^2 z$ (problem 4). <b>ReLU</b> $\max(0, z)$ has derivative $1$ for $z>0$ and $0$ for $z\lt 0$. At exactly $0$ it is undefined; frameworks just pick $0$, and since an input lands on exactly $0.0$ with negligible probability, it doesn't matter.</p>
+
+<div class="figure">
+  <canvas id="fig-act" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-act"></div>
+  <div class="readout" id="out-act"></div>
+  <div class="caption"><b>Try it:</b> pick an activation and drag $z$. The <span style="color:var(--c1)">solid curve</span> is the activation and the <span style="color:var(--c2)">orange curve</span> its derivative. Notice that sigmoid's derivative never exceeds $0.25$ and is nearly $0$ once $|z| > 5$ ("saturation"). Now raise "layers": the readout shows the best case for the product of that many sigmoid derivatives, $0.25^n$.</div>
+</div>
+
+<div class="callout ml">
+<p>This is the <b>vanishing gradient problem</b>. Stack 20 sigmoid layers and the chain rule multiplies 20 factors each at most $0.25$: the gradient reaching the first layer is under $10^{-12}$ of the signal, so early layers barely learn. ReLU's derivative is exactly 1 on its active side, which is a big reason deep networks switched to it (lesson 16), together with careful initialisation and normalisation (lesson 18) and residual connections (lesson 23).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="numerical">7. Numerical derivatives and floating-point error</h2>
+<p>You can always <em>estimate</em> a derivative by evaluating the difference quotient at a small $h$. This is how you test hand-derived gradients (the "gradient check" you'll do in lessons 07 and 17). Two versions:</p>
+$$\text{forward: } \frac{f(x+h) - f(x)}{h}, \qquad \text{central: } \frac{f(x+h) - f(x-h)}{2h}.$$
+<p><b>Truncation error.</b> Taylor's theorem says $f(x\pm h) = f(x) \pm h f'(x) + \tfrac{h^2}{2}f''(x) \pm \tfrac{h^3}{6}f'''(x) + \cdots$. Plug in:</p>
+$$\frac{f(x+h)-f(x)}{h} = f'(x) + \underbrace{\tfrac{h}{2}f''(x)}_{O(h)} + \cdots, \qquad \frac{f(x+h)-f(x-h)}{2h} = f'(x) + \underbrace{\tfrac{h^2}{6}f'''(x)}_{O(h^2)} + \cdots$$
+<p>In the central version the $h^2$ terms of the two expansions are equal and cancel. So shrinking $h$ by 10× cuts the forward error 10× but the central error 100×.</p>
+<p><b>Rounding error.</b> Shrinking $h$ forever doesn't work. A float64 stores about 16 significant digits (machine epsilon $\varepsilon \approx 2.2\times10^{-16}$). For tiny $h$, $f(x+h)$ and $f(x)$ agree in almost all of their digits, the subtraction cancels them, and what's left is mostly rounding noise of size about $\varepsilon|f(x)|$. Dividing by $h$ <em>amplifies</em> it: the rounding error behaves like $\varepsilon|f|/h$. Total error for forward differences:</p>
+$$E(h) \approx \frac{|f''|}{2}\,h + \frac{\varepsilon|f|}{h}.$$
+<p>One term falls with $h$ and the other rises, so there is a sweet spot. Setting $E'(h)=0$ gives $h^* = \sqrt{2\varepsilon|f|/|f''|}$, around $10^{-8}$ when $f$ and $f''$ are about the same size. For central differences the same reasoning gives $h^*\sim\varepsilon^{1/3}\approx 10^{-5}$ and a far smaller minimum error.</p>
+
+<div class="figure">
+  <canvas id="fig-err" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-err"></div>
+  <div class="readout" id="out-err"></div>
+  <div class="caption"><b>Try it:</b> a log–log plot of the actual error of each estimate, computed live in your browser's float64 arithmetic. Read it right to left (shrinking $h$). On the right, truncation dominates: the <span style="color:var(--c2)">forward</span> curve falls with slope 1 and the <span style="color:var(--c1)">central</span> curve with slope 2 (compare the dashed guides). On the left, rounding takes over and both rise with slope −1, ragged because rounding is noisy. Move the $h$ slider to read off exact digits, and find each method's best $h$.</div>
+</div>
+
+<div class="callout key">
+<p>Rules of thumb for gradient checks in float64: central differences with $h\approx10^{-5}$ give about 10 correct digits. In float32 (what GPUs use), $\varepsilon\approx1.2\times10^{-7}$, so the best you can hope for is about 4–5 digits. That's why gradient checks are always run in float64.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="newton">8. Newton's method: using the tangent to find roots</h2>
+<p>Here is the derivative put to work. You want a root of $f$, a point where $f(x) = 0$. Start with a guess $x_0$. Replace $f$ by its tangent line at $x_0$, which is easy to solve: $f(x_0) + f'(x_0)(x - x_0) = 0$. Its root is the next guess:</p>
+$$x_{n+1} = x_n - \frac{f(x_n)}{f'(x_n)}.$$
+<p>Near a root (with $f'\neq0$ there), this converges <b>quadratically</b>: if the error is $e_n$, the next error is about $\frac{|f''|}{2|f'|}e_n^2$. Errors go $10^{-2}\to10^{-4}\to10^{-8}\to10^{-16}$: the number of correct digits roughly doubles every step.</p>
+
+<div class="figure">
+  <canvas id="fig-newton" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-newton"></div>
+  <div class="readout" id="out-newton"></div>
+  <div class="caption"><b>Try it:</b> drag the starting guess $x_0$ along the axis, then press "step" (or "play"). Each step draws the tangent and slides down to where it hits zero. For $x^2-2$, watch the readout: the correct digits of $\sqrt2$ double. Then break it: $x^3-2x+2$ from $x_0=0$ cycles forever between 0 and 1, and $\arctan x$ from $|x_0|>1.4$ overshoots further every step.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: $\sqrt2$ by hand</div>
+  <p>$f(x) = x^2 - 2$, $f'(x) = 2x$, so $x_{n+1} = x_n - \dfrac{x_n^2 - 2}{2x_n} = \dfrac{x_n}{2} + \dfrac{1}{x_n}$.</p>
+  <p>From $x_0 = 1$: $x_1 = 0.5 + 1 = 1.5$; $x_2 = 0.75 + 0.6667 = 1.41667$; $x_3 = 1.414216$; $x_4 = 1.41421356237469$.</p>
+  <p>Errors: $8.6\times10^{-2}$, $2.5\times10^{-3}$, $2.1\times10^{-6}$, $1.6\times10^{-12}$. Each is roughly the square of the previous one (times $\tfrac{1}{2\sqrt2}\approx0.35$). This is the "Babylonian" square-root algorithm, nearly 4000 years old.</p>
+</div>
+
+<div class="callout ml">
+<p>To <em>minimise</em> a loss, you want a root of its derivative. Newton on $f'$ gives $x \leftarrow x - f'(x)/f''(x)$: jump to the bottom of the local parabola. In many dimensions $f''$ becomes the Hessian matrix (lesson 06), which is far too big to form for a network with a billion parameters. That's why deep learning uses gradient descent (lesson 06) and its cheaper cousins like Adam (lesson 18), which use slopes only.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+<p>Pencil and paper first. Use the figures to check your answers.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Let $f(x) = 3x^4 - 2x + 5$. Compute $f'(2)$.</p>
+<div class="numcheck" data-answer="94"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Power rule and linearity: $f'(x) = 12x^3 - 2$. At $x=2$: $12\cdot 8 - 2 = 94$. The constant 5 contributes nothing: shifting a graph up doesn't change its slopes.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Differentiate $f(x) = x^2 e^x$ and evaluate $f'(1)$.</p>
+<div class="numcheck" data-answer="8.154845" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Product rule: $f'(x) = 2x\,e^x + x^2 e^x = (x^2 + 2x)e^x$. At $x=1$: $3e \approx 8.1548$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>The <b>softplus</b> function is $s(x) = \ln(1 + e^x)$, a smooth version of ReLU. Show that $s'(x) = \sigma(x)$, the sigmoid. Then evaluate $s'(2)$.</p>
+<div class="numcheck" data-answer="0.880797" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Chain rule with outer $\ln u$ and inner $u = 1 + e^x$: $s'(x) = \dfrac{1}{1+e^x}\cdot e^x = \dfrac{e^x}{1+e^x}$. Multiply top and bottom by $e^{-x}$: $\dfrac{1}{e^{-x} + 1} = \sigma(x)$. So $s'(2) = \sigma(2) = 1/(1+e^{-2}) \approx 0.8808$. You'll meet softplus again inside the logistic loss (lesson 14): its derivative being a sigmoid is no coincidence.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>(a) Using the quotient rule, prove $\tanh'(z) = 1 - \tanh^2 z$. (b) Show that $\tanh z = 2\sigma(2z) - 1$, and use it with the chain rule to get $\tanh'(z) = 4\sigma'(2z)$. Check the two answers agree at $z=0$.</p>
+<details class="hint"><summary>Hint</summary><p>(a) Let $a = e^z - e^{-z}$ and $b = e^z + e^{-z}$. Then $a' = b$ and $b' = a$. (b) Write $\sigma(2z) = \frac{1}{1+e^{-2z}}$ and multiply the top and bottom of $\tanh$ by $e^{z}$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\tanh = a/b$ with $a'=b$, $b'=a$: $\tanh' = \dfrac{b\cdot b - a\cdot a}{b^2} = 1 - \dfrac{a^2}{b^2} = 1 - \tanh^2 z$.</p>
+<p>(b) $2\sigma(2z) - 1 = \dfrac{2}{1+e^{-2z}} - 1 = \dfrac{1 - e^{-2z}}{1 + e^{-2z}}$. Multiply top and bottom by $e^z$: $\dfrac{e^z - e^{-z}}{e^z + e^{-z}} = \tanh z$. ✓ Chain rule: $\tanh'(z) = 2\cdot\sigma'(2z)\cdot 2 = 4\sigma'(2z)$. At $z = 0$: (a) gives $1 - 0 = 1$; (b) gives $4\cdot\sigma(0)(1-\sigma(0)) = 4\cdot0.25 = 1$. ✓ So tanh is just a rescaled, recentred sigmoid with a maximum slope 4× larger.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Estimate the derivative of $e^x$ at $x=0$ with $h = 0.1$, using (a) the forward difference and (b) the central difference. Enter the central estimate. Then predict both errors at $h = 0.01$ <em>without computing</em>, and check with a calculator.</p>
+<div class="numcheck" data-answer="1.0016675" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $(e^{0.1} - 1)/0.1 \approx 1.05171$, error $\approx 0.0517 \approx \tfrac{h}{2}f''(0) = 0.05$. (b) $(e^{0.1} - e^{-0.1})/0.2 \approx 1.0016675$, error $\approx 1.67\times10^{-3} \approx \tfrac{h^2}{6}f'''(0) = 0.001\overline{6}$.</p>
+<p>At $h = 0.01$: forward error ÷10 ≈ $0.0050$ (actual $0.005017$), central error ÷100 ≈ $1.67\times10^{-5}$ (actual $1.6667\times10^{-5}$). The leading Taylor term predicts the error almost exactly.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>A single sigmoid neuron computes $y = \sigma(wx + b)$. With $w = 2$, $x = 1.5$, $b = -1$, compute $\dfrac{\partial y}{\partial w}$ (treat $x$ and $b$ as constants).</p>
+<div class="numcheck" data-answer="0.157490" data-tol="1e-4"></div>
+<details class="hint"><summary>Hint</summary><p>Stages: $z = wx + b$, then $y = \sigma(z)$. Find $dz/dw$, $dy/dz$, multiply.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$z = 2(1.5) - 1 = 2$. $\sigma(2) \approx 0.88080$, so $\sigma'(2) = 0.88080\times0.11920 \approx 0.10499$. And $dz/dw = x = 1.5$. Product: $0.10499\times 1.5 \approx 0.15749$. Notice the factor $x$: the gradient for a weight is proportional to the input it multiplies. You'll see this "input times upstream gradient" pattern for every linear layer in lesson 07.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Run two steps of Newton's method on $f(x) = x^2 - 2$ from $x_0 = 1$ and enter $x_2$. Then run Newton on $f(x) = x^3 - 2x + 2$ from $x_0 = 0$ and explain what happens.</p>
+<div class="numcheck" data-answer="1.4166667" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$x_1 = 1.5$, $x_2 = 17/12 \approx 1.416667$. For the cubic, $f'(x) = 3x^2 - 2$: $x_1 = 0 - \frac{2}{-2} = 1$, then $x_2 = 1 - \frac{1}{1} = 0$. Back where we started: a 2-cycle that never converges. Newton's quadratic convergence is a <em>local</em> guarantee. Start far from a root and anything can happen.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>Use the error model $E(h) = \tfrac{|f''|}{2}h + \tfrac{\varepsilon|f|}{h}$ for the forward difference of $e^x$ at $x=0$ (so $f = f'' = 1$), with $\varepsilon = 2.22\times10^{-16}$. Find the optimal $h^*$ and enter $\log_{10} h^*$.</p>
+<div class="numcheck" data-answer="-7.676" data-tol="0.02"></div>
+<details class="hint"><summary>Hint</summary><p>Set $E'(h) = \tfrac12 - \varepsilon/h^2 = 0$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$h^* = \sqrt{2\varepsilon} \approx 2.1\times10^{-8}$, so $\log_{10}h^* \approx -7.68$. The minimum error is $E(h^*) = \sqrt{2\varepsilon}\approx 2\times10^{-8}$: even at its best, forward differencing keeps only about half of float64's 16 digits. Compare with section 7's plot (the measured optimum is noisy but lands near $10^{-8}$).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>Let $y = \sigma(\sigma(\cdots\sigma(x)\cdots))$ with 10 sigmoids nested. Give the tightest upper bound on $|dy/dx|$ that follows from $\sigma' \le 0.25$. (You may type an expression like <code>0.25^10</code>.) Is the true value at $x = 0$ larger or smaller than this bound, and why?</p>
+<div class="numcheck" data-answer="9.5367431640625e-7" data-tol="1e-10"></div>
+<details class="solution"><summary>Solution</summary>
+<p>The chain rule gives a product of 10 factors $\sigma'(u_k)$, each $\le 0.25$, so $|dy/dx| \le 0.25^{10} \approx 9.5\times10^{-7}$. The true value is smaller: only the innermost sigmoid sees input 0. Its output $0.5$ feeds the next one, whose derivative is $\sigma'(0.5) \approx 0.235$, and later layers see inputs near $0.65$ where $\sigma' \approx 0.22$. Every factor after the first is strictly below 0.25.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">You halve $h$ in a <em>central</em> difference, staying well above the rounding-error zone. The error…</div>
+  <div class="opts">
+    <button data-k="a">halves.</button>
+    <button data-k="b">stays the same; central differences are exact.</button>
+    <button data-k="c">drops to about a quarter.</button>
+    <button data-k="d">doubles, because you're dividing by a smaller number.</button>
+  </div>
+  <div class="explain">The central error is $\tfrac{h^2}{6}f'''$, so it scales with $h^2$: halving $h$ quarters it. Halving is the forward difference's behaviour. Doubling is what happens in the <em>rounding</em> regime, far to the left on the log–log plot.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">A colleague's gradient check uses a forward difference with $h = 10^{-15}$ and reports a 30% mismatch. The most likely explanation is…</div>
+  <div class="opts">
+    <button data-k="a">the analytic gradient is wrong.</button>
+    <button data-k="b">catastrophic cancellation: $f(x+h)-f(x)$ is mostly rounding noise, and dividing by $h$ blows it up.</button>
+    <button data-k="c">$h$ is too large, so truncation error dominates.</button>
+    <button data-k="d">forward differences only work for polynomials.</button>
+  </div>
+  <div class="explain">At $h=10^{-15}$ the rounding term $\varepsilon|f|/h \approx 0.2|f|$ swamps everything. Use a central difference with $h\approx10^{-5}$ before blaming the math.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">What is $\dfrac{d}{dx}\sin(x^2)$?</div>
+  <div class="opts">
+    <button data-k="a">$2x\cos(x^2)$</button>
+    <button data-k="b">$2x\cos(x)$</button>
+    <button data-k="c">$\cos(2x)$</button>
+    <button data-k="d">$\cos(x^2)$</button>
+  </div>
+  <div class="explain">Outer derivative <em>at the inner value</em>: $\cos(u)$ with $u=x^2$, times the inner derivative $2x$. Option (b) evaluates the outer derivative at $x$ instead of at $u$, the classic slip.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">$f'(x_0) = 0$. What can you conclude?</div>
+  <div class="opts">
+    <button data-k="a">$x_0$ is a minimum.</button>
+    <button data-k="b">$x_0$ is a minimum or a maximum.</button>
+    <button data-k="c">$f$ is constant near $x_0$.</button>
+    <button data-k="d">The tangent is horizontal. It could be a minimum, a maximum, or neither (like $x^3$ at 0).</button>
+  </div>
+  <div class="explain">A zero derivative only says the best linear approximation is flat. Telling min from max from inflection needs second-order information: $f''$ here, and the Hessian's eigenvalues in lesson 06, where the "neither" case becomes a saddle point.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Derivative</td><td>$\lim_{h\to0}\frac{f(x+h)-f(x)}{h}$</td><td>instantaneous rate of change; tangent slope</td></tr>
+  <tr><td>Linear approximation</td><td>$f(x+h)\approx f(x)+f'(x)h$</td><td>zoomed in, every smooth curve is a line</td></tr>
+  <tr><td>Chain rule</td><td>$(f\circ g)' = f'(g(x))\,g'(x)$</td><td>rates multiply along a pipeline</td></tr>
+  <tr><td>Sigmoid</td><td>$\sigma' = \sigma(1-\sigma)\le\tfrac14$</td><td>cheap to compute; vanishes when saturated</td></tr>
+  <tr><td>Finite differences</td><td>forward $O(h)$, central $O(h^2)$</td><td>best $h\approx10^{-8}$ / $10^{-5}$ in float64</td></tr>
+  <tr><td>Newton's method</td><td>$x \leftarrow x - f(x)/f'(x)$</td><td>follow the tangent to zero; digits double</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 05: build it</h3>
+  <p>Open <code>workbooks/05_derivatives_chain_rule/exercises.py</code>. You'll implement forward and central differences and run an error study to find the best step size yourself. Then you'll write numerically stable <code>sigmoid</code> plus the derivatives of sigmoid, tanh and ReLU (vectorised in NumPy), and a <code>compose</code> function that applies the chain rule to (function, derivative) pairs. Finally, Newton's method, and (stretch) Newton for minimisation. Grade yourself with:</p>
+  <pre><code>./course check 05</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>3Blue1Brown, <em>Essence of Calculus</em>, ch. 1–4 (derivatives, the chain and product rules, visualised).</li>
+  <li>Gilbert Strang, <em>Calculus</em> (MIT OpenCourseWare, free), ch. 2–4.</li>
+  <li>Nocedal &amp; Wright, <em>Numerical Optimization</em>, §8.1 on finite-difference derivative approximations.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, fmt } = Course;
+  const ctl = id => document.getElementById(id);
+
+  // ---------- fig: secant -> tangent ----------
+  {
+    const f = x => 0.25 * x ** 3 - x + 1, df = x => 0.75 * x * x - 1;
+    const p = new Plot("#fig-secant", { xmin: -3.2, xmax: 3.2, ymin: -2.2, ymax: 4.2 });
+    const P = { x: -0.8, y: f(-0.8), color: "c1", constrain: (x) => { x = Math.max(-2.6, Math.min(2.6, x)); return [x, f(x)]; } };
+    let h = 1.5; const out = ctl("out-secant");
+    const hs = slider("#ctl-secant", { label: "h ", min: -2, max: 2, step: 0.001, value: 1.5, digits: 3 }, v => { h = v; anim.stop(); p.render(); });
+    const anim = animator(() => { h *= 0.97; if (Math.abs(h) < 0.002) { h = 0.002 * Math.sign(h); hs.set(h); p.render(); return false; } hs.set(h); p.render(); });
+    button("#ctl-secant", "shrink h → 0", () => { if (Math.abs(h) < 0.01) h = 1.5; anim.start(); });
+    p.draggable([P]).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      p.fn(f, { color: "fg", width: 2.5 });
+      const x0 = P.x, y0 = f(x0), hh = Math.abs(h) < 1e-9 ? 1e-9 : h, x1 = x0 + hh, y1 = f(x1), m = (y1 - y0) / hh;
+      p.ray(x0, y0, 1, df(x0), { color: "c3", width: 2, alpha: .9 });
+      p.ray(x0, y0, 1, m, { color: "c2", width: 2, dash: [7, 5] });
+      p.line(x0, y0, x1, y0, { color: "muted", width: 1, dash: [3, 3] });
+      p.line(x1, y0, x1, y1, { color: "muted", width: 1, dash: [3, 3] });
+      if (Math.abs(hh) > 0.25) { p.label((x0 + x1) / 2, y0, "h", { color: "muted", align: "center", dy: -10, bg: true }); p.label(x1, (y0 + y1) / 2, "f(x+h) − f(x)", { color: "muted", dx: 6 }); }
+      p.point(x1, y1, { r: 5, color: "c2" });
+      p.drawHandles();
+      p.label(8, 14, "secant", { px: true, color: "c2" }); p.label(70, 14, "tangent", { px: true, color: "c3" });
+      out.textContent = `x = ${x0.toFixed(3)}   h = ${hh.toFixed(3)}\n` +
+        `secant slope = ${m.toFixed(5)}    f'(x) = ${df(x0).toFixed(5)}    gap = ${(m - df(x0)).toExponential(2)}   (gap / h = ${((m - df(x0)) / hh).toFixed(3)})`;
+    });
+  }
+
+  // ---------- fig: zoom to linear ----------
+  {
+    const f = x => Math.sin(1.5 * x) + 0.3 * x * x, df = x => 1.5 * Math.cos(1.5 * x) + 0.6 * x;
+    const p = new Plot("#fig-zoom", { xmin: -3, xmax: 3, ymin: -2, ymax: 2 });
+    let x0 = 0.6, z = 0; const out = ctl("out-zoom");
+    slider("#ctl-zoom", { label: "zoom (10^k) k = ", min: 0, max: 4, step: 0.05, value: 0, digits: 2 }, v => { z = v; p.render(); });
+    slider("#ctl-zoom", { label: "x ", min: -2.5, max: 2.5, step: 0.01, value: 0.6 }, v => { x0 = v; p.render(); });
+    p.render(p => {
+      const w = 2.4 / 10 ** z, y0 = f(x0), m = df(x0), asp = 400 / 680;
+      p.setView(x0 - w, x0 + w, y0 - w * asp, y0 + w * asp);
+      // shaded gap between curve and tangent
+      const pts = [], n = 200; let maxgap = 0;
+      for (let i = 0; i <= n; i++) { const x = x0 - w + 2 * w * i / n; pts.push([x, f(x)]); maxgap = Math.max(maxgap, Math.abs(f(x) - y0 - m * (x - x0))); }
+      for (let i = n; i >= 0; i--) { const x = x0 - w + 2 * w * i / n; pts.push([x, y0 + m * (x - x0)]); }
+      p.polygon(pts, { fill: "c4", fillAlpha: .18, stroke: false });
+      p.ray(x0, y0, 1, m, { color: "c3", width: 2 });
+      p.fn(f, { color: "fg", width: 2.5 });
+      p.point(x0, y0, { r: 6, color: "c1" });
+      p.label(8, 14, `window width ${(2 * w).toPrecision(2)}`, { px: true, color: "muted", font: "12px sans-serif" });
+      out.textContent = `window half-width w = ${w.toExponential(2)}    worst gap = ${maxgap.toExponential(2)}\n` +
+        `gap / w  = ${(maxgap / w).toExponential(2)}   (→ 0: the tangent wins)\ngap / w² =  ${(maxgap / (w * w)).toFixed(3)}  (→ |f''(x)|/2 = ${(Math.abs(-2.25 * Math.sin(1.5 * x0) + 0.6) / 2).toFixed(3)})`;
+    });
+  }
+
+  // ---------- fig: f and f' ----------
+  {
+    const fns = {
+      cubic: [x => x ** 3 / 3 - x, "x³/3 − x"],
+      sin: [x => Math.sin(x), "sin x"],
+      exp: [x => Math.exp(x) / 4, "eˣ / 4"],
+      abs: [x => Math.abs(x), "|x|"],
+      bump: [x => 2 * Math.exp(-x * x / 2), "2e^(−x²/2)"],
+    };
+    let key = "cubic";
+    const d = x => (fns[key][0](x + 1e-5) - fns[key][0](x - 1e-5)) / 2e-5;
+    const top = new Plot("#fig-ff-top", { xmin: -3.5, xmax: 3.5, ymin: -2.3, ymax: 2.6 });
+    const bot = new Plot("#fig-ff-bot", { xmin: -3.5, xmax: 3.5, ymin: -2.2, ymax: 2.2 });
+    const P = { x: 1.6, y: 0, color: "c1", constrain: x => { x = Math.max(-3.2, Math.min(3.2, x)); return [x, fns[key][0](x)]; } };
+    P.y = fns[key][0](P.x);
+    const out = ctl("out-ff");
+    select("#ctl-ff", "f(x) = ", Object.keys(fns).map(k => [k, fns[k][1]]), v => { key = v; P.y = fns[key][0](P.x); top.render(); });
+    top.draggable([P], () => bot.render()).render(p => {
+      const f = fns[key][0];
+      p.grid({ step: 1 }).axes({ step: 1 });
+      p.fn(f, { color: "fg", width: 2.5 });
+      const s = Math.abs(P.x) < 1e-3 && key === "abs" ? 0 : d(P.x);
+      p.line(P.x - 0.9, P.y - 0.9 * s, P.x + 0.9, P.y + 0.9 * s, { color: "c3", width: 3 });
+      p.line(P.x, P.y, P.x, -2.3, { color: "muted", width: 1, dash: [3, 4] });
+      p.drawHandles();
+      p.label(8, 14, "f(x) = " + fns[key][1], { px: true, color: "fg" });
+      bot.render();
+    });
+    bot.render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      if (key === "abs") { p.line(-3.5, -1, 0, -1, { color: "c2", width: 2.5 }); p.line(0, 1, 3.5, 1, { color: "c2", width: 2.5 }); p.point(0, 1, { r: 4, color: "bg", stroke: "c2" }); p.point(0, -1, { r: 4, color: "bg", stroke: "c2" }); }
+      else p.fn(d, { color: "c2", width: 2.5 });
+      const s = d(P.x);
+      p.line(P.x, 2.2, P.x, s, { color: "muted", width: 1, dash: [3, 4] });
+      p.line(P.x, 0, P.x, s, { color: "c2", width: 4, alpha: .5 });
+      if (!(key === "abs" && Math.abs(P.x) < 1e-3)) p.point(P.x, s, { r: 5, color: "c2" });
+      p.label(8, 14, "f'(x)", { px: true, color: "c2" });
+      const sl = key === "abs" && Math.abs(P.x) < 1e-3 ? "undefined (kink)" : s.toFixed(4);
+      out.textContent = `x = ${P.x.toFixed(3)}   f(x) = ${P.y.toFixed(4)}   slope of tangent = f'(x) = ${sl}` + (Math.abs(s) < 0.03 && sl !== "undefined (kink)" ? "   ← flat: a peak, valley or plateau" : "");
+    });
+  }
+
+  // ---------- fig: chain rule on three number lines ----------
+  {
+    const g = x => 0.5 * x * x - 1, dg = x => x, f = u => 2 * Math.sin(u), df = u => 2 * Math.cos(u);
+    const p = new Plot("#fig-chain", { xmin: -3.3, xmax: 3.3, ymin: -0.3, ymax: 3.6 });
+    let x = 1.2, dx = 0.3; const out = ctl("out-chain");
+    slider("#ctl-chain", { label: "x ", min: -2.2, max: 2.2, step: 0.01, value: 1.2 }, v => { x = v; p.render(); });
+    slider("#ctl-chain", { label: "Δx ", min: 0.01, max: 0.6, step: 0.01, value: 0.3 }, v => { dx = v; p.render(); });
+    p.render(p => {
+      const L = [{ y: 3, name: "x", a: x, b: x + dx, col: "c1" }, { y: 1.75, name: "u = g(x)", a: g(x), b: g(x + dx), col: "c5" }, { y: 0.5, name: "y = f(u)", a: f(g(x)), b: f(g(x + dx)), col: "c2" }];
+      for (let i = 0; i < 2; i++) {
+        const A = L[i], B = L[i + 1];
+        p.polygon([[A.a, A.y], [A.b, A.y], [B.b, B.y], [B.a, B.y]], { fill: B.col, fillAlpha: .12, stroke: false });
+        p.line(A.a, A.y, B.a, B.y, { color: "muted", width: 1, dash: [3, 3] }); p.line(A.b, A.y, B.b, B.y, { color: "muted", width: 1, dash: [3, 3] });
+      }
+      L.forEach(l => {
+        p.line(-3.3, l.y, 3.3, l.y, { color: "axis", width: 1.2 });
+        for (let t = -3; t <= 3; t++) { p.line(t, l.y - .06, t, l.y + .06, { color: "axis", width: 1 }); p.label(t, l.y, String(t), { align: "center", dy: 14, color: "muted", font: "11px sans-serif" }); }
+        p.arrow(l.a, l.y, l.b, l.y, { color: l.col, width: 4, head: 10 });
+        p.point(l.a, l.y, { r: 4, color: l.col });
+        p.label(-3.25, l.y + .28, l.name, { color: l.col });
+      });
+      const du = g(x + dx) - g(x), dy = f(g(x + dx)) - f(g(x)), u = g(x);
+      p.label(3.25, 2.4, `stretch × g'(x) = ${dg(x).toFixed(2)}`, { align: "right", color: "c5", font: "12px sans-serif" });
+      p.label(3.25, 1.15, `stretch × f'(u) = ${df(u).toFixed(2)}`, { align: "right", color: "c2", font: "12px sans-serif" });
+      out.textContent = `Δu/Δx = ${(du / dx).toFixed(4)} (≈ g'(x) = ${dg(x).toFixed(4)})    Δy/Δu = ${du ? (dy / du).toFixed(4) : "—"} (≈ f'(u) = ${df(u).toFixed(4)})\n` +
+        `Δy/Δx = ${(dy / dx).toFixed(4)}    chain rule f'(u)·g'(x) = ${(df(u) * dg(x)).toFixed(4)}`;
+    });
+  }
+
+  // ---------- fig: activations ----------
+  {
+    const sig = z => 1 / (1 + Math.exp(-z));
+    const acts = {
+      sigmoid: [sig, z => sig(z) * (1 - sig(z)), "σ(z)", "σ'(z) = σ(1−σ)"],
+      tanh: [Math.tanh, z => 1 - Math.tanh(z) ** 2, "tanh z", "1 − tanh²z"],
+      relu: [z => Math.max(0, z), z => z > 0 ? 1 : 0, "ReLU(z)", "step: 0 or 1"],
+      softplus: [z => Math.log1p(Math.exp(z)), sig, "ln(1+eᶻ)", "σ(z)"],
+    };
+    let key = "sigmoid", layers = 1;
+    const p = new Plot("#fig-act", { xmin: -6, xmax: 6, ymin: -1.4, ymax: 2.2 });
+    const Z = { x: 1, y: 0, color: "c5", constrain: (x) => [Math.max(-5.8, Math.min(5.8, x)), 0] };
+    const out = ctl("out-act");
+    select("#ctl-act", "activation ", Object.keys(acts).map(k => [k, k]), v => { key = v; p.render(); });
+    slider("#ctl-act", { label: "layers n ", min: 1, max: 20, step: 1, value: 1, digits: 0 }, v => { layers = v; p.render(); });
+    p.draggable([Z]).render(p => {
+      const [f, d, nf, nd] = acts[key];
+      p.grid({ step: 1 }).axes({ step: 1 });
+      if (key === "sigmoid") { p.line(-6, 0.25, 6, 0.25, { color: "c2", width: 1, dash: [4, 4], alpha: .7 }); p.label(-5.9, 0.33, "0.25", { color: "c2", font: "11px sans-serif" }); }
+      p.fn(f, { color: "c1", width: 3 });
+      if (key === "relu") { p.line(-6, 0, 0, 0, { color: "c2", width: 3 }); p.line(0, 1, 6, 1, { color: "c2", width: 3 }); }
+      else p.fn(d, { color: "c2", width: 3 });
+      const z = Z.x;
+      p.line(z, -1.4, z, 2.2, { color: "c5", width: 1, dash: [3, 4] });
+      p.point(z, f(z), { r: 5, color: "c1" }); p.point(z, d(z), { r: 5, color: "c2" });
+      p.drawHandles();
+      p.label(8, 14, nf, { px: true, color: "c1" }); p.label(8, 32, nd, { px: true, color: "c2" });
+      const best = key === "sigmoid" ? 0.25 : 1;
+      out.textContent = `z = ${z.toFixed(2)}   ${nf} = ${f(z).toFixed(4)}   derivative = ${d(z).toFixed(4)}\n` +
+        `n = ${layers} stacked layer(s): best-case product of derivatives ${best}^${layers} = ${best ** layers < 1e-3 ? (best ** layers).toExponential(2) : fmt(best ** layers, 4)}`;
+    });
+  }
+
+  // ---------- fig: numerical derivative error, log-log ----------
+  {
+    const fns = { "exp at x = 1": [Math.exp, Math.exp, 1], "sin at x = 1": [Math.sin, Math.cos, 1], "x³ at x = 2": [x => x * x * x, x => 3 * x * x, 2] };
+    let key = "exp at x = 1", lh = -4;
+    const p = new Plot("#fig-err", { xmin: -17.2, xmax: 0.6, ymin: -17.5, ymax: 1.5 });
+    const out = ctl("out-err");
+    select("#ctl-err", "function ", Object.keys(fns).map(k => [k, k]), v => { key = v; p.render(); });
+    slider("#ctl-err", { label: "log₁₀ h ", min: -16, max: 0, step: 0.1, value: -4, digits: 1 }, v => { lh = v; p.render(); });
+    p.render(p => {
+      const [f, df, x] = fns[key], t = df(x);
+      const fwd = h => Math.abs((f(x + h) - f(x)) / h - t), cen = h => Math.abs((f(x + h) - f(x - h)) / (2 * h) - t);
+      const L = e => Math.log10(Math.max(e, 1e-17));
+      // axes (custom, log labels)
+      for (let k = -16; k <= 0; k += 2) { p.line(k, -17.5, k, 1.5, { color: "grid", width: 1 }); p.label(k, -17.5, "1e" + k, { align: "center", dy: -10, color: "muted", font: "11px sans-serif" }); }
+      for (let k = -16; k <= 0; k += 2) { p.line(-17.2, k, 0.6, k, { color: "grid", width: 1 }); p.label(-17.2, k, "1e" + k, { dx: 4, color: "muted", font: "11px sans-serif" }); }
+      p.label(0.4, -16.6, "step size h →", { align: "right", color: "muted", font: "12px sans-serif" });
+      p.label(-17.0, 0.9, "absolute error", { color: "muted", font: "12px sans-serif" });
+      // guides
+      p.line(-6, -6, 0, 0, { color: "c2", width: 1.2, dash: [6, 5], alpha: .6 }); p.label(-1.2, -2.6, "slope 1", { color: "c2", font: "11px sans-serif" });
+      p.line(-4, -8, 0, 0, { color: "c1", width: 1.2, dash: [6, 5], alpha: .6 }); p.label(-2.2, -5.5, "slope 2", { color: "c1", font: "11px sans-serif" });
+      p.line(-16, -0.35, -6, -10.35, { color: "muted", width: 1.2, dash: [6, 5], alpha: .7 }); p.label(-15.6, -9, "rounding ≈ ε/h: slope −1", { color: "muted", font: "11px sans-serif" });
+      const pf = [], pc = []; let bf = [0, 1e9], bc = [0, 1e9];
+      for (let k = -160; k <= 0; k++) { const lhh = k / 10, h = 10 ** lhh, ef = fwd(h), ec = cen(h); pf.push([lhh, L(ef)]); pc.push([lhh, L(ec)]); if (ef < bf[1]) bf = [lhh, ef]; if (ec < bc[1]) bc = [lhh, ec]; }
+      p.path(pf, { color: "c2", width: 2.2 }); p.path(pc, { color: "c1", width: 2.2 });
+      p.point(bf[0], L(bf[1]), { r: 5, color: "c2", stroke: "bg" }); p.point(bc[0], L(bc[1]), { r: 5, color: "c1", stroke: "bg" });
+      p.line(lh, -17.5, lh, 1.5, { color: "c5", width: 1.5, dash: [3, 3] });
+      p.label(-13.8, -13.2, "— forward difference", { color: "c2" }); p.label(-13.8, -14.4, "— central difference", { color: "c1" });
+      const h = 10 ** lh, ef = (f(x + h) - f(x)) / h, ec = (f(x + h) - f(x - h)) / (2 * h);
+      out.textContent = `h = ${h.toExponential(1)}   true f'(x) = ${t.toPrecision(16)}\n` +
+        `forward = ${ef.toPrecision(16)}  error ${Math.abs(ef - t).toExponential(1)}   (best: h = 1e${bf[0].toFixed(1)}, error ${bf[1].toExponential(1)})\n` +
+        `central = ${ec.toPrecision(16)}  error ${Math.abs(ec - t).toExponential(1)}   (best: h = 1e${bc[0].toFixed(1)}, error ${bc[1].toExponential(1)})`;
+    });
+  }
+
+  // ---------- fig: Newton's method ----------
+  {
+    const fns = {
+      sqrt2: [x => x * x - 2, x => 2 * x, "x² − 2", 1, [-3, 3, -3, 5]],
+      cos: [x => Math.cos(x) - x, x => -Math.sin(x) - 1, "cos x − x", -1, [-3, 3, -3, 4]],
+      cycle: [x => x ** 3 - 2 * x + 2, x => 3 * x * x - 2, "x³ − 2x + 2", 0, [-2.6, 2, -3, 5]],
+      atan: [Math.atan, x => 1 / (1 + x * x), "arctan x", 1.5, [-6, 6, -2, 2]],
+    };
+    let key = "sqrt2", hist = [];
+    const p = new Plot("#fig-newton", { xmin: -3, xmax: 3, ymin: -3, ymax: 5 });
+    const X0 = { x: 1, y: 0, color: "c1", constrain: x => [x, 0] };
+    const out = ctl("out-newton");
+    const reset = () => { hist = [X0.x]; anim.stop(); p.render(); };
+    const step = () => { const [f, df] = fns[key], x = hist[hist.length - 1], d = df(x); if (hist.length > 40 || d === 0 || !isFinite(x) || Math.abs(x) > 1e6) return false; hist.push(x - f(x) / d); p.render(); return true; };
+    let last = 0; const anim = animator(() => { const t = performance.now(); if (t - last < 700) return true; last = t; return step() && hist.length < 12; });
+    const setKey = k => { key = k; const v = fns[k][4]; p.setView(v[0], v[1], v[2], v[3]); X0.x = fns[k][3]; reset(); };
+    select("#ctl-newton", "f(x) = ", Object.keys(fns).map(k => [k, fns[k][2]]), setKey);
+    button("#ctl-newton", "step", () => { anim.stop(); step(); });
+    button("#ctl-newton", "play", () => anim.start());
+    button("#ctl-newton", "reset", reset);
+    p.draggable([X0], () => { hist = [X0.x]; anim.stop(); });
+    p.render(p => {
+      const [f, df, name] = fns[key];
+      p.grid({ step: 1 }).axes({ step: 1 });
+      p.fn(f, { color: "fg", width: 2.5 });
+      hist.forEach((x, i) => {
+        if (i === hist.length - 1 || !isFinite(x)) return;
+        const y = f(x), xn = hist[i + 1], fade = i === hist.length - 2 ? 1 : .35;
+        p.line(x, 0, x, y, { color: "muted", width: 1, dash: [3, 3], alpha: fade });
+        p.ray(x, y, 1, df(x), { color: "c3", width: 1.6, alpha: fade });
+        p.point(x, y, { r: 3.5, color: "c3", alpha: fade });
+        p.arrow(x, 0, xn, 0, { color: "c2", width: 2, alpha: fade, head: 8 });
+      });
+      hist.slice(1).forEach((x, i) => p.point(x, 0, { r: 4, color: "c2", label: i < 2 ? "x" + (i + 1) : "" }));
+      p.drawHandles(); p.label(X0.x, 0, "x0", { color: "c1", dx: -6, dy: 16 });
+      p.label(14, 16, "f(x) = " + name, { px: true, bg: true });
+      const truth = key === "sqrt2" ? Math.SQRT2 : null;
+      out.textContent = hist.slice(-6).map((x, j) => { const n = hist.length - Math.min(6, hist.length) + j; return `x${n} = ${isFinite(x) ? x.toPrecision(15) : x}   f(x${n}) = ${isFinite(x) ? f(x).toExponential(2) : "—"}` + (truth && isFinite(x) ? `   correct digits ≈ ${Math.min(16, Math.max(0, -Math.log10(Math.abs(x - truth) / truth))).toFixed(1)}` : ""); }).join("\n");
+    });
+    setKey("sqrt2");
+  }
+});
+</script>
+</body>
+</html>

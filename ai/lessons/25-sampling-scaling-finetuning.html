@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sampling, scaling & fine-tuning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="25">
+<main>
+
+<div class="kicker">Part 6 · Transformers</div>
+<h1>Sampling, scaling &amp; fine-tuning</h1>
+<p class="lede">You have a trained GPT. Three practical questions remain. How do you turn its next-token distribution into good text, and do it fast? How big should a model be, and how much data does it need, for a given compute budget? And how do you adapt a pretrained model to a new task without retraining it? This lesson covers decoding strategies, the KV cache, the Chinchilla scaling laws, supervised fine-tuning and LoRA.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Implement greedy, temperature, top-k and top-p sampling and explain how each reshapes the distribution. Explain when beam search helps and when it hurts.</li>
+    <li>Explain why generation without a KV cache wastes quadratic work, and compute a model's KV-cache memory.</li>
+    <li>Use the Chinchilla law $L(N,D) = E + A/N^\alpha + B/D^\beta$ with $C \approx 6ND$ to derive the compute-optimal model size.</li>
+    <li>Set up supervised fine-tuning with loss masking, and explain LoRA as a low-rank update (lesson 04) that trains a tiny fraction of the parameters.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="decoding">1. From a distribution to text</h2>
+<p>A language model gives you $p_\theta(x_{t+1} \mid x_{1..t})$, a softmax over $V$ tokens. Generation is a loop: compute the distribution at the last position, <b>choose</b> a token, append it, repeat (you wrote this in workbook 24). Everything in this section is about the word "choose".</p>
+<ul>
+  <li><b>Greedy</b>: take $\arg\max$. Deterministic and often good for short factual answers. For long text it's dull and tends to fall into loops ("I don't know. I don't know. I don't know.").</li>
+  <li><b>Ancestral sampling</b>: draw from $p_\theta$ exactly. Faithful to the model, but every step has a small chance of picking a weird low-probability token, and over hundreds of steps one usually happens. After that the model conditions on its own mistake.</li>
+</ul>
+<p>Practical samplers sit between the two. They <em>reshape</em> the distribution, then sample.</p>
+
+<!-- ============================================================ -->
+<h2 id="samplers">2. Temperature, top-k and top-p</h2>
+<p><b>Temperature</b> (lesson 22, section 5) divides the logits before the softmax: $p_i \propto e^{z_i/T}$. $T \lt 1$ sharpens (towards greedy), $T \gt 1$ flattens (towards uniform). In terms of probabilities, $p_i^{(T)} \propto p_i^{1/T}$, so $T = 0.5$ squares every probability and renormalizes.</p>
+<p><b>Top-k</b> keeps only the $k$ most likely tokens, sets the rest to probability 0, and renormalizes. It cuts off the long tail of nonsense. But a fixed $k$ is wrong in both directions: after "The capital of France is" only one token is reasonable, while after "My favourite word is" thousands are.</p>
+<p><b>Top-p</b> (nucleus sampling) adapts the cut-off: keep the <em>smallest</em> set of top tokens whose probabilities sum to at least $p$. With a confident model the nucleus is one or two tokens; with an uncertain one it is wide. Typical settings are $T \approx 0.7$–$1$ and $p \approx 0.9$–$0.95$.</p>
+
+<div class="figure">
+  <canvas id="fig-samp" width="680" height="330"></canvas>
+  <div class="controls" id="ctl-samp"></div>
+  <div class="readout" id="out-samp"></div>
+  <div class="caption"><b>Try it:</b> a made-up next-token distribution after "The cat sat on the". Faint bars are the model's original probabilities; solid bars are what the sampler actually draws from after temperature, top-k and top-p (applied in that order, as in workbook 25). Push $T$ towards 0 and watch it become greedy. Raise $T$ to 2 and "quantum" becomes a real possibility. Set top-p to 0.8 and count the survivors. Press <b>Sample 20</b> to draw tokens.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: nucleus</div>
+  <p>Probabilities $(0.5, 0.3, 0.15, 0.05)$, sorted, with $p = 0.9$. Cumulative sums: $0.5, 0.8, 0.95, 1.0$. The first three reach $0.95 \ge 0.9$, so the nucleus is the top 3 tokens. Renormalize by $0.95$: $(0.526, 0.316, 0.158, 0)$. With $p = 0.75$, the top two already reach $0.8$, and the nucleus is $(0.625, 0.375, 0, 0)$.</p>
+</div>
+
+<div class="callout warning">
+<p>Order matters, and libraries differ. The workbook applies temperature first, then top-k, then top-p, as Hugging Face does by default. With temperature last, top-p would select its nucleus on the <em>un-tempered</em> distribution. Neither order is wrong, but the same "T = 0.7, p = 0.9" can mean different samplers in different libraries.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="beam">3. Repetition and beam search</h2>
+<p>Greedy decoding picks the best <em>next</em> token, not the best <em>sequence</em>. A token that looks slightly worse now can lead to much more probable continuations. <b>Beam search</b> keeps the $b$ most probable partial sequences ("beams") at every step. It extends each by every possible token, scores candidates by total log-probability $\sum_t \log p(x_t \mid x_{\lt t})$, and keeps the top $b$.</p>
+
+<div class="figure">
+  <canvas id="fig-beam" width="680" height="360"></canvas>
+  <div class="controls" id="ctl-beam"></div>
+  <div class="readout" id="out-beam"></div>
+  <div class="caption"><b>Try it:</b> a toy language model whose next word depends only on the previous word. With beam width 1 (greedy), step through: greedy grabs "the" (0.5) and ends with probability 0.1125. Set width 2 and step again: keeping "a" alive, despite its lower first step (0.4), finds "a cat sat ." with probability 0.2592, more than twice as likely. Bold nodes are the beams kept at each step; faint ones were pruned. Edge labels are the conditional probabilities.</div>
+</div>
+
+<p>Beam search is the standard for tasks with one right answer, such as translation and speech recognition. For open-ended text it is usually <em>worse</em> than sampling. The most probable sequences are generic and repetitive, because "the the the" loops can be very high-probability under the model, and real human text is not the mode of the distribution. Two common patches against repetition: a <b>repetition penalty</b> (divide the logits of already-generated tokens by a factor such as 1.2) and <b>frequency/presence penalties</b> (subtract a constant per previous occurrence).</p>
+
+<!-- ============================================================ -->
+<h2 id="kvcache">4. The KV cache</h2>
+<p>Look at what naive generation recomputes. To produce token $t+1$ we run the model on all $t$ tokens. At every layer that computes keys and values for tokens $1..t$, but those are <em>exactly the same</em> as in the previous step. Because of the causal mask, a token's keys and values never depend on later tokens. Only the newest token is new.</p>
+<p>The <b>KV cache</b> stores each layer's $K$ and $V$ for all past tokens. Each generation step then:</p>
+<ol>
+  <li>runs only the <em>new</em> token through the network, computing its $\mathbf q, \mathbf k, \mathbf v$ at each layer;</li>
+  <li>appends $\mathbf k, \mathbf v$ to that layer's cache;</li>
+  <li>attends with the single new query over all cached keys and values.</li>
+</ol>
+<p>The per-step cost drops from processing $t$ tokens to processing 1 token, plus a dot product with $t$ cached keys. Generating $n$ tokens goes from $O(n^2)$ token-passes to $O(n)$. The first pass over the prompt (the <b>prefill</b>) is still done in parallel. After that, each <b>decode</b> step is one token at a time. The workbook's test is strict: cached generation must produce <em>exactly</em> the same tokens as recomputing from scratch.</p>
+
+<div class="figure">
+  <canvas id="fig-kv" width="680" height="330"></canvas>
+  <div class="controls" id="ctl-kv"></div>
+  <div class="readout" id="out-kv"></div>
+  <div class="caption"><b>Try it:</b> press <b>Play</b> to generate token by token. Left: one layer's cached keys (rows = tokens). The newest row is computed this step, and the earlier rows are reused when the cache is on. Without the cache every row is recomputed every step (orange). Right: cumulative token-passes for both strategies after $n$ tokens: $n(n+1)/2$ versus $n$. Toggle the cache off and on.</div>
+</div>
+
+<p><b>The price is memory.</b> Per token, the cache holds a key and a value of width $d$ for each of $L$ layers:</p>
+$$\text{KV bytes per token} = 2 \cdot L \cdot d \cdot (\text{bytes per number}).$$
+
+<div class="example">
+  <div class="label">Worked example: a 7B model</div>
+  <p>Llama-2-7B: $L = 32$, $d = 4096$, 16-bit numbers (2 bytes). Per token: $2\cdot32\cdot4096\cdot2 = 524{,}288$ bytes, half a megabyte. A 4096-token context needs $524{,}288 \cdot 4096 \approx 2.15$ GB <em>per sequence</em>, on top of 14 GB of weights. Serving many users at once is mostly a KV-cache memory problem. That's why grouped-query attention (several query heads sharing one K/V head, lesson 22) and cache quantization exist.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="scaling">5. Scaling laws</h2>
+<p>Train many models of different sizes on different amounts of data and plot the final loss. A remarkable empirical regularity appears: the loss follows smooth power laws over many orders of magnitude. Hoffmann et al. (2022, "Chinchilla") fit</p>
+$$L(N, D) = E + \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}}, \qquad \begin{aligned} &E = 1.69,\ A = 406.4,\ B = 410.7,\\ &\alpha = 0.34,\ \beta = 0.28,\end{aligned}$$
+<p>where $N$ is the number of parameters and $D$ the number of training tokens (loss in nats per token on their data). Read it term by term. $E$ is the irreducible entropy of text: no model beats it. $A/N^\alpha$ is the penalty for a finite model. $B/D^\beta$ is the penalty for finite data.</p>
+
+<h3>The compute budget: $C \approx 6ND$</h3>
+<p>Where does the 6 come from? A forward pass does one multiply and one add per parameter per token: $2N$ FLOPs per token. Backpropagation costs about twice the forward pass, because each weight matrix needs gradients for both its input and its weights: $4N$. Total: $6N$ FLOPs per training token, so $C \approx 6ND$. (Attention's $n^2$ term is small at typical lengths.)</p>
+
+<h3>Compute-optimal allocation</h3>
+<p>Given a budget $C$, choose $N$ and $D = C/(6N)$ to minimize the loss. Substitute and differentiate:</p>
+$$\begin{aligned}\frac{d}{dN}\Big[\frac{A}{N^\alpha} + B\Big(\frac{6N}{C}\Big)^{\beta}\Big] &= -\frac{\alpha A}{N^{\alpha+1}} + \frac{\beta B}{N}\Big(\frac{6N}{C}\Big)^{\beta} = 0\\
+\Longrightarrow\quad N^{*} = G\Big(\frac{C}{6}\Big)^{\frac{\beta}{\alpha+\beta}},&\qquad G = \Big(\frac{\alpha A}{\beta B}\Big)^{\frac{1}{\alpha+\beta}}.\end{aligned}$$
+<p>With these constants $N^* \propto C^{0.45}$ and $D^* \propto C^{0.55}$: as compute grows, grow the model and the data <em>roughly equally</em>. That was the paper's main message. Earlier models like GPT-3 (175B parameters, 300B tokens) were far too big for their data.</p>
+
+<div class="figure">
+  <canvas id="fig-chin" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-chin"></div>
+  <div class="readout" id="out-chin"></div>
+  <div class="caption"><b>Try it:</b> the colour is the predicted loss $L(N,D)$ (log scale of $L - E$) over model size (x, log scale) and training tokens (y, log scale); darker means lower, with contour lines at fixed loss. The dashed straight line is one compute budget $C = 6ND$. Slide $C$: the orange dot is the best point on that line, and the white curve traces the optimum for every budget (the <em>compute-optimal frontier</em>). Compare the real models: GPT-3 and Gopher sit far below-right of the frontier (too many parameters for their data). Llama-2-7B sits far above-left, deliberately "over-trained" so that it is cheap to <em>run</em>.</div>
+</div>
+
+<div class="callout warning">
+<p>The often-quoted rule "about 20 tokens per parameter" comes from the paper's other two estimation methods (Chinchilla itself: 70B parameters, 1.4T tokens). The parametric fit above, taken literally, puts the optimum for Chinchilla's budget at about 32B parameters and 3T tokens. A 2024 replication found the published fit's constants slightly off. Treat the numbers as approximate and the <em>shape</em> as the lesson: losses are smooth and predictable, and data and parameters trade off. Also, compute-optimal for <em>training</em> isn't optimal overall when the model will serve billions of requests. Then a smaller model trained much longer wins.</p>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: GPT-3's budget</div>
+  <p>$C = 6 \cdot 175\times10^9 \cdot 300\times10^9 = 3.15\times10^{23}$ FLOPs. The fit predicts $L = 1.69 + 406.4/(1.75\times10^{11})^{0.34} + 410.7/(3\times10^{11})^{0.28} = 2.002$. Moving the same compute to the frontier gives $N^* \approx 24.5$B and $D^* \approx 2.1$T, with predicted loss $1.954$. That's a smaller model and a lower loss for the same price.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sft">6. Supervised fine-tuning</h2>
+<p>A pretrained model is a superb <em>text continuer</em>: ask it a question and it may continue with three more questions, because that's what web pages do. To turn it into an assistant, the first step is <b>supervised fine-tuning</b> (SFT): keep training with the same next-token loss, but on curated (prompt, response) pairs in a fixed format, for example</p>
+<pre><code>&lt;|user|&gt; What is 2+2? &lt;|assistant|&gt; 4&lt;|end|&gt;</code></pre>
+<p>One change matters: <b>loss masking</b>. We want the model to learn to <em>produce responses</em>, not to imitate users' prompts, so the cross-entropy is averaged only over response tokens:</p>
+$$\mathcal L_{\text{SFT}} = -\frac{1}{|\text{resp}|}\sum_{t\in\text{resp}} \log p_\theta(x_t \mid x_{\lt t}).$$
+<p>In PyTorch you set the prompt positions' targets to <code>-100</code>, the default <code>ignore_index</code> of <code>F.cross_entropy</code>. The prompt still flows through the model as context. It just isn't a target.</p>
+
+<div class="example">
+  <div class="label">Worked example: building one SFT pair</div>
+  <p>Prompt <code>ab=</code>, response <code>ba.</code>. The full string <code>ab=ba.</code> gives inputs $x$ = <code>a b = b a</code> and next-token targets $y$ = <code>b = b a .</code>. The first two targets (<code>b</code>, <code>=</code>) are prompt characters, so they become <code>-100</code>: $y$ = <code>[-100, -100, b, a, .]</code>. The loss averages over 3 positions. Note that the first response character is predicted from the last prompt character, the <code>=</code>.</p>
+</div>
+
+<p>SFT is the first stage of the classic alignment pipeline: <b>pretrain → SFT → preference optimization</b>. The last stage (RLHF with PPO, or DPO/GRPO) is lessons 28–29. There the SFT model is both the starting policy and the reference that a KL penalty keeps the policy close to.</p>
+
+<!-- ============================================================ -->
+<h2 id="lora">7. LoRA: fine-tuning a low-rank update</h2>
+<p>Full fine-tuning updates every parameter. For a 7B model with Adam, that means storing weights, gradients and two moment estimates: tens of gigabytes, and a full copy of the model per task. <b>LoRA</b> (low-rank adaptation) freezes the pretrained weight $W \in \mathbb{R}^{d_{\text{out}}\times d_{\text{in}}}$ and learns a <em>low-rank</em> correction:</p>
+$$W' = W + \Delta W = W + \frac{\alpha}{r}\,BA, \qquad B \in \mathbb{R}^{d_{\text{out}}\times r},\ A \in \mathbb{R}^{r\times d_{\text{in}}},\ r \ll d.$$
+<ul>
+  <li><b>Parameters</b>: $r(d_{\text{in}} + d_{\text{out}})$ instead of $d_{\text{in}}d_{\text{out}}$. For a $4096\times4096$ matrix with $r = 8$: 65,536 instead of 16.8M, i.e. 0.39%.</li>
+  <li><b>Initialization</b>: $A$ random and $B = 0$, so $\Delta W = 0$ and training starts exactly at the pretrained model (problem 7).</li>
+  <li><b>Inference</b>: <em>merge</em> $W' = W + \tfrac{\alpha}{r}BA$ once, and the fine-tuned model costs exactly the same to run. Or keep many small $(A, B)$ adapters and swap them per task.</li>
+</ul>
+<p>Why should a low-rank update be enough? Recall the SVD from lesson 04: any matrix is $\sum_i \sigma_i \mathbf u_i \mathbf v_i^\top$, and the best rank-$r$ approximation (Eckart–Young) keeps the top $r$ terms, with error determined by the discarded $\sigma_i$. Hu et al. measured fine-tuning updates and found them to have very low "intrinsic rank". Adapting a model to a task changes a few directions, not all of them. Problem 7 in lesson 22 made the same point about attention heads, whose $W_Q W_K^\top$ already has rank at most $d_h$.</p>
+
+<div class="figure">
+  <div class="row">
+    <div style="flex-basis:180px"><canvas id="fig-lora-a" width="250" height="270"></canvas></div>
+    <div style="flex-basis:180px"><canvas id="fig-lora-b" width="250" height="270"></canvas></div>
+    <div style="flex-basis:180px"><canvas id="fig-lora-s" width="250" height="270"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-lora"></div>
+  <div class="readout" id="out-lora"></div>
+  <div class="caption"><b>Try it:</b> left, a synthetic "fine-tuning update" $\Delta W$ ($32\times32$): a few strong directions plus noise. Middle, its best rank-$r$ approximation from the SVD (lesson 04). Right, the singular values, with the kept ones in orange. Slide $r$: by $r \approx 4$ the approximation is visually indistinguishable while storing a fraction of the numbers. The readout shows the relative error $\sqrt{\sum_{i>r}\sigma_i^2 / \sum_i\sigma_i^2}$ and the parameter count $r(d_{\text{in}}+d_{\text{out}})$. LoRA doesn't compute an SVD. It learns $B$ and $A$ directly by gradient descent, but this is the capacity it has.</div>
+</div>
+
+<div class="callout ml">
+<p>LoRA (and QLoRA, which also quantizes the frozen base to 4 bits) is how most people fine-tune open models on a single GPU, and it is also used inside RLHF/DPO pipelines (lessons 28–29). There, a nice side effect is that the frozen base doubles as the reference model: turn the adapter off and you have $\pi_{\text{ref}}$ for free.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Logits $(2, 1, 0)$ at temperature $T = 0.5$. What is the probability of the first token?</p>
+<div class="numcheck" data-answer="0.8668" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Scaled logits $(4, 2, 0)$: $e^4/(e^4 + e^2 + 1) = 54.60/(54.60 + 7.389 + 1) = 0.8668$. At $T = 1$ it was $0.665$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Probabilities $(0.5, 0.3, 0.15, 0.05)$. Apply top-k with $k = 2$. What are the renormalized probabilities of the two survivors?</p>
+<div class="numcheck" data-answer="0.625,0.375"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Keep $0.5$ and $0.3$, which sum to $0.8$. Divide: $0.625$ and $0.375$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>A model has $L = 32$ layers, $d = 4096$, and stores its KV cache in 16-bit floats. How many bytes of cache per token? How many gigabytes ($10^9$ bytes) for a batch of 8 sequences of 4096 tokens?</p>
+<div class="numcheck" data-answer="524288,17.179869184" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$2 \cdot 32 \cdot 4096 \cdot 2 = 524{,}288$ bytes per token. Times $8 \cdot 4096 = 32{,}768$ tokens gives $17.18$ GB, more than the 14 GB of weights.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Generating $n$ tokens without a KV cache (from a 1-token prompt) runs the model on $1 + 2 + \cdots + n$ tokens in total. With a cache it runs on $n$. What is the ratio for $n = 1000$?</p>
+<div class="numcheck" data-answer="500.5"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$n(n+1)/2 = 500{,}500$ versus $1000$: a ratio of $500.5$. (The attention dot products themselves still grow with $t$ in both cases. The cache removes the recomputation of all the projections and MLPs for old tokens, which is most of the work.)</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · derivation</span>
+<p>Derive the compute-optimal $N^*(C)$ for $L = E + A N^{-\alpha} + B D^{-\beta}$ under $C = 6ND$ (fill in the steps of section 5), then give the exponent of $C$ in $N^*$ and in $D^*$ for $\alpha = 0.34$, $\beta = 0.28$.</p>
+<div class="numcheck" data-answer="0.451613,0.548387" data-tol="1e-4"></div>
+<details class="hint"><summary>Hint</summary><p>Write $D = C/(6N)$, so $B D^{-\beta} = B (6N/C)^\beta$, then set the derivative in $N$ to zero and solve for $N^{\alpha+\beta}$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\frac{d}{dN}[A N^{-\alpha} + B(6/C)^\beta N^\beta] = -\alpha A N^{-\alpha-1} + \beta B (6/C)^\beta N^{\beta-1} = 0$ gives $N^{\alpha+\beta} = \frac{\alpha A}{\beta B}(C/6)^\beta$, so $N^* = G\,(C/6)^{\beta/(\alpha+\beta)}$. Then $D^* = C/(6N^*) \propto C^{1 - \beta/(\alpha+\beta)} = C^{\alpha/(\alpha+\beta)}$. Numerically $0.28/0.62 = 0.4516$ and $0.34/0.62 = 0.5484$. The <em>harder-to-reduce</em> term (the smaller exponent, here data's $\beta$) gets the larger share of compute growth.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>You add LoRA with $r = 8$ to the four attention matrices ($W_Q, W_K, W_V, W_O$, each $4096\times4096$) of each of 32 layers. How many trainable parameters is that, and what percentage of the 7B total?</p>
+<div class="numcheck" data-answer="8388608,0.1198" data-tol="2e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Per matrix $8\cdot(4096 + 4096) = 65{,}536$; times $4\cdot32 = 128$ matrices gives $8{,}388{,}608$. Relative to $7\times10^9$: $0.12\%$. Adam state for these is a few hundred MB instead of tens of GB.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · proof</span>
+<p>For $\mathbf y = W\mathbf x + s\,BA\mathbf x$ with loss gradient $\mathbf g = \partial \mathcal L/\partial \mathbf y$, show $\partial\mathcal L/\partial B = s\,\mathbf g (A\mathbf x)^\top$ and $\partial\mathcal L/\partial A = s\,B^\top \mathbf g\,\mathbf x^\top$. Conclude that at initialization ($B = 0$, $A$ random) the first gradient step changes only $B$. Why not initialize both to zero?</p>
+<details class="solution"><summary>Solution</summary>
+<p>Let $\mathbf h = A\mathbf x$. Then $\mathbf y$ depends on $B$ through $sB\mathbf h$, a linear layer with input $\mathbf h$, so $\partial\mathcal L/\partial B = s\,\mathbf g\mathbf h^\top$ (lesson 07). And $\partial\mathcal L/\partial \mathbf h = sB^\top\mathbf g$, so $\partial\mathcal L/\partial A = sB^\top\mathbf g\,\mathbf x^\top$. With $B = 0$ the $A$-gradient vanishes while the $B$-gradient doesn't (since $A\mathbf x \ne 0$). After one step $B \ne 0$ and both train. If both were zero, <em>both</em> gradients would be zero forever, a saddle point. Initializing $B = 0$ (rather than $A = 0$) gives $\Delta W = 0$ at the start while keeping a nonzero gradient.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>In the beam-search figure's toy model, compute the probability of the greedy output and of the width-2 beam output. Then explain why, for open-ended story generation, maximizing sequence probability is often <em>not</em> what you want.</p>
+<div class="numcheck" data-answer="0.1125,0.2592" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Greedy: the (0.5) · dog (0.45) · barked (0.5) · . (1) = 0.1125. Beam: a (0.4) · cat (0.9) · sat (0.8) · . (0.9) = 0.2592. For stories, the highest-probability continuations are bland and repetitive: models assign high probability to safe, generic phrases and to loops. Human-written text routinely contains less probable tokens. So sampling from a trimmed distribution (top-p) produces text whose per-token "surprise" resembles human text, while beam search produces text that is too predictable.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">Why is top-p usually preferred over a fixed top-k?</div>
+  <div class="opts">
+    <button data-k="a">It's faster to compute.</button>
+    <button data-k="b">The number of kept tokens adapts to the model's confidence: few when it's sure, many when it isn't.</button>
+    <button data-k="c">It never changes the most likely token's probability.</button>
+    <button data-k="d">It makes generation deterministic.</button>
+  </div>
+  <div class="explain">A fixed $k$ is too large for confident steps (letting junk through) and too small for open-ended ones. The nucleus size tracks the shape of the distribution.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">What exactly does a KV cache store, and why is it valid to reuse?</div>
+  <div class="opts">
+    <button data-k="a">The past tokens' logits, because they don't change.</button>
+    <button data-k="b">The past queries, because the new token attends to them.</button>
+    <button data-k="c">Each layer's keys and values for past tokens, which can't change because the causal mask prevents earlier tokens from depending on later ones.</button>
+    <button data-k="d">The attention weights from the previous step.</button>
+  </div>
+  <div class="explain">Queries of old tokens are never needed again. Only the new token's query is used. Attention weights change every step, because the new query differs.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">You have 10× more compute than last time. According to the Chinchilla fit, how should you spend it?</div>
+  <div class="opts">
+    <button data-k="a">Grow the model about 2.8× and the data about 3.5×.</button>
+    <button data-k="b">Grow the model 10× and keep the same data.</button>
+    <button data-k="c">Keep the model and train on 10× the data.</button>
+    <button data-k="d">Grow both 10×.</button>
+  </div>
+  <div class="explain">$N^* \propto C^{0.45}$ gives $10^{0.45} \approx 2.83$, and $D^* \propto C^{0.55}$ gives $10^{0.55} \approx 3.53$. Their product is 10, as it must be. Growing both 10× would need 100× the compute.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">In SFT, why are prompt tokens given the target −100?</div>
+  <div class="opts">
+    <button data-k="a">So the model can't see the prompt.</button>
+    <button data-k="b">Because the prompt is in a different vocabulary.</button>
+    <button data-k="c">To make the loss larger and speed up training.</button>
+    <button data-k="d">So the loss only trains the model to generate responses. The prompt is still visible as context, just not a prediction target.</button>
+  </div>
+  <div class="explain"><code>ignore_index=-100</code> removes those positions from the cross-entropy average. Attention still reads every prompt token.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Topic</th><th>Key formula / fact</th></tr>
+  <tr><td>Temperature</td><td>$p_i \propto e^{z_i/T}$; $T\to0$ greedy, $T\to\infty$ uniform</td></tr>
+  <tr><td>Top-k / top-p</td><td>keep $k$ best / smallest set with mass $\ge p$, then renormalize</td></tr>
+  <tr><td>Beam search</td><td>keep $b$ best partial sequences by $\sum\log p$; good for translation, bland for stories</td></tr>
+  <tr><td>KV cache</td><td>reuse past $K,V$: $O(n^2)\to O(n)$ token-passes; memory $2Ld$ numbers per token</td></tr>
+  <tr><td>Compute</td><td>$C \approx 6ND$ FLOPs</td></tr>
+  <tr><td>Chinchilla</td><td>$L = E + A N^{-\alpha} + B D^{-\beta}$; $N^*\propto C^{0.45}$, $D^*\propto C^{0.55}$</td></tr>
+  <tr><td>SFT</td><td>next-token loss on responses only (targets −100 on the prompt)</td></tr>
+  <tr><td>LoRA</td><td>$W + \tfrac{\alpha}{r}BA$; $r(d_{\text{in}}+d_{\text{out}})$ params; $B=0$ init; merge for free inference</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 25: decode fast, fine-tune cheap</h3>
+  <p>Open <code>workbooks/25_sampling_scaling_finetuning/exercises.py</code>. You'll write <code>apply_temperature</code>, <code>top_k_filter</code>, <code>top_p_filter</code> and <code>sample_next</code> (tested by Monte-Carlo frequencies), and <code>forward_cached</code>/<code>generate_cached</code>, which must reproduce the no-cache generator token for token. Then <code>LoRALinear</code> with <code>merge()</code> and <code>add_lora</code>, and SFT with <code>make_sft_example</code> and a masked <code>sft_loss</code>. A test fine-tunes a tiny GPT on a "reverse the string" format and checks that exact-match accuracy jumps from 0 to over 80%. A LoRA run must improve the loss with the base weights untouched. Finally, <code>chinchilla_loss</code> and the closed-form <code>compute_optimal</code>. If you ran <code>train.py</code> in lesson 24, <code>helpers.load_tinygpt()</code> loads your Shakespeare model so you can try your samplers on it.</p>
+  <pre><code>./course check 25</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Holtzman et al. (2020), <em>The Curious Case of Neural Text Degeneration</em>: nucleus sampling and why beam search degenerates.</li>
+  <li>Kaplan et al. (2020), <em>Scaling Laws for Neural Language Models</em>, and Hoffmann et al. (2022), <em>Training Compute-Optimal Large Language Models</em> (Chinchilla).</li>
+  <li>Hu et al. (2021), <em>LoRA: Low-Rank Adaptation of Large Language Models</em>; Dettmers et al. (2023), <em>QLoRA</em>.</li>
+  <li>Ouyang et al. (2022), <em>Training language models to follow instructions with human feedback</em> (InstructGPT): SFT as stage one. Continue with lesson 26.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, LA, fmt, withAlpha } = Course;
+  const mono = getComputedStyle(document.documentElement).getPropertyValue("--mono");
+
+  // ---------- fig: samplers ----------
+  {
+    const toks = ["mat", "floor", "sofa", "bed", "table", "roof", "chair", "grass", "moon", "piano", "banana", "quantum"];
+    const z = [3.2, 2.6, 2.3, 2.1, 1.8, 1.2, 1.0, 0.6, -0.5, -0.8, -2, -3];
+    let T = 1, K = 12, P = 1, draws = [];
+    const p = new Plot("#fig-samp", { xmin: -0.6, xmax: 12.2, ymin: -0.14, ymax: 1.05 });
+    const out = document.getElementById("out-samp");
+    slider("#ctl-samp", { label: "temperature T ", min: 0.05, max: 3, step: 0.05, value: 1 }, v => { T = v; draws = []; p.render(); });
+    slider("#ctl-samp", { label: "top-k ", min: 1, max: 12, step: 1, value: 12, digits: 0 }, v => { K = v; draws = []; p.render(); });
+    slider("#ctl-samp", { label: "top-p ", min: 0.05, max: 1, step: 0.01, value: 1 }, v => { P = v; draws = []; p.render(); });
+    const R = Course.rng(3);
+    const dist = () => {
+      let q = LA.softmax(z.map(v => v / T));
+      const order = q.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).map(a => a[1]);
+      const keep = new Array(12).fill(false);
+      order.slice(0, K).forEach(i => keep[i] = true);
+      q = q.map((v, i) => keep[i] ? v : 0); let s = q.reduce((a, b) => a + b, 0); q = q.map(v => v / s);
+      let cum = 0; const keep2 = new Array(12).fill(false);
+      for (const i of order) { if (!keep[i]) continue; if (cum >= P) break; keep2[i] = true; cum += q[i]; }
+      q = q.map((v, i) => keep2[i] ? v : 0); s = q.reduce((a, b) => a + b, 0); return q.map(v => v / s);
+    };
+    button("#ctl-samp", "Sample 20", () => { const q = dist(); draws = []; for (let t = 0; t < 20; t++) { let u = R.uniform(), i = 0; while (i < 11 && u > q[i]) { u -= q[i]; i++; } while (q[i] === 0 && i > 0) i--; draws.push(toks[i]); } p.render(); });
+    p.render(p => {
+      const p0 = LA.softmax(z), q = dist();
+      const ymax = Math.max(0.4, Math.max(...q) * 1.15); p.setView(-0.6, 12.2, -0.14 * ymax, ymax);
+      p.line(-0.6, 0, 12.2, 0, { color: "axis", width: 1 });
+      p0.forEach((v, i) => p.rect(i + 0.12, 0, i + 0.88, v, { fill: "muted", fillAlpha: .18, color: "muted", width: 1, dash: [3, 3] }));
+      q.forEach((v, i) => { if (v > 0) p.rect(i + 0.22, 0, i + 0.78, v, { fill: "c1", fillAlpha: .75, color: "c1", width: 1 }); });
+      q.forEach((v, i) => { if (v > 0.004) p.label(i + 0.5, v, v.toFixed(2), { align: "center", dy: -9, font: "11px " + mono }); });
+      toks.forEach((t, i) => p.label(i + 0.5, 0, t, { align: "center", dy: 12, color: q[i] > 0 ? "fg" : "muted", font: "12px sans-serif" }));
+      p.label(12.1, ymax * 0.95, '"The cat sat on the ___"', { align: "right", color: "muted", font: "italic 13px sans-serif" });
+      const H = -q.reduce((a, v) => a + (v > 0 ? v * Math.log(v) : 0), 0), kept = q.filter(v => v > 0).length;
+      out.textContent = `kept ${kept} of 12 tokens   entropy ${H.toFixed(2)} nats (original ${(-p0.reduce((a, v) => a + v * Math.log(v), 0)).toFixed(2)})` + (draws.length ? `\nsamples: ${draws.join(" ")}` : "");
+    });
+  }
+
+  // ---------- fig: beam search ----------
+  {
+    const LM = { "<s>": { the: .5, a: .4, one: .1 }, the: { dog: .45, man: .35, idea: .2 }, a: { cat: .9, dog: .1 }, one: { day: .9, cat: .1 },
+      dog: { barked: .5, ran: .3, ".": .2 }, man: { ran: .6, ".": .4 }, idea: { ".": 1 }, cat: { sat: .8, ran: .2 }, day: { ".": 1 },
+      barked: { ".": 1 }, ran: { ".": .7, away: .3 }, sat: { ".": .9, down: .1 }, away: { ".": 1 }, down: { ".": 1 } };
+    let width = 1, step = 0, levels;
+    const p = new Plot("#fig-beam", { xmin: 0, xmax: 680, ymin: 360, ymax: 0 });
+    const out = document.getElementById("out-beam");
+    // levels[k] = candidates at depth k: {seq:[words], p, parent, kept}
+    function run() {
+      levels = [[{ seq: ["<s>"], p: 1, kept: true, done: false }]];
+      for (let k = 1; k <= 5; k++) {
+        const prev = levels[k - 1].filter(c => c.kept), cand = [];
+        prev.forEach((c, pi) => {
+          if (c.done) { cand.push({ seq: c.seq, p: c.p, from: c, done: true, carried: true }); return; }
+          const last = c.seq[c.seq.length - 1];
+          Object.entries(LM[last]).forEach(([w, q]) => cand.push({ seq: [...c.seq, w], p: c.p * q, q, from: c, done: w === "." }));
+        });
+        cand.sort((a, b) => b.p - a.p); cand.forEach((c, i) => c.kept = i < width);
+        levels.push(cand);
+        if (cand.filter(c => c.kept).every(c => c.done)) break;
+      }
+    }
+    slider("#ctl-beam", { label: "beam width ", min: 1, max: 4, step: 1, value: 1, digits: 0 }, v => { width = v; run(); step = 0; p.render(); });
+    button("#ctl-beam", "Step", () => { step = Math.min(levels.length - 1, step + 1); p.render(); });
+    button("#ctl-beam", "Run all", () => { step = levels.length - 1; p.render(); });
+    button("#ctl-beam", "Reset", () => { step = 0; p.render(); });
+    run(); step = levels.length - 1;
+    p.render(p => {
+      const colW = 128, x0 = 30;
+      const pos = new Map();
+      for (let k = 0; k <= step; k++) {
+        const L = levels[k].filter(c => !c.carried), n = L.length, h = Math.min(44, 320 / Math.max(1, n));
+        L.forEach((c, i) => pos.set(c, [x0 + k * colW, 30 + (i + 0.5) * h + (320 - n * h) / 2]));
+        levels[k].filter(c => c.carried).forEach(c => pos.set(c, pos.get(c.from)));
+      }
+      for (let k = 1; k <= step; k++) levels[k].forEach(c => {
+        if (c.carried) return;
+        const a = pos.get(c.from), b = pos.get(c);
+        p.line(a[0] + 44, a[1], b[0] - 4, b[1], { color: c.kept ? "c2" : "muted", width: c.kept ? 2 : 1, alpha: c.kept ? 1 : .35 });
+        p.label((a[0] + 44 + b[0]) / 2, (a[1] + b[1]) / 2, String(c.q), { align: "center", dy: -7, color: "muted", font: "10px " + mono });
+      });
+      for (let k = 0; k <= step; k++) levels[k].forEach(c => {
+        if (c.carried) return;
+        const [x, y] = pos.get(c), w = c.seq[c.seq.length - 1];
+        p.label(x, y, w === "<s>" ? "start" : w === "." ? ". (end)" : w, { color: c.kept ? "fg" : "muted", font: (c.kept ? "700 " : "") + "13px sans-serif", bg: true });
+        if (k > 0) p.label(x, y + 13, c.p.toFixed(c.p < 0.01 ? 4 : 3), { color: c.kept ? "c2" : "muted", font: "10px " + mono });
+      });
+      const fin = levels[levels.length - 1].filter(c => c.kept).sort((a, b) => b.p - a.p)[0];
+      out.textContent = `step ${step} of ${levels.length - 1}, beam width ${width}${width === 1 ? " (greedy)" : ""}` +
+        (step === levels.length - 1 ? `\nresult: "${fin.seq.slice(1).join(" ")}"  probability ${fin.p.toFixed(4)}  (log-prob ${Math.log(fin.p).toFixed(3)})` :
+          "\nkept: " + levels[step].filter(c => c.kept).map(c => `"${c.seq.slice(1).join(" ")}" ${c.p.toFixed(4)}`).join("   "));
+    });
+  }
+
+  // ---------- fig: KV cache ----------
+  {
+    const words = "To be , or not to be : that is the question".split(" ");
+    let n = 6, cache = true;
+    const p = new Plot("#fig-kv", { xmin: 0, xmax: 680, ymin: 330, ymax: 0 });
+    const out = document.getElementById("out-kv");
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = true;
+    cb.addEventListener("change", () => { cache = cb.checked; p.render(); }); lab.append(cb, " use KV cache"); document.getElementById("ctl-kv").appendChild(lab);
+    let t = 0;
+    const anim = Course.animator(() => { if (++t % 40) return true; if (n >= words.length) return false; n++; p.render(); return true; });
+    button("#ctl-kv", "Play", () => { if (n >= words.length) n = 1; anim.start(); });
+    button("#ctl-kv", "Step", () => { anim.stop(); n = Math.min(words.length, n + 1); p.render(); });
+    button("#ctl-kv", "Reset", () => { anim.stop(); n = 1; p.render(); });
+    const R = Course.rng(4), Kv = words.map(() => Array.from({ length: 8 }, () => R.normal()));
+    p.render(p => {
+      const c = p.ctx, cs = 16, x0 = 90, y0 = 40;
+      p.label(x0, 22, "cached keys K (one row per token)", { color: "muted", font: "12px sans-serif" });
+      for (let i = 0; i < n; i++) {
+        const isNew = i === n - 1, recompute = !cache && !isNew;
+        p.label(x0 - 8, y0 + i * (cs + 3) + cs / 2, words[i], { align: "right", color: isNew ? "c2" : "fg", font: (isNew ? "700 " : "") + "12px " + mono });
+        for (let j = 0; j < 8; j++) {
+          c.fillStyle = withAlpha(isNew ? "c2" : recompute ? "c4" : "c1", 0.25 + 0.55 * Math.abs(Math.tanh(Kv[i][j])));
+          c.fillRect(x0 + j * cs, y0 + i * (cs + 3), cs - 2, cs);
+        }
+        if (recompute) p.label(x0 + 8 * cs + 6, y0 + i * (cs + 3) + cs / 2, "recomputed", { color: "c4", font: "10px sans-serif" });
+        if (!recompute && !isNew) p.label(x0 + 8 * cs + 6, y0 + i * (cs + 3) + cs / 2, "reused", { color: "c1", font: "10px sans-serif" });
+        if (isNew) p.label(x0 + 8 * cs + 6, y0 + i * (cs + 3) + cs / 2, "new: q·K over all rows", { color: "c2", font: "600 10px sans-serif" });
+      }
+      // cumulative cost chart
+      const gx = 400, gy = 290, gw = 260, gh = 230, N = words.length, maxc = N * (N + 1) / 2;
+      p.line(gx, gy, gx + gw, gy, { color: "axis", width: 1 }); p.line(gx, gy, gx, gy - gh, { color: "axis", width: 1 });
+      p.label(gx, gy - gh - 12, "cumulative token-passes", { color: "muted", font: "12px sans-serif" });
+      p.label(gx + gw, gy + 14, "tokens generated n", { align: "right", color: "muted", font: "11px sans-serif" });
+      const X = k => gx + gw * k / N, Y = v => gy - gh * v / maxc;
+      p.path(Array.from({ length: N + 1 }, (_, k) => [X(k), Y(k * (k + 1) / 2)]), { color: "c4", width: 1.2, dash: [3, 3], alpha: .6 });
+      p.path(Array.from({ length: N + 1 }, (_, k) => [X(k), Y(k)]), { color: "c1", width: 1.2, dash: [3, 3], alpha: .6 });
+      p.path(Array.from({ length: n + 1 }, (_, k) => [X(k), Y(cache ? k : k * (k + 1) / 2)]), { color: cache ? "c1" : "c4", width: 3 });
+      p.label(X(N), Y(maxc), "no cache n(n+1)/2", { align: "right", dy: -8, color: "c4", font: "11px sans-serif" });
+      p.label(X(N), Y(N), "cache: n", { align: "right", dy: -10, color: "c1", font: "11px sans-serif" });
+      const total = cache ? n : n * (n + 1) / 2;
+      out.textContent = `generated ${n} token${n > 1 ? "s" : ""}: "${words.slice(0, n).join(" ")}"\n${cache ? "with" : "without"} cache: ${total} token-passes so far (${cache ? "1" : n} this step)`;
+    });
+  }
+
+  // ---------- fig: Chinchilla ----------
+  {
+    const E = 1.69, A = 406.4, B = 410.7, al = 0.34, be = 0.28;
+    const Lf = (lN, lD) => E + A / Math.pow(10, al * lN) + B / Math.pow(10, be * lD);
+    const G = Math.pow(al * A / (be * B), 1 / (al + be));
+    const opt = lC => { const lN = Math.log10(G) + be / (al + be) * (lC - Math.log10(6)); return [lN, lC - Math.log10(6) - lN]; };
+    let lC = 23.5;
+    const p = new Plot("#fig-chin", { xmin: 5.5, xmax: 12.5, ymin: 6.5, ymax: 13.5 });
+    const out = document.getElementById("out-chin");
+    slider("#ctl-chin", { label: "compute budget log₁₀ C ", min: 15, max: 26, step: 0.1, value: lC, digits: 1 }, v => { lC = v; p.render(); });
+    const models = [["GPT-3", 175e9, 300e9], ["Gopher", 280e9, 300e9], ["Chinchilla", 70e9, 1.4e12], ["Llama-2-7B", 7e9, 2e12], ["tiny GPT (lesson 24)", 8.3e5, 1.23e7]];
+    let fieldImg = null;
+    p.render(p => {
+      if (!fieldImg) { p.field((x, y) => Math.log10(Lf(x, y) - E), { cmap: "viridis", vmin: -0.75, vmax: 1.0, res: 5, alpha: 0.85 }); fieldImg = p.ctx.getImageData(0, 0, p.canvas.width, p.canvas.height); }
+      else p.ctx.putImageData(fieldImg, 0, 0);
+      p.contour((x, y) => Lf(x, y), [2.0, 2.2, 2.5, 3.0, 3.5], { color: "#ffffff", width: 0.8, alpha: 0.6 });
+      for (let x = 6; x <= 12; x++) p.label(x, 6.5, "1e" + x, { align: "center", dy: -9, color: "#ffffff", font: "11px " + mono });
+      for (let y = 7; y <= 13; y++) p.label(5.5, y, "1e" + y, { dx: 4, color: "#ffffff", font: "11px " + mono });
+      p.label(12.4, 6.85, "parameters N →", { align: "right", color: "#ffffff", font: "12px sans-serif" });
+      p.label(5.6, 13.3, "tokens D ↑", { color: "#ffffff", font: "12px sans-serif" });
+      // frontier
+      const fr = []; for (let c = 12; c <= 27; c += 0.25) fr.push(opt(c)); p.path(fr, { color: "#ffffff", width: 2.5 });
+      // iso-compute line: lD = lC - log6 - lN
+      const k = lC - Math.log10(6); p.line(5.5, k - 5.5, 12.5, k - 12.5, { color: "#ffffff", width: 1.5, dash: [6, 5] });
+      models.forEach(([name, N, D]) => { const x = Math.log10(N), y = Math.log10(D); p.point(x, y, { r: 5, color: "#ffffff", stroke: "#000000" }); p.label(x, y, name, { dx: name === "Gopher" ? 8 : name === "GPT-3" ? -8 : 8, dy: name === "GPT-3" ? 12 : -9, align: name === "GPT-3" || name === "Llama-2-7B" ? "right" : "left", color: "#ffffff", font: "600 11px sans-serif" }); });
+      const [oN, oD] = opt(lC); p.point(oN, oD, { r: 8, color: "c2", stroke: "#ffffff" });
+      const fmtE = v => { const e = Math.floor(v), m = Math.pow(10, v - e); return `${m.toFixed(2)}e${e}`; };
+      const Lopt = Lf(oN, oD), alt = (f) => Lf(oN + Math.log10(f), oD - Math.log10(f));
+      out.textContent = `C = ${fmtE(lC)} FLOPs → N* = ${fmtE(oN)} params, D* = ${fmtE(oD)} tokens (${Math.pow(10, oD - oN).toFixed(1)} tokens/param), predicted loss ${Lopt.toFixed(3)}\n` +
+        `same compute with a 10× bigger model: ${alt(10).toFixed(3)}    with a 10× smaller model: ${alt(0.1).toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: LoRA / low-rank ----------
+  {
+    const n = 32, R = Course.rng(21);
+    // orthonormal-ish random directions via Gram-Schmidt
+    const gs = k => { const vs = []; for (let i = 0; i < k; i++) { let v = Array.from({ length: n }, () => R.normal()); vs.forEach(u => { const d = LA.dot(u, v); v = v.map((x, j) => x - d * u[j]); }); const nv = LA.norm(v); vs.push(v.map(x => x / nv)); } return vs; };
+    const U = gs(6), Vv = gs(6), sig = [9, 6, 4, 2.5, 1.2, 0.6];
+    const W = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => sig.reduce((s, sg, k) => s + sg * U[k][i] * Vv[k][j], 0) + 0.03 * R.normal()));
+    // one-sided Jacobi SVD: returns {U, S, V} with W = U diag(S) V^T
+    function svd(M) {
+      const m = M.length, c = M[0].length, Aa = M.map(r => r.slice()), V = Array.from({ length: c }, (_, i) => Array.from({ length: c }, (_, j) => +(i === j)));
+      for (let sweep = 0; sweep < 30; sweep++) {
+        let off = 0;
+        for (let i = 0; i < c - 1; i++) for (let j = i + 1; j < c; j++) {
+          let a = 0, b = 0, g = 0; for (let k = 0; k < m; k++) { a += Aa[k][i] ** 2; b += Aa[k][j] ** 2; g += Aa[k][i] * Aa[k][j]; }
+          if (Math.abs(g) < 1e-12 * Math.sqrt(a * b)) continue; off = Math.max(off, Math.abs(g) / Math.sqrt(a * b));
+          const z = (b - a) / (2 * g), t = Math.sign(z || 1) / (Math.abs(z) + Math.sqrt(1 + z * z)), cs = 1 / Math.sqrt(1 + t * t), sn = cs * t;
+          for (let k = 0; k < m; k++) { const x = Aa[k][i], y = Aa[k][j]; Aa[k][i] = cs * x - sn * y; Aa[k][j] = sn * x + cs * y; }
+          for (let k = 0; k < c; k++) { const x = V[k][i], y = V[k][j]; V[k][i] = cs * x - sn * y; V[k][j] = sn * x + cs * y; }
+        }
+        if (off < 1e-10) break;
+      }
+      const S = Array.from({ length: c }, (_, j) => Math.sqrt(Aa.reduce((s, r) => s + r[j] ** 2, 0)));
+      const order = S.map((s, j) => [s, j]).sort((x, y) => y[0] - x[0]).map(x => x[1]);
+      return { S: order.map(j => S[j]), U: order.map(j => Aa.map(r => r[j] / (S[j] || 1))), V: order.map(j => V.map(r => r[j])) };
+    }
+    const D = svd(W);
+    let r = 2;
+    const pa = new Plot("#fig-lora-a", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 }), pb = new Plot("#fig-lora-b", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const ps = new Plot("#fig-lora-s", { xmin: -1, xmax: 17, ymin: -1.2, ymax: 10.5 });
+    const out = document.getElementById("out-lora");
+    slider("#ctl-lora", { label: "rank r ", min: 1, max: 16, step: 1, value: r, digits: 0 }, v => { r = v; pa.render(); });
+    const vmax = Math.max(...W.flat().map(Math.abs));
+    pa.render(p => {
+      p.heatmap(W, { x0: 0.04, x1: 0.96, y0: 0.04, y1: 0.86, cmap: "div", vmin: -vmax, vmax });
+      p.label(0.5, 0.93, "target ΔW (32 × 32)", { align: "center", color: "muted", font: "12px sans-serif" });
+      const Wr = W.map((_, i) => W[0].map((_, j) => { let s = 0; for (let k = 0; k < r; k++) s += D.S[k] * D.U[k][i] * D.V[k][j]; return s; }));
+      pb.render(q => { q.heatmap(Wr, { x0: 0.04, x1: 0.96, y0: 0.04, y1: 0.86, cmap: "div", vmin: -vmax, vmax }); q.label(0.5, 0.93, `best rank-${r} approximation`, { align: "center", color: "muted", font: "12px sans-serif" }); });
+      ps.render(q => {
+        q.line(-1, 0, 17, 0, { color: "axis", width: 1 });
+        D.S.slice(0, 16).forEach((s, i) => q.rect(i + 0.15, 0, i + 0.85, s, { fill: i < r ? "c2" : "muted", fillAlpha: i < r ? .8 : .35, color: i < r ? "c2" : "muted", width: 1 }));
+        q.label(8, 10, "singular values σᵢ", { align: "center", color: "muted", font: "12px sans-serif" });
+        [1, 8, 16].forEach(i => q.label(i - 0.5, 0, String(i), { align: "center", dy: 10, color: "muted", font: "10px sans-serif" }));
+      });
+      const tot = D.S.reduce((a, s) => a + s * s, 0), rest = D.S.slice(r).reduce((a, s) => a + s * s, 0);
+      out.textContent = `rank ${r}: relative error ${Math.sqrt(rest / tot).toFixed(3)}    parameters r(d_in + d_out) = ${r * 64} vs full ${n * n} (${(100 * r * 64 / (n * n)).toFixed(1)}%)\n` +
+        `at d = 4096: ${(r * 8192).toLocaleString()} vs ${(4096 * 4096).toLocaleString()} (${(100 * r * 8192 / 4096 / 4096).toFixed(2)}%)`;
+    });
+  }
+});
+</script>
+</body>
+</html>

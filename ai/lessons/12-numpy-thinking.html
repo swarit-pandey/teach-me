@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NumPy thinking: vectorization & broadcasting</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="12">
+<main>
+
+<div class="kicker">Part 4 · Machine learning in code</div>
+<h1>NumPy thinking: vectorization &amp; broadcasting</h1>
+<p class="lede">Every model in the rest of this course is a few lines of array code: a matrix multiply, a broadcasted add, a reduction. Writing that code well is a skill of its own. You stop thinking "for each row, for each column" and start thinking in whole arrays and their <em>shapes</em>. This lesson builds that habit from the bottom up, starting with how an array actually sits in memory.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Explain an array as <em>buffer + shape + strides + dtype</em>, and predict which operations are free views and which copy.</li>
+    <li>Say exactly which index disappears when you reduce with <code>axis=k</code>, and use <code>keepdims</code> to keep shapes compatible.</li>
+    <li>Apply the three broadcasting rules in your head, and spot the classic <code>(n,)</code> vs <code>(n,1)</code> bug.</li>
+    <li>Use boolean and fancy indexing, and replace Python loops with vectorized code that runs 100–1000× faster.</li>
+    <li>Read and write <code>np.einsum</code> as a compact notation for any sum of products.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="arrays">1. An array is a typed block of memory</h2>
+<p>A Python list of floats is a list of <em>pointers</em> to separate float objects scattered around the heap. Each one carries a type tag and a reference count. A NumPy array is the opposite: <b>one contiguous block of raw bytes</b>, plus a small header that says how to read it. The header has four parts:</p>
+<table>
+  <tr><th>Field</th><th>Example</th><th>Meaning</th></tr>
+  <tr><td><code>dtype</code></td><td><code>float64</code></td><td>how to read each element: 8 bytes, IEEE double</td></tr>
+  <tr><td><code>shape</code></td><td><code>(3, 4)</code></td><td>the logical grid: 3 rows, 4 columns. <code>ndim</code> = <code>len(shape)</code></td></tr>
+  <tr><td><code>strides</code></td><td><code>(32, 8)</code></td><td>bytes to jump to move one step along each axis</td></tr>
+  <tr><td>data pointer</td><td>(an address)</td><td>where element <code>[0, 0]</code> lives in the buffer</td></tr>
+</table>
+<p>Because every element has the same type and size, the CPU can stream through the buffer without asking "what is this object?" at each step. That single fact explains most of NumPy's speed (section 6).</p>
+<p>The <b>dtype</b> matters in ML more than you might expect. <code>float64</code> is NumPy's default; deep learning mostly uses <code>float32</code>, and large models train in 16-bit formats (<code>float16</code>, <code>bfloat16</code>) to halve memory and double throughput. Integer arrays (<code>int64</code>) hold labels and token ids. Mixing dtypes silently <em>upcasts</em>: <code>int + float</code> gives float, and <code>float32 + float64</code> gives <code>float64</code>.</p>
+
+<div class="example">
+  <div class="label">Worked example: how big is a batch?</div>
+  <p>A batch of 64 RGB images at 224×224 is an array of shape <code>(64, 3, 224, 224)</code>. It has $64\cdot 3\cdot 224\cdot 224 = 9{,}633{,}792$ elements. In <code>float32</code> (4 bytes each) that's $38{,}535{,}168$ bytes, about 38.5 MB. In <code>float64</code> it's 77 MB. Same numbers, twice the memory and twice the memory traffic. That's why frameworks default to 32-bit.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="strides">2. Memory layout and strides</h2>
+<p>Memory is one-dimensional. A 2-D array has to be flattened somehow. NumPy's default is <b>row-major</b> ("C order"): row 0 first, then row 1, and so on. To find element $[i, j]$ you jump $i$ rows and $j$ columns:</p>
+$$\text{byte offset of } a[i,j] = \text{offset} + i\cdot s_0 + j\cdot s_1,$$
+<p>where $(s_0, s_1)$ are the <b>strides</b>. For a <code>float64</code> array of shape $(3,4)$, moving one column is 8 bytes and moving one row skips 4 elements, so the strides are $(32, 8)$.</p>
+<p>Here's the payoff. Many operations don't touch the data at all. They just write a new header over the <em>same</em> buffer. That new header is called a <b>view</b>. Transposing swaps the strides to $(8, 32)$. Taking every other column doubles the column stride. Reversing the rows makes a stride <em>negative</em>. All of these are $O(1)$, no matter how big the array.</p>
+
+<div class="figure">
+  <canvas id="fig-mem" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-mem"></div>
+  <div class="readout" id="out-mem"></div>
+  <div class="caption"><b>Try it:</b> pick a view of <code>a = np.arange(12.).reshape(3, 4)</code> and click any cell of the logical grid. The strip at the bottom is the actual buffer: the numbers above it show the order in which the view visits memory. With <code>a.T</code>, look at how the traversal jumps around instead of streaming left to right. Then pick <code>a.T.copy()</code>: a new buffer appears, laid out in the transposed order.</div>
+</div>
+
+<p>Two flags summarize the layout. A view is <b>C-contiguous</b> if walking it in row-major order visits consecutive memory, and <b>F-contiguous</b> (Fortran order) if walking it column by column does. <code>a.T</code> of a C-contiguous array is F-contiguous. Some operations need contiguous input. <code>reshape</code> on a non-contiguous view, for instance, may be forced to copy. Contiguity also matters for speed, because the CPU loads memory in 64-byte cache lines. Streaming through consecutive addresses uses all 8 doubles on each line. Jumping by a large stride uses one double and wastes the rest.</p>
+
+<div class="callout ml">
+<p>PyTorch tensors work exactly the same way: storage + sizes + strides + offset (lesson 19). <code>x.T</code>, <code>x[:, ::2]</code> and <code>x.view(...)</code> are free. The occasional error <em>"view size is not compatible with input tensor's size and stride"</em> is this section in action: you asked for a reshape that strides can't express, so you need <code>.contiguous()</code> or <code>.reshape</code>, which copies.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="axes">3. Axes and reductions</h2>
+<p>A <b>reduction</b> such as <code>sum</code>, <code>mean</code>, <code>max</code> or <code>argmax</code> collapses an axis. The one rule to remember:</p>
+<div class="callout key">
+<p><code>X.sum(axis=k)</code> sums over index $k$, so <b>axis $k$ disappears from the shape</b>. For $X$ of shape $(4, 5)$, <code>axis=0</code> sums down the columns, giving shape $(5,)$, one number per column. <code>axis=1</code> sums along the rows, giving shape $(4,)$, one number per row. In formulas, <code>X.sum(axis=0)</code> is $\sum_i X_{ij}$, a function of $j$ only.</p>
+</div>
+<p>People find "axis 0 gives per-column results" backwards at first. Read it as "the axis you name is the one you sum <em>over</em>". In ML your data matrix is usually $(n, d)$ with one example per row, so <code>X.mean(axis=0)</code> is the mean feature vector (average over examples) and <code>X.sum(axis=1)</code> gives a per-example total.</p>
+<p><code>keepdims=True</code> keeps the reduced axis with length 1: shape $(4,5) \to (1,5)$ instead of $(5,)$. That small difference decides whether the result broadcasts back against $X$ the way you want (next section).</p>
+
+<div class="figure">
+  <canvas id="fig-axis" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-axis"></div>
+  <div class="readout" id="out-axis"></div>
+  <div class="caption"><b>Try it:</b> choose an axis and an operation, then press <b>squash</b> to watch the cells collapse along that axis into the result. Notice which dimension of the shape vanishes. Toggle <code>keepdims</code> and watch the result keep a length-1 axis instead.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="broadcasting">4. Broadcasting</h2>
+<p>You constantly need to combine arrays of different shapes. Subtract the column means $(d,)$ from a data matrix $(n,d)$. Add a bias $(k,)$ to every row of $(n,k)$ activations. Compare every point with every other point. <b>Broadcasting</b> is NumPy's rule for when such an operation is allowed and what it means. Compare the shapes <b>from the right</b>:</p>
+<ol>
+  <li>If the shapes have different lengths, pad the shorter one on the <b>left</b> with 1s.</li>
+  <li>Two dimensions are compatible if they are <b>equal</b>, or if <b>one of them is 1</b>.</li>
+  <li>A dimension of size 1 is <b>stretched</b> (virtually repeated) to match the other. The result has the larger size in every dimension.</li>
+</ol>
+<p>If any pair of dimensions fails rule 2, you get <code>ValueError: operands could not be broadcast together</code>. The stretching is free. NumPy implements it as a view with <b>stride 0</b> along the stretched axis, so the "copies" never exist in memory.</p>
+
+<div class="figure">
+  <canvas id="fig-bcast" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-bcast"></div>
+  <div class="readout" id="out-bcast"></div>
+  <div class="caption"><b>Try it:</b> choose shapes for <code>A</code> and <code>B</code>. The table aligns them from the right. Solid cells are real data; faded cells are the virtual copies broadcasting creates. Try <code>(3,1) + (1,4)</code>: two thin arrays make a full 3×4 table, the "outer sum" trick behind every pairwise computation. Then try <code>(3,4) + (3,)</code> and see why it fails.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: all pairwise distances, no loops</div>
+  <p>Take $X$ with shape $(n, d)$ ($n$ points) and $Y$ with shape $(m, d)$. We want $D_{ij} = \|\mathbf{x}_i - \mathbf{y}_j\|^2$ with shape $(n, m)$.</p>
+  <p>Step 1: insert axes so the shapes line up for an "every $i$ with every $j$" table. <code>X[:, None, :]</code> has shape $(n, 1, d)$ and <code>Y[None, :, :]</code> has shape $(1, m, d)$.</p>
+  <p>Step 2: subtract. Aligning from the right, $d$ matches $d$, $1$ stretches to $m$, and $n$ meets the stretched 1. The result is $(n, m, d)$, and entry $[i,j,:]$ is $\mathbf{x}_i - \mathbf{y}_j$.</p>
+  <p>Step 3: square and <code>.sum(axis=-1)</code>. The last axis ($d$) disappears, leaving $(n, m)$. ✓</p>
+  <p>The catch is that the intermediate has $nmd$ numbers. Expanding $\|\mathbf{x}-\mathbf{y}\|^2 = \|\mathbf{x}\|^2 + \|\mathbf{y}\|^2 - 2\,\mathbf{x}\cdot\mathbf{y}$ (lesson 01, problem 5) avoids it. That gives one matrix multiply $XY^\top$ of shape $(n,m)$, plus <code>sq_x[:, None] + sq_y[None, :]</code>, another outer sum. You'll write both in the workbook.</p>
+</div>
+
+<div class="callout warning">
+<p><b>The classic broadcasting bug.</b> Suppose <code>y</code> has shape <code>(100, 1)</code> (a column you loaded from a file) and your predictions <code>y_hat</code> have shape <code>(100,)</code>. Then <code>y - y_hat</code> has shape <b><code>(100, 100)</code></b>: every target minus every prediction. <code>np.mean((y - y_hat)**2)</code> happily returns a number, but it's the wrong one, and you get no error. Your linear regression (lesson 13) will train to garbage. Defense: assert shapes, and use <code>keepdims</code> or <code>.ravel()</code> deliberately.</p>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: row-wise softmax, numerically stable</div>
+  <p>Given logits $Z$ of shape $(n, K)$ (one row per example), softmax each row: $P_{ik} = e^{Z_{ik}} / \sum_{k'} e^{Z_{ik'}}$. With logits around 1000, <code>np.exp</code> overflows to <code>inf</code> and you get <code>inf/inf = nan</code>. The fix rests on one identity. For any constant $c$,</p>
+  $$\frac{e^{z_k - c}}{\sum_{k'} e^{z_{k'} - c}} = \frac{e^{-c}\,e^{z_k}}{e^{-c}\sum_{k'} e^{z_{k'}}} = \frac{e^{z_k}}{\sum_{k'} e^{z_{k'}}}.$$
+  <p>Pick $c = \max_k z_k$. Then the largest exponent is $e^0 = 1$, so nothing overflows, and the denominator is at least 1, so nothing divides by zero. In code, shapes are the whole story:</p>
+<pre><code>Z = Z - Z.max(axis=1, keepdims=True)   # (n,K) - (n,1): per-row shift
+E = np.exp(Z)                          # (n,K)
+P = E / E.sum(axis=1, keepdims=True)   # (n,K) / (n,1)</code></pre>
+  <p>Drop <code>keepdims</code> and the second line becomes $(n,K) - (n,)$. That's an error when $n \ne K$. When $n = K$ it's a <em>silent wrong answer</em>, because each row gets shifted by some other row's max. You'll reuse this softmax in lessons 14, 22 and 24.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="indexing">5. Fancy and boolean indexing; views vs copies</h2>
+<p>Indexing comes in two kinds, and the difference is exactly the view/copy line from section 2:</p>
+<ul>
+  <li><b>Basic indexing</b> uses integers, slices <code>start:stop:step</code>, <code>None</code> and <code>...</code>. The result can always be described by a new offset, shape and strides, so it's a <b>view</b>. Writing into it writes into the original.</li>
+  <li><b>Advanced indexing</b> uses an integer array (<b>fancy</b>) or a boolean array (<b>mask</b>). The selected elements can be in any order, can repeat, and can be any subset. No stride pattern can describe that, so the result is a <b>copy</b>.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-mask" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-mask"></div>
+  <div class="readout" id="out-mask"></div>
+  <div class="caption"><b>Try it:</b> in mask mode, drag the threshold and watch <code>x &gt; t</code> pick out elements into a new, shorter array. Switch to fancy mode: indices can repeat and come in any order, so the output can't be a strided view of <code>x</code>. The <code>np.where</code> mode keeps the shape and chooses element-wise between two arrays.</div>
+</div>
+
+<table>
+  <tr><th>Expression</th><th>View or copy?</th><th>Why</th></tr>
+  <tr><td><code>a[1:3]</code>, <code>a[:, ::2]</code>, <code>a.T</code>, <code>a[None]</code></td><td>view</td><td>new strides/offset over the same buffer</td></tr>
+  <tr><td><code>a.reshape(...)</code></td><td>view <em>if possible</em></td><td>copies when strides can't express it</td></tr>
+  <tr><td><code>a[[0, 2]]</code>, <code>a[a &gt; 0]</code></td><td>copy</td><td>arbitrary selection</td></tr>
+  <tr><td><code>a.flatten()</code>, <code>a.copy()</code>, <code>a + 0</code></td><td>copy</td><td>always new memory</td></tr>
+  <tr><td><code>a[a &gt; 0] = 0</code>, <code>a[[0, 2]] += 1</code></td><td>in-place write</td><td>indexing on the <em>left</em> of <code>=</code> modifies <code>a</code></td></tr>
+</table>
+<p>Two indexing idioms you'll use in nearly every lesson from here on. One-hot encoding: <code>O = np.zeros((n, K)); O[np.arange(n), y] = 1</code>. Picking each example's probability of its true class (cross-entropy, lesson 14): <code>P[np.arange(n), y]</code>. Both pair row $i$ with column $y_i$.</p>
+
+<!-- ============================================================ -->
+<h2 id="vectorize">6. Vectorization vs loops</h2>
+<p>"Vectorize" means replacing a Python loop over elements with one call that loops in compiled C. The speedups are not small. These are measured numbers from a laptop (Apple M4 Pro, Python 3.14, NumPy 2.5, best of several runs):</p>
+
+<div class="figure">
+  <canvas id="fig-time" width="680" height="270"></canvas>
+  <div class="controls" id="ctl-time"></div>
+  <div class="caption"><b>Try it:</b> switch benchmarks. The axis is <em>logarithmic</em>: each gridline is 10× slower. Note that looping in Python over a <em>NumPy array</em> is even slower than looping over a list, since every <code>x[i]</code> boxes a fresh Python float. Numbers will differ on your machine; the ratios are what matter.</div>
+</div>
+
+<p>Where does a 500× gap come from? A Python <code>s += v*v</code> runs through the interpreter. Every iteration means fetching bytecode, checking the types of <code>s</code> and <code>v</code>, allocating a result object and updating reference counts: tens of nanoseconds of bookkeeping for one nanosecond of arithmetic. A NumPy reduction does the type check <em>once</em>, then runs a tight compiled loop over contiguous typed memory. The CPU's SIMD units do 2–8 multiplies per instruction, and the prefetcher streams the cache lines in ahead of time. Matrix multiply goes further. <code>@</code> calls BLAS, which tiles the problem to fit the caches and uses every core. That's how a 128×128 matmul gets about 3600× faster than a triple loop.</p>
+<div class="callout intuition">
+<p>The rule of thumb: <b>Python is for orchestration, arrays are for arithmetic.</b> A loop over 10 epochs or 5 hyperparameters is fine. A loop over a million elements, or over the rows of a data matrix, is a smell. Look for the broadcasting or reduction that expresses it in one shot. Be careful with memory, though. The broadcast version of pairwise distances built a $500\times500\times16$ intermediate. At $n=m=10{,}000$, $d=128$ that would be 102 GB (problem 5).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="einsum">7. einsum: one notation for every sum of products</h2>
+<p>Dot products, matrix–vector products, matmul, batched matmul, outer products, traces, transposes: each is "multiply some entries and sum over some indices". Physicists write these in <b>Einstein notation</b>: name every index, and any index that doesn't appear in the output gets summed. <code>np.einsum</code> takes exactly that:</p>
+$$C_{ik} = \sum_j A_{ij} B_{jk} \quad\Longleftrightarrow\quad \texttt{np.einsum("ij,jk->ik", A, B)}$$
+<p>Read the spec as nested loops. Every letter is a loop variable. Letters on the right of <code>-&gt;</code> are <b>free</b> and index the output. Letters that appear only on the left are <b>summed</b>. The body multiplies one entry from each operand and accumulates.</p>
+
+<div class="figure">
+  <canvas id="fig-einsum" width="680" height="210"></canvas>
+  <div class="controls" id="ctl-einsum"></div>
+  <div class="readout" id="out-einsum"></div>
+  <div class="caption"><b>Try it:</b> step through the specs. Free indices are blue and summed ones pink. The readout shows the equivalent loop nest and the everyday NumPy spelling. Note <code>ii-&gt;i</code> (diagonal) and <code>ij-&gt;ji</code> (transpose): no sum at all, just re-indexing.</div>
+</div>
+
+<div class="callout ml">
+<p>Attention scores in a transformer (lesson 22) are <code>einsum("bhtd,bhsd-&gt;bhts", Q, K)</code>: batch $b$, head $h$, query position $t$, key position $s$, summed over the feature dimension $d$. Once you can read that string, you can read the core of any transformer implementation. Write it out for your own shapes. It documents itself.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+<p>Work these out with pencil and paper first, then check in a Python shell. Predicting shapes before running the code is the skill being trained.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Let <code>a = np.arange(12, dtype=np.float64).reshape(3, 4)</code>, with strides $(32, 8)$. What are the strides (in bytes) of <code>a[::2, 1:]</code>? Enter them as two numbers.</p>
+<div class="numcheck" data-answer="64,8"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Taking every second row doubles the row stride: $2\times32 = 64$. Starting at column 1 only changes the <em>offset</em> (by 8 bytes), not the column stride, which stays 8. So the strides are $(64, 8)$ and the shape is $(2, 3)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Same array. At what byte offset from the start of the buffer does <code>a[2, 1]</code> live? And what about <code>a.T[1, 2]</code>?</p>
+<div class="numcheck" data-answer="72"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$2\cdot 32 + 1\cdot 8 = 72$. That's element number 9, and indeed <code>a[2,1] == 9</code>. For the transpose, the strides are $(8, 32)$, so <code>a.T[1, 2]</code> is at $1\cdot8 + 2\cdot32 = 72$: the same element, as it must be.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>What is the shape of <code>A + B</code> if <code>A.shape == (8, 1, 6, 1)</code> and <code>B.shape == (7, 1, 5)</code>? Enter the four dimensions.</p>
+<div class="numcheck" data-answer="8,7,6,5"></div>
+<details class="hint"><summary>Hint</summary><p>Pad B on the left to $(1, 7, 1, 5)$, then compare dimension by dimension.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Align: $(8,1,6,1)$ against $(1,7,1,5)$. Each pair has a 1 in it or is equal: $8/1 \to 8$, $1/7\to7$, $6/1\to6$, $1/5\to5$. Result $(8,7,6,5)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Let <code>x = np.array([[1, 2, 3], [4, 5, 6]])</code>. Compute <code>x.sum(axis=0)</code> (enter the three numbers), then say what <code>x.max(axis=1)</code> and <code>x.mean(axis=0, keepdims=True).shape</code> are.</p>
+<div class="numcheck" data-answer="5,7,9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Axis 0 (the row index) disappears, so you sum down each column: $(1+4, 2+5, 3+6) = (5, 7, 9)$. <code>x.max(axis=1)</code> is the max of each row, <code>[3, 6]</code>. With <code>keepdims</code> the mean has shape $(1, 3)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>You compute pairwise distances by broadcasting, <code>X[:, None, :] - Y[None, :, :]</code>, with $n = m = 10{,}000$ points in $d = 128$ dimensions, in float64. How many gigabytes (10⁹ bytes) does the intermediate need? How big is the final $(n, m)$ matrix?</p>
+<div class="numcheck" data-answer="102.4" data-tol="0.01"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$10^4\cdot10^4\cdot128\cdot 8 = 1.024\times10^{11}$ bytes, or 102.4 GB. The output is $10^8 \cdot 8$ bytes, 0.8 GB. The Gram-matrix trick $\|\mathbf{x}\|^2 + \|\mathbf{y}\|^2 - 2XY^\top$ never builds the 3-D tensor, so it needs about 0.8 GB. That's why every serious library uses it.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · proof</span>
+<p>Define $\operatorname{logsumexp}(\mathbf{z}) = \log\sum_k e^{z_k}$. Show that $\operatorname{logsumexp}(\mathbf{z}) = m + \log\sum_k e^{z_k - m}$ for $m = \max_k z_k$, and that the right-hand side never overflows. Then show that $\log \operatorname{softmax}(\mathbf{z})_k = z_k - \operatorname{logsumexp}(\mathbf{z})$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\sum_k e^{z_k} = e^m \sum_k e^{z_k - m}$. Take logs: $\log e^m + \log\sum_k e^{z_k-m} = m + \log\sum_k e^{z_k-m}$. Each $z_k - m \le 0$, so each term is in $(0,1]$, and the term for the max equals 1. So the sum lies in $[1, K]$ and its log in $[0, \log K]$: no overflow, and no <code>log(0)</code>. Finally, $\log\frac{e^{z_k}}{\sum e^{z_{k'}}} = z_k - \log\sum e^{z_{k'}}$. This "log-softmax" is how cross-entropy is computed in practice (lesson 14). You never form the probabilities and then take their log.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p><code>y.shape == (100, 1)</code> and <code>y_hat.shape == (100,)</code>. What is the shape of <code>y - y_hat</code>? Write a one-line expression for what <code>np.mean((y - y_hat)**2)</code> actually computes, and give two ways to fix it.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$(100, 100)$: entry $[i,j] = y_i - \hat y_j$. The mean is $\frac{1}{100^2}\sum_{i,j}(y_i - \hat y_j)^2$, the average over <em>all pairs</em>, not matched pairs. Fixes: <code>y = y.ravel()</code> (or <code>y[:, 0]</code>), or <code>y_hat = y_hat[:, None]</code>. Add <code>assert y.shape == y_hat.shape</code> to your loss function and this bug can never come back.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>Write <code>np.einsum</code> specs for: (a) the trace of a square matrix; (b) the row-wise dot products of two $(n,d)$ arrays, giving $(n,)$; (c) the outer product of two vectors; (d) attention scores for $Q$ of shape $(b, t, d)$ and $K$ of shape $(b, s, d)$, giving $(b, t, s)$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) <code>"ii-&gt;"</code>. (b) <code>"nd,nd-&gt;n"</code>, the same as <code>(A*B).sum(1)</code>. (c) <code>"i,j-&gt;ij"</code>, the same as <code>u[:, None] * v[None, :]</code>. (d) <code>"btd,bsd-&gt;bts"</code>, the same as <code>Q @ K.transpose(0, 2, 1)</code>. In each case $d$ (or $i$ in (a)) is the index that is missing from the output and therefore summed.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>Let <code>x</code> be a contiguous <code>float32</code> array of length 10. You want the $(7, 4)$ array whose row $i$ is <code>x[i:i+4]</code> as a <em>view</em>, built with <code>as_strided</code>. What strides (bytes) do you pass?</p>
+<div class="numcheck" data-answer="4,4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Moving one column means moving one element: 4 bytes. Moving one row means the window starts one element later: also 4 bytes. So the strides are $(4, 4)$. Rows <em>overlap</em> in memory, which no copy could do. 28 logical elements are backed by just 10 stored ones. Write into it and you'd change several rows at once, which is why the workbook makes it read-only.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">Which of these returns a view of <code>a</code> (no copy)?</div>
+  <div class="opts">
+    <button data-k="a"><code>a[a &gt; 0]</code></button>
+    <button data-k="b"><code>a[:, 1:3]</code></button>
+    <button data-k="c"><code>a[[0, 2]]</code></button>
+    <button data-k="d"><code>a.flatten()</code></button>
+  </div>
+  <div class="explain">Slices are basic indexing: same buffer, new offset and strides. Boolean and integer-array indexing select arbitrary elements and must copy. <code>flatten</code> always copies; <code>ravel</code> returns a view when it can.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q"><code>X.shape == (32, 10)</code>. You want to subtract each <em>row's</em> mean from that row. Which line is correct?</div>
+  <div class="opts">
+    <button data-k="a"><code>X - X.mean(axis=1)</code></button>
+    <button data-k="b"><code>X - X.mean(axis=1, keepdims=True)</code></button>
+    <button data-k="c"><code>X - X.mean(axis=0)</code></button>
+    <button data-k="d"><code>X - X.mean()</code></button>
+  </div>
+  <div class="explain"><code>X.mean(axis=1)</code> has shape $(32,)$, which aligns with the trailing 10, so (a) raises an error. With <code>keepdims</code> it's $(32,1)$, which stretches across the columns. (c) subtracts column means. That's a different (also common) operation. (d) subtracts one global scalar.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Why is <code>x @ x</code> hundreds of times faster than a Python loop accumulating <code>v*v</code>, even on one core?</div>
+  <div class="opts">
+    <button data-k="a">NumPy secretly runs it on the GPU.</button>
+    <button data-k="b">NumPy caches the answer from the last time you called it.</button>
+    <button data-k="c">The loop pays interpreter overhead (dispatch, type checks, boxing) per element; NumPy checks types once and runs a compiled SIMD loop over contiguous memory.</button>
+    <button data-k="d">Python floats are less precise, so they take longer.</button>
+  </div>
+  <div class="explain">The arithmetic is the same. The difference is bookkeeping per element, plus SIMD and cache-friendly streaming. Plain NumPy never uses the GPU.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">In <code>np.einsum("bij,bjk-&gt;bik", A, B)</code>, which index is summed over?</div>
+  <div class="opts">
+    <button data-k="a"><code>j</code></button>
+    <button data-k="b"><code>b</code></button>
+    <button data-k="c"><code>i</code> and <code>k</code></button>
+    <button data-k="d">none: einsum only multiplies</button>
+  </div>
+  <div class="explain">Only <code>j</code> is missing from the output, so it's summed. <code>b</code> appears in both inputs <em>and</em> the output, so it's a batch index that's matched but not summed. This is batched matmul.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Idea</th><th>Rule</th><th>Use it for</th></tr>
+  <tr><td>Array</td><td>buffer + dtype + shape + strides + offset</td><td>predicting cost and views</td></tr>
+  <tr><td>Strides</td><td>offset $= \sum_k i_k s_k$</td><td>transpose, slicing and broadcasting are free</td></tr>
+  <tr><td>Reduction</td><td><code>axis=k</code> removes axis $k$; <code>keepdims</code> leaves a 1</td><td>means, sums, norms per row/column</td></tr>
+  <tr><td>Broadcasting</td><td>align right, pad with 1s, 1 stretches</td><td>biases, centering, outer sums, pairwise tables</td></tr>
+  <tr><td>Indexing</td><td>basic → view; fancy/boolean → copy</td><td>one-hot, picking true-class probabilities, masks</td></tr>
+  <tr><td>Vectorization</td><td>loops in C, not Python</td><td>100–1000× speedups</td></tr>
+  <tr><td>einsum</td><td>letters missing from output are summed</td><td>any contraction, readable attention code</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 12: build it</h3>
+  <p>Open <code>workbooks/12_numpy_thinking/exercises.py</code>. You'll write a pairwise distance matrix two ways (broadcasting and the Gram trick), a row-wise stable <code>softmax</code>, column <code>standardize</code>, <code>one_hot</code>, <code>top_k</code> per row, outlier clipping with masks, batched matmul and bilinear scores with <code>einsum</code>, and zero-copy <code>sliding_windows</code> built from strides. Every test compares you against a slow loop reference. Grade yourself with:</p>
+  <pre><code>./course check 12</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>NumPy user guide: "Broadcasting" and "Copies and views" (numpy.org/doc).</li>
+  <li>Stéfan van der Walt et al., "The NumPy array: a structure for efficient numerical computation" (2011).</li>
+  <li>Jake VanderPlas, <em>Python Data Science Handbook</em>, ch. 2.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt } = Course;
+  // helpers: pixel-like world with y measured from the top
+  const box = (p, x, yt, w, h, o) => p.rect(x, p.ymax - yt - h, x + w, p.ymax - yt, o);
+  const txt = (p, x, yt, s, o = {}) => p.label(x, p.ymax - yt, s, o);
+  const mono = "12px ui-monospace, Menlo, monospace";
+
+  // ---------- fig: memory layout & strides ----------
+  {
+    const W = 680, H = 400, p = new Plot("#fig-mem", { xmin: 0, xmax: W, ymin: 0, ymax: H });
+    const base = [...Array(12).keys()];
+    const views = {
+      "a": { shape: [3, 4], st: [4, 1], off: 0 },
+      "a.T": { shape: [4, 3], st: [1, 4], off: 0 },
+      "a[:, ::2]": { shape: [3, 2], st: [4, 2], off: 0 },
+      "a[1:, 1:3]": { shape: [2, 2], st: [4, 1], off: 5 },
+      "a[::-1]": { shape: [3, 4], st: [-4, 1], off: 8 },
+      "a.reshape(4, 3)": { shape: [4, 3], st: [3, 1], off: 0 },
+      "a.T.copy()": { shape: [4, 3], st: [3, 1], off: 0, copy: [0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11] },
+    };
+    let cur = "a.T", sel = [1, 2];
+    select("#ctl-mem", "view: ", Object.keys(views).map(k => [k, k]), v => { cur = v; sel = [0, 0]; p.render(); }).value = cur;
+    const out = document.getElementById("out-mem");
+    const gx = 40, gy = 50, cw = 50, ch = 38, mx = 40, my = 300, mw = 50, mh = 40;
+    p.onClick = (x, y) => {
+      const v = views[cur], j = Math.floor((x - gx) / cw), i = Math.floor((H - y - gy) / ch);
+      if (i >= 0 && j >= 0 && i < v.shape[0] && j < v.shape[1]) { sel = [i, j]; p.render(); }
+    };
+    p.render(p => {
+      const v = views[cur], buf = v.copy || base, addr = (i, j) => v.off + i * v.st[0] + j * v.st[1];
+      txt(p, gx, gy - 22, "logical view: " + cur + "   shape (" + v.shape.join(", ") + ")", { color: "muted", font: "12px sans-serif" });
+      const order = {}; let k = 0;
+      for (let i = 0; i < v.shape[0]; i++) for (let j = 0; j < v.shape[1]; j++) {
+        const a = addr(i, j), isSel = i === sel[0] && j === sel[1]; order[a] = k++;
+        box(p, gx + j * cw, gy + i * ch, cw - 4, ch - 4, { fill: isSel ? "c2" : "c1", fillAlpha: isSel ? .55 : .14, color: isSel ? "c2" : "c1", width: 1.2 });
+        txt(p, gx + j * cw + (cw - 4) / 2, gy + i * ch + (ch - 4) / 2, String(buf[a]), { align: "center", font: "600 13px ui-monospace, Menlo, monospace" });
+      }
+      // info panel
+      const C = v.st[1] === 1 && (v.shape[0] === 1 || v.st[0] === v.shape[1]), F = v.st[0] === 1 && (v.shape[1] === 1 || v.st[1] === v.shape[0]);
+      const info = [
+        "dtype     float64 (8 bytes)",
+        "shape     (" + v.shape.join(", ") + ")",
+        "strides   (" + v.st.map(s => s * 8).join(", ") + ") bytes",
+        "offset    " + v.off * 8 + " bytes",
+        "C-contig  " + C + "    F-contig  " + F,
+        v.copy ? "NEW buffer (copy)" : "same buffer as a (view)",
+      ];
+      info.forEach((s, r) => txt(p, 330, gy + 8 + r * 24, s, { font: mono, color: r === 5 ? (v.copy ? "c4" : "ok") : "fg" }));
+      // memory strip
+      txt(p, mx, my - 44, (v.copy ? "new buffer" : "buffer of a") + " (byte offsets below; traversal order above)", { color: "muted", font: "12px sans-serif" });
+      const sa = addr(sel[0], sel[1]);
+      for (let m = 0; m < 12; m++) {
+        const used = m in order, isSel = m === sa;
+        box(p, mx + m * mw, my, mw - 3, mh, { fill: isSel ? "c2" : used ? "c1" : "muted", fillAlpha: isSel ? .55 : used ? .22 : .06, color: isSel ? "c2" : used ? "c1" : "muted", width: 1 });
+        txt(p, mx + m * mw + (mw - 3) / 2, my + mh / 2, String(buf[m]), { align: "center", font: "600 13px ui-monospace, Menlo, monospace", color: used ? "fg" : "muted" });
+        txt(p, mx + m * mw + (mw - 3) / 2, my + mh + 12, String(m * 8), { align: "center", font: "10px ui-monospace, Menlo, monospace", color: "muted" });
+        if (used) txt(p, mx + m * mw + (mw - 3) / 2, my - 12, "#" + order[m], { align: "center", font: "11px ui-monospace, Menlo, monospace", color: "c1" });
+      }
+      // traversal path
+      const pts = []; for (let i = 0; i < v.shape[0]; i++) for (let j = 0; j < v.shape[1]; j++) pts.push(addr(i, j));
+      for (let t = 0; t + 1 < pts.length; t++) {
+        const x0 = mx + pts[t] * mw + mw / 2, x1 = mx + pts[t + 1] * mw + mw / 2, yy = H - my - mh - 26;
+        const peak = yy - 4 - Math.min(26, Math.abs(x1 - x0) / 8);
+        p.path([[x0, yy], [(x0 + x1) / 2, peak], [x1, yy]], { color: "c1", width: 1, alpha: .35 });
+      }
+      // connector
+      const cx = gx + sel[1] * cw + (cw - 4) / 2, cy = H - (gy + sel[0] * ch + ch - 4);
+      p.line(cx, cy, mx + sa * mw + (mw - 3) / 2, H - my, { color: "c2", width: 1.5, dash: [4, 4] });
+      out.textContent = `${cur}[${sel[0]}, ${sel[1]}]  ->  byte ${v.off * 8} + ${sel[0]}·(${v.st[0] * 8}) + ${sel[1]}·(${v.st[1] * 8}) = ${sa * 8}   (value ${buf[sa]})`;
+    });
+  }
+
+  // ---------- fig: axis reductions ----------
+  {
+    const W = 680, H = 380, p = new Plot("#fig-axis", { xmin: 0, xmax: W, ymin: 0, ymax: H });
+    const R = Course.rng(3), M = [...Array(4)].map(() => [...Array(5)].map(() => R.int(10)));
+    let axis = "0", op = "sum", keep = false, t = 0;
+    const ops = { sum: a => a.reduce((s, x) => s + x, 0), mean: a => a.reduce((s, x) => s + x, 0) / a.length, max: a => Math.max(...a), argmax: a => a.indexOf(Math.max(...a)) };
+    select("#ctl-axis", "axis ", [["0", "axis=0"], ["1", "axis=1"], ["none", "axis=None"]], v => { axis = v; t = 0; anim.stop(); p.render(); });
+    select("#ctl-axis", "op ", Object.keys(ops).map(k => [k, k]), v => { op = v; p.render(); });
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox";
+    cb.addEventListener("change", () => { keep = cb.checked; p.render(); }); lab.append(cb, " keepdims"); document.getElementById("ctl-axis").appendChild(lab);
+    const anim = Course.animator(() => { t = Math.min(1, t + 0.025); p.render(); return t < 1; });
+    button("#ctl-axis", "▶ squash", () => { t = 0; anim.start(); });
+    button("#ctl-axis", "reset", () => { anim.stop(); t = 0; p.render(); });
+    const out = document.getElementById("out-axis");
+    const gx = 70, gy = 50, cw = 58, ch = 42;
+    p.render(p => {
+      txt(p, gx, gy - 24, "X  shape (4, 5)", { color: "muted", font: "12px sans-serif" });
+      for (let j = 0; j < 5; j++) txt(p, gx + j * cw + cw / 2 - 2, gy - 8, "j=" + j, { align: "center", color: "muted", font: "10px ui-monospace, Menlo, monospace" });
+      for (let i = 0; i < 4; i++) txt(p, gx - 10, gy + i * ch + ch / 2 - 2, "i=" + i, { align: "right", color: "muted", font: "10px ui-monospace, Menlo, monospace" });
+      let res, rshape, kshape, target;
+      const cols = [0, 1, 2, 3, 4].map(j => M.map(r => r[j]));
+      if (axis === "0") { res = cols.map(ops[op]); rshape = "(5,)"; kshape = "(1, 5)"; target = (i, j) => [gx + j * cw, gy + 4 * ch + 62]; }
+      else if (axis === "1") { res = M.map(ops[op]); rshape = "(4,)"; kshape = "(4, 1)"; target = (i, j) => [gx + 5 * cw + 70, gy + i * ch]; }
+      else { const flat = M.flat(); res = [op === "argmax" ? flat.indexOf(Math.max(...flat)) : ops[op](flat)]; rshape = "()"; kshape = "(1, 1)"; target = () => [gx + 5 * cw + 70, gy + 4 * ch + 62]; }
+      // direction arrows
+      if (axis === "0") for (let j = 0; j < 5; j++) p.arrow(gx + j * cw + cw / 2 - 2, H - gy - 4 * ch + 4, gx + j * cw + cw / 2 - 2, H - gy - 4 * ch - 40, { color: "c4", width: 2, alpha: .7 });
+      if (axis === "1") for (let i = 0; i < 4; i++) p.arrow(gx + 5 * cw + 2, H - gy - i * ch - ch / 2 + 2, gx + 5 * cw + 60, H - gy - i * ch - ch / 2 + 2, { color: "c4", width: 2, alpha: .7 });
+      const e = t * t * (3 - 2 * t);
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 5; j++) {
+        box(p, gx + j * cw, gy + i * ch, cw - 4, ch - 4, { fill: "c1", fillAlpha: .1, color: "c1", width: 1, alpha: .5 });
+        txt(p, gx + j * cw + (cw - 4) / 2, gy + i * ch + (ch - 4) / 2, String(M[i][j]), { align: "center", font: "600 14px ui-monospace, Menlo, monospace", color: "muted" });
+        if (e > 0 && e < 1) {
+          const [tx, ty] = target(i, j), x = gx + j * cw + (tx - gx - j * cw) * e, y = gy + i * ch + (ty - gy - i * ch) * e;
+          box(p, x, y, cw - 4, ch - 4, { fill: "c4", fillAlpha: .25 * (1 - e) + .05, color: "c4", width: 1, alpha: 1 - .6 * e });
+          txt(p, x + (cw - 4) / 2, y + (ch - 4) / 2, String(M[i][j]), { align: "center", font: "600 14px ui-monospace, Menlo, monospace", color: "c4" });
+        }
+      }
+      if (e >= 1 || t === 0) {
+        const alpha = t === 0 ? .25 : 1;
+        res.forEach((v, k) => {
+          const [x, y] = axis === "0" ? target(0, k) : axis === "1" ? target(k, 0) : target();
+          box(p, x, y, cw - 4, ch - 4, { fill: "c2", fillAlpha: .3 * alpha, color: "c2", width: 1.5, alpha });
+          txt(p, x + (cw - 4) / 2, y + (ch - 4) / 2, t === 0 ? "?" : fmt(v, op === "mean" ? 2 : 0), { align: "center", font: "700 14px ui-monospace, Menlo, monospace", color: "c2" });
+        });
+      }
+      const [lx, ly] = target(0, 0), rl = "result  shape " + (keep ? kshape : rshape);
+      if (axis === "0") txt(p, gx + 5 * cw + 10, ly + ch / 2 - 2, rl, { color: "c2", font: "12px sans-serif" });
+      else txt(p, lx, ly - 12, rl, { color: "c2", font: "12px sans-serif" });
+      const call = `X.${op}(axis=${axis === "none" ? "None" : axis}${keep ? ", keepdims=True" : ""})`;
+      out.textContent = `${call}  ->  shape ${keep ? kshape : rshape}` + (t >= 1 ? `   = [${res.map(v => fmt(v, op === "mean" ? 2 : 0)).join(", ")}]` : "") +
+        `\n${axis === "0" ? "index i disappears: one value per column j" : axis === "1" ? "index j disappears: one value per row i" : "both indices disappear: a single scalar"}`;
+    });
+  }
+
+  // ---------- fig: broadcasting ----------
+  {
+    const W = 680, H = 380, p = new Plot("#fig-bcast", { xmin: 0, xmax: W, ymin: 0, ymax: H });
+    const shapes = ["()", "(4,)", "(3,)", "(1, 4)", "(3, 1)", "(3, 4)", "(2, 1)"];
+    const parse = s => s === "()" ? [] : s.replace(/[()\s]/g, "").split(",").filter(Boolean).map(Number);
+    let sa = "(3, 1)", sb = "(1, 4)";
+    select("#ctl-bcast", "A ", shapes.map(s => [s, s]), v => { sa = v; p.render(); }).value = sa;
+    select("#ctl-bcast", "B ", shapes.map(s => [s, s]), v => { sb = v; p.render(); }).value = sb;
+    const out = document.getElementById("out-bcast");
+    p.render(p => {
+      const A = parse(sa), B = parse(sb), pa = [...Array(2 - A.length).fill(null), ...A], pb = [...Array(2 - B.length).fill(null), ...B];
+      const res = [], ok = [];
+      for (let k = 0; k < 2; k++) {
+        const a = pa[k] ?? 1, b = pb[k] ?? 1;
+        if (a === b || a === 1 || b === 1) { res.push(Math.max(a, b)); ok.push(a === b ? "equal" : "stretch " + (a === 1 ? "A" : "B")); }
+        else { res.push(null); ok.push("✗ " + a + " vs " + b); }
+      }
+      const fail = res.includes(null);
+      // alignment table
+      const tx = 60, ty = 30, colw = 70;
+      const rows = [["A", pa, A.length], ["B", pb, B.length]];
+      txt(p, tx, ty, "align from the right:", { color: "muted", font: "12px sans-serif" });
+      rows.forEach(([nm, d, L], r) => {
+        txt(p, tx, ty + 26 + r * 24, nm, { font: "700 14px ui-monospace, Menlo, monospace", color: r ? "c2" : "c1" });
+        d.forEach((v, k) => txt(p, tx + 80 + k * colw, ty + 26 + r * 24, v === null ? "(1)" : String(v), { align: "center", font: (v === null ? "" : "600 ") + "14px ui-monospace, Menlo, monospace", color: v === null ? "muted" : "fg" }));
+      });
+      p.line(tx, H - ty - 62, tx + 80 + colw + 40, H - ty - 62, { color: "line", width: 1 });
+      txt(p, tx, ty + 76, "out", { font: "700 14px ui-monospace, Menlo, monospace", color: fail ? "bad" : "c3" });
+      res.forEach((v, k) => txt(p, tx + 80 + k * colw, ty + 76, v === null ? "✗" : String(v), { align: "center", font: "600 14px ui-monospace, Menlo, monospace", color: v === null ? "bad" : "c3" }));
+      ok.forEach((s, k) => txt(p, tx + 80 + k * colw, ty + 98, s, { align: "center", font: "11px sans-serif", color: s.startsWith("✗") ? "bad" : "muted" }));
+      txt(p, 330, ty + 26, "rule: pad shorter shape with 1s on the left;", { font: "12px sans-serif", color: "muted" });
+      txt(p, 330, ty + 46, "each pair must be equal or contain a 1;", { font: "12px sans-serif", color: "muted" });
+      txt(p, 330, ty + 66, "a 1 is stretched (stride 0, no copy).", { font: "12px sans-serif", color: "muted" });
+      if (fail) {
+        txt(p, W / 2, 250, "ValueError: operands could not be broadcast together with shapes " + sa + " " + sb, { align: "center", color: "bad", font: "600 13px ui-monospace, Menlo, monospace" });
+        out.textContent = `A${sa} + B${sb}  ->  error`; return;
+      }
+      const [R0, C0] = res, cw = 36, ch = 30, gy = 175;
+      const real = (d, i, j) => i < (d[0] ?? 1) && j < (d[1] ?? 1);
+      const grid = (x0, d, val, col, name) => {
+        txt(p, x0, gy - 14, name, { font: "600 12px ui-monospace, Menlo, monospace", color: col });
+        for (let i = 0; i < R0; i++) for (let j = 0; j < C0; j++) {
+          const isReal = d ? real(d, i, j) : true, si = d && (d[0] ?? 1) === 1 ? 0 : i, sj = d && (d[1] ?? 1) === 1 ? 0 : j;
+          box(p, x0 + j * cw, gy + i * ch, cw - 3, ch - 3, { fill: col, fillAlpha: isReal ? .3 : .06, color: col, width: 1, alpha: isReal ? 1 : .4, dash: isReal ? [] : [3, 3] });
+          txt(p, x0 + j * cw + (cw - 3) / 2, gy + i * ch + (ch - 3) / 2, String(val(si, sj)), { align: "center", font: "12px ui-monospace, Menlo, monospace", color: isReal ? "fg" : "muted" });
+        }
+      };
+      const dA = pa.map(v => v ?? 1), dB = pb.map(v => v ?? 1);
+      const va = (i, j) => 10 * i + j, vb = (i, j) => 100 * (i * dB[1] + j + 1);
+      const gw = C0 * cw, gap = (W - 3 * gw) / 4;
+      grid(gap, dA, va, "c1", "A " + sa);
+      txt(p, gap + gw + gap / 2, gy + R0 * ch / 2, "+", { align: "center", font: "700 22px sans-serif" });
+      grid(2 * gap + gw, dB, vb, "c2", "B " + sb);
+      txt(p, 2 * gap + 2 * gw + gap / 2, gy + R0 * ch / 2, "=", { align: "center", font: "700 22px sans-serif" });
+      grid(3 * gap + 2 * gw, null, (i, j) => va(dA[0] === 1 ? 0 : i, dA[1] === 1 ? 0 : j) + vb(dB[0] === 1 ? 0 : i, dB[1] === 1 ? 0 : j), "c3", "A + B  (" + res.join(", ") + ")");
+      const nReal = s => s.reduce((a, b) => a * b, 1);
+      out.textContent = `A${sa} + B${sb}  ->  shape (${res.join(", ")})   stored: ${nReal(A)} + ${nReal(B)} numbers, result: ${R0 * C0}`;
+    });
+  }
+
+  // ---------- fig: masks & fancy indexing ----------
+  {
+    const W = 680, H = 300, p = new Plot("#fig-mask", { xmin: 0, xmax: W, ymin: 0, ymax: H });
+    const x = [3, -1, 7, 0, 5, -4, 8, 2, -2, 6], idx = [3, 0, 3, 7, 9, 2];
+    let mode = "mask", thr = 2;
+    select("#ctl-mask", "mode ", [["mask", "boolean mask  x[x > t]"], ["fancy", "fancy  x[[3, 0, 3, 7, 9, 2]]"], ["where", "np.where(x > t, x, 0)"]], v => { mode = v; p.render(); });
+    slider("#ctl-mask", { label: "threshold t ", min: -5, max: 9, step: 1, value: 2 }, v => { thr = v; p.render(); });
+    const out = document.getElementById("out-mask");
+    const cw = 56, x0 = (W - 10 * cw) / 2, ch = 34;
+    const cell = (i, yt, s, col, a) => { box(p, x0 + i * cw, yt, cw - 4, ch, { fill: col, fillAlpha: a, color: col, width: 1 }); txt(p, x0 + i * cw + (cw - 4) / 2, yt + ch / 2, s, { align: "center", font: "600 13px ui-monospace, Menlo, monospace" }); };
+    p.render(p => {
+      txt(p, x0, 22, "x  (10,)", { color: "muted", font: "12px sans-serif" });
+      x.forEach((v, i) => { cell(i, 32, String(v), "c1", .15); txt(p, x0 + i * cw + (cw - 4) / 2, 76, String(i), { align: "center", color: "muted", font: "10px ui-monospace, Menlo, monospace" }); });
+      let res, src;
+      if (mode === "fancy") {
+        txt(p, x0, 102, "idx", { color: "muted", font: "12px sans-serif" });
+        idx.forEach((k, i) => cell(i, 112, String(k), "c5", .15));
+        res = idx.map(k => x[k]); src = idx;
+      } else {
+        const m = x.map(v => v > thr);
+        txt(p, x0, 102, "x > " + thr, { color: "muted", font: "12px sans-serif" });
+        m.forEach((b, i) => cell(i, 112, b ? "T" : "F", b ? "ok" : "muted", b ? .25 : .06));
+        if (mode === "mask") { src = m.map((b, i) => b ? i : -1).filter(i => i >= 0); res = src.map(i => x[i]); }
+        else { res = x.map((v, i) => m[i] ? v : 0); src = x.map((_, i) => m[i] ? i : -1); }
+      }
+      const ry = 220;
+      txt(p, x0, ry - 10, "result (" + res.length + ",)  — " + (mode === "where" ? "same shape, new array" : "new array (copy)"), { color: "c2", font: "12px sans-serif" });
+      res.forEach((v, k) => {
+        const s = src[k];
+        if (s >= 0) p.line(x0 + s * cw + (cw - 4) / 2, H - 112 - ch, x0 + k * cw + (cw - 4) / 2, H - ry, { color: "c2", width: 1.2, alpha: .55 });
+        cell(k, ry, String(v), s >= 0 ? "c2" : "muted", s >= 0 ? .3 : .06);
+      });
+      out.textContent = mode === "mask" ? `x[x > ${thr}] = [${res.join(", ")}]   shape (${res.length},): length depends on the data!`
+        : mode === "fancy" ? `x[idx] = [${res.join(", ")}]   repeats and any order allowed; out.shape == idx.shape`
+        : `np.where(x > ${thr}, x, 0) = [${res.join(", ")}]   shape preserved (good for batched code)`;
+    });
+  }
+
+  // ---------- fig: timings ----------
+  {
+    const W = 680, H = 270, p = new Plot("#fig-time", { xmin: 0, xmax: W, ymin: 0, ymax: H });
+    const B = {
+      "sum of squares, 1M floats": [["for v in list: s += v*v", 13e-3, "c4"], ["for i in range(n): x[i]*x[i]", 96e-3, "c4"], ["(x * x).sum()", 0.23e-3, "c1"], ["x @ x", 0.027e-3, "c3"]],
+      "pairwise distances, 500×500, d=16": [["triple Python loop", 115e-3, "c4"], ["broadcast (n,m,d) then sum", 3.3e-3, "c1"], ["Gram trick |x|²+|y|²−2XYᵀ", 0.30e-3, "c3"]],
+      "matmul, 128×128": [["triple Python loop (i, k, j)", 47e-3, "c4"], ["A @ B  (BLAS)", 0.013e-3, "c3"]],
+    };
+    let cur = Object.keys(B)[0];
+    select("#ctl-time", "benchmark ", Object.keys(B).map(k => [k, k]), v => { cur = v; p.render(); });
+    const L = 240, R = W - 30, lo = -5.3, hi = -0.5, X = s => L + (Math.log10(s) - lo) / (hi - lo) * (R - L);
+    const sig = v => v >= 10 ? String(Math.round(v)) : v.toPrecision(2), fmtT = s => s >= 1e-3 ? sig(s * 1e3) + " ms" : sig(s * 1e6) + " µs";
+    p.render(p => {
+      const rows = B[cur], top = 30, bh = 34, gap = 14;
+      for (let e = -5; e <= -1; e++) { p.line(X(10 ** e), 20, X(10 ** e), H - 20, { color: "grid", width: 1 }); txt(p, X(10 ** e), H - 12, ["10 µs", "100 µs", "1 ms", "10 ms", "100 ms"][e + 5], { align: "center", color: "muted", font: "11px sans-serif" }); }
+      rows.forEach(([name, s, col], r) => {
+        const yt = top + r * (bh + gap);
+        txt(p, L - 10, yt + bh / 2, name, { align: "right", font: "12px ui-monospace, Menlo, monospace" });
+        box(p, L, yt, X(s) - L, bh, { fill: col, fillAlpha: .6, color: col, width: 1 });
+        txt(p, X(s) + 6, yt + bh / 2, fmtT(s) + (r ? "   " + (s < rows[0][1] ? Math.round(rows[0][1] / s) + "× faster than first" : fmt(s / rows[0][1], 1) + "× slower than first") : ""), { font: "600 12px sans-serif", color: col });
+      });
+    });
+  }
+
+  // ---------- fig: einsum ----------
+  {
+    const W = 680, H = 210, p = new Plot("#fig-einsum", { xmin: 0, xmax: W, ymin: 0, ymax: H });
+    const specs = [
+      ["i,i->", "dot product", "a @ b", { i: 4 }],
+      ["ij,j->i", "matrix-vector", "A @ v", { i: 3, j: 4 }],
+      ["ij,jk->ik", "matrix multiply", "A @ B", { i: 3, j: 4, k: 2 }],
+      ["bij,bjk->bik", "batched matmul", "A @ B  (3-D)", { b: 8, i: 3, j: 4, k: 2 }],
+      ["i,j->ij", "outer product", "u[:, None] * v[None, :]", { i: 3, j: 4 }],
+      ["ij->j", "column sums", "A.sum(axis=0)", { i: 3, j: 4 }],
+      ["ii->", "trace", "np.trace(A)", { i: 4 }],
+      ["ii->i", "diagonal", "np.diag(A)", { i: 4 }],
+      ["ij->ji", "transpose", "A.T", { i: 3, j: 4 }],
+      ["nd,nd->n", "row-wise dots", "(A * B).sum(axis=1)", { n: 5, d: 4 }],
+    ];
+    let k = 2;
+    const s = select("#ctl-einsum", "spec ", specs.map((x, i) => [i, `"${x[0]}"   ${x[1]}`]), v => { k = +v; p.render(); }); s.value = k;
+    const out = document.getElementById("out-einsum");
+    p.render(p => {
+      const [spec, name, np_, sizes] = specs[k], [lhs, rhs] = spec.split("->"), ops = lhs.split(","), free = new Set(rhs), all = [...new Set(lhs.replace(/,/g, ""))];
+      const parts = [...ops.map((o, i) => [o, "ABCDEF"[i] + "[" + o.split("").join(",") + "]"]), ["->", ""], [rhs, "out" + (rhs ? "[" + rhs.split("").join(",") + "]" : " (scalar)")]];
+      let x = 40;
+      parts.forEach(([idx, lab], i) => {
+        if (idx === "->") { txt(p, x, 70, "→", { font: "700 26px sans-serif", color: "muted" }); x += 50; return; }
+        const w = Math.max(60, idx.length * 34 + 24);
+        box(p, x, 40, w, 60, { fill: i === parts.length - 1 ? "c3" : "c5", fillAlpha: .08, color: i === parts.length - 1 ? "c3" : "c5", width: 1.2 });
+        idx.split("").forEach((c, j) => txt(p, x + 20 + j * 34, 70, c, { font: "700 24px ui-monospace, Menlo, monospace", color: free.has(c) ? "c1" : "c4" }));
+        if (!idx) txt(p, x + w / 2, 70, "·", { align: "center", font: "700 24px sans-serif", color: "c3" });
+        txt(p, x, 116, lab, { font: "11px ui-monospace, Menlo, monospace", color: "muted" });
+        x += w + 18;
+        if (i < ops.length - 1) { txt(p, x - 10, 70, ",", { font: "700 22px sans-serif", color: "muted" }); x += 10; }
+      });
+      const summed = all.filter(c => !free.has(c));
+      txt(p, 40, 150, "free (index the output): " + (rhs ? [...rhs].join(", ") : "none"), { color: "c1", font: "600 13px sans-serif" });
+      txt(p, 40, 174, "summed (missing from output): " + (summed.length ? summed.join(", ") : "none — pure re-indexing"), { color: "c4", font: "600 13px sans-serif" });
+      txt(p, 40, 196, name, { color: "muted", font: "12px sans-serif" });
+      // loop nest
+      const ind = n => "  ".repeat(n);
+      let code = `np.einsum("${spec}", ${ops.map((_, i) => "ABCDEF"[i]).join(", ")})   ==   ${np_}\n\n`;
+      code += rhs ? `out = zeros(${[...rhs].map(c => sizes[c]).join(", ")})\n` : "out = 0\n";
+      const order = [...[...rhs], ...summed];
+      order.forEach((c, i) => code += ind(i) + `for ${c} in range(${sizes[c]}):\n`);
+      const terms = ops.map((o, i) => "ABCDEF"[i] + "[" + o.split("").join(", ") + "]").join(" * ");
+      code += ind(order.length) + (rhs ? `out[${[...rhs].join(", ")}]` : "out") + (summed.length ? " += " : " = ") + terms;
+      const cost = all.reduce((a, c) => a * sizes[c], 1);
+      code += `\n\n# work = product of ALL index sizes = ${all.map(c => sizes[c]).join("·")} = ${cost} multiplies`;
+      out.textContent = code;
+    });
+  }
+});
+</script>
+</body>
+</html>

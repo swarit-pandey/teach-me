@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neural networks & MLPs</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="16">
+<main>
+
+<div class="kicker">Part 5 · Deep learning</div>
+<h1>Neural networks &amp; MLPs</h1>
+<p class="lede">A neural network is not a brain. It is a stack of the two things you already know: a matrix multiply (lessons 01–03) and a cheap bend applied to every number. The bend is the whole trick. Without it, a hundred layers are worth exactly one. With it, a big enough network can draw any shape you like.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Write a neuron as "dot product, plus bias, through a nonlinearity", and say what it computes geometrically.</li>
+    <li>Prove that stacked linear layers collapse into one, and explain why nonlinearity fixes this.</li>
+    <li>Explain why a ReLU network is a piecewise-linear function and how that gives universal approximation.</li>
+    <li>Track every tensor shape in a batched forward pass and count a network's parameters.</li>
+    <li>Train a 2-layer network with a hand-derived backward pass, and watch it solve a problem no linear model can.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="neuron">1. The neuron: a dot product with a bend</h2>
+<p>A single <b>neuron</b> (or <b>unit</b>) takes an input vector $\mathbf{x}\in\mathbb{R}^d$, and computes</p>
+$$a = \phi(\mathbf{w}\cdot\mathbf{x} + b) = \phi(z).$$
+<p>Three pieces. The <b>weights</b> $\mathbf{w}$ and <b>bias</b> $b$ are learned. The number $z = \mathbf{w}\cdot\mathbf{x}+b$ is the <b>pre-activation</b>. The fixed function $\phi$ is the <b>activation</b> or <b>nonlinearity</b>. You have met this already: logistic regression (lesson 14) is one neuron with $\phi = \sigma$.</p>
+<p>Lesson 01 gives you the geometry for free. $\mathbf{w}\cdot\mathbf{x}$ measures how far $\mathbf{x}$ points along $\mathbf{w}$. The set where $z = 0$ is a line (a hyperplane in $d$ dimensions) perpendicular to $\mathbf{w}$. The bias slides that line along $\mathbf{w}$. So a neuron is a <b>soft detector of "which side of a line am I on, and how far?"</b> The activation decides what to report:</p>
+<table>
+  <tr><th>Activation</th><th>$\phi(z)$</th><th>$\phi'(z)$</th><th>Where you see it</th></tr>
+  <tr><td>Sigmoid</td><td>$\dfrac{1}{1+e^{-z}}$</td><td>$\sigma(z)(1-\sigma(z))$</td><td>Output of binary classifiers (lesson 14); gates in LSTMs</td></tr>
+  <tr><td>Tanh</td><td>$\tanh z$</td><td>$1-\tanh^2 z$</td><td>RNNs (lesson 20); zero-centred cousin of sigmoid: $\tanh z = 2\sigma(2z)-1$</td></tr>
+  <tr><td>ReLU</td><td>$\max(0, z)$</td><td>$1$ if $z>0$ else $0$</td><td>The default hidden activation since ~2012</td></tr>
+  <tr><td>GELU</td><td>$z\,\Phi(z)$ ($\Phi$ = Gaussian CDF)</td><td>smooth</td><td>Transformers (lesson 23): a smooth ReLU</td></tr>
+</table>
+
+<div class="figure">
+  <canvas id="fig-neuron" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-neuron"></div>
+  <div class="readout" id="out-neuron"></div>
+  <div class="caption"><b>Try it:</b> drag the tip of $\mathbf{w}$ and move the bias slider. The shading is the neuron's output $\phi(\mathbf{w}\cdot\mathbf{x}+b)$ at every point $\mathbf{x}$ of the plane. The solid line is $z=0$. Notice that the output only changes along the direction of $\mathbf{w}$: every neuron's output is constant along lines perpendicular to $\mathbf{w}$. Make $\mathbf{w}$ longer and the sigmoid's transition gets sharper. ReLU is zero on one side and a tilted plane (a "ramp") on the other.</div>
+</div>
+
+<div class="callout intuition">
+<p>A neuron answers one question about its input: "how much do you point along $\mathbf{w}$, past threshold $-b$?" A <b>layer</b> asks many such questions at once, one per row of a weight matrix. The next layer combines the answers.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="collapse">2. Why the bend matters: linear layers collapse</h2>
+<p>Put $h$ neurons side by side and you get a <b>layer</b>. Stack their weight vectors as the columns of a matrix $W\in\mathbb{R}^{d\times h}$. We write inputs as <em>row</em> vectors, which is the convention of NumPy and PyTorch (lesson 12): one example per row. Then the whole layer is</p>
+$$\mathbf{a} = \phi(\mathbf{x}W + \mathbf{b}), \qquad \mathbf{x}\in\mathbb{R}^{1\times d},\; W\in\mathbb{R}^{d\times h},\; \mathbf{b}\in\mathbb{R}^{h}.$$
+<p>Now suppose you drop $\phi$ and stack two layers. Expand:</p>
+$$(\mathbf{x}W_1 + \mathbf{b}_1)W_2 + \mathbf{b}_2 \;=\; \mathbf{x}\,\underbrace{(W_1W_2)}_{W_\text{eff}} + \underbrace{(\mathbf{b}_1W_2 + \mathbf{b}_2)}_{\mathbf{b}_\text{eff}}.$$
+<p>That is again a single affine layer. By induction, <b>any number of stacked linear layers equals one linear layer</b>. Depth buys you nothing: a 100-layer linear network can only draw straight decision boundaries, exactly like logistic regression. (In lesson 03's language, a composition of linear maps is a linear map, and its matrix is the product.)</p>
+
+<div class="example">
+  <div class="label">Worked example: collapsing two layers</div>
+  <p>Let $W_1 = \begin{bmatrix}1&2\\0&1\end{bmatrix}$, $\mathbf{b}_1 = (1, 0)$, $W_2 = \begin{bmatrix}1\\-1\end{bmatrix}$, $b_2 = 3$.</p>
+  <p>$W_\text{eff} = W_1W_2 = \begin{bmatrix}1\cdot1 + 2\cdot(-1)\\ 0\cdot1+1\cdot(-1)\end{bmatrix} = \begin{bmatrix}-1\\-1\end{bmatrix}$, and $b_\text{eff} = \mathbf{b}_1W_2 + b_2 = (1-0) + 3 = 4$.</p>
+  <p>Check with $\mathbf{x} = (2, 1)$. Two-step: $\mathbf{x}W_1 + \mathbf{b}_1 = (2, 5) + (1, 0) = (3, 5)$, then $3 - 5 + 3 = 1$. One-step: $-2 - 1 + 4 = 1$. ✓</p>
+</div>
+
+<p>With a nonlinearity in between, the expansion fails: $\phi(\mathbf{x}W_1+\mathbf{b}_1)W_2$ does not factor. The picture below shows what that means. A 2→2 layer maps the plane to the plane. Watch a grid travel through layer 1, then ReLU, then layer 2.</p>
+
+<div class="figure">
+  <canvas id="fig-fold" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-fold"></div>
+  <div class="readout" id="out-fold"></div>
+  <div class="caption"><b>Try it:</b> press play, or scrub the stage slider: 0 = input, 1 = after the first linear layer, 2 = after ReLU, 3 = after the second linear layer. With ReLU off, every stage is a parallelogram grid: straight, parallel, evenly spaced lines. That is the signature of one affine map (lesson 02), and the readout shows its single matrix. Turn ReLU on: at stage 2 everything outside the positive quadrant is <em>folded</em> onto its edges. Folds are what let later layers carve curved, disconnected regions.</div>
+</div>
+
+<div class="callout key">
+<p>Depth only helps if there is a nonlinearity between layers. The nonlinearity can be almost anything that isn't affine. ReLU, the simplest possible bend, works great.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="piecewise">3. ReLU networks are piecewise linear</h2>
+<p>Take the simplest case: one input $x\in\mathbb{R}$, one hidden layer of ReLUs, one output.</p>
+$$f(x) = d + \sum_{k=1}^{n} a_k\,\mathrm{relu}(w_k x + c_k).$$
+<p>Each unit is a <b>hinge</b>. It is flat (zero) on one side of the point $x = -c_k/w_k$ and a straight ramp of slope $w_k$ on the other. A weighted sum of hinges is continuous and straight everywhere except at the hinge points, where its slope changes by $a_k w_k$. So $f$ is a <b>continuous piecewise-linear</b> function with at most $n$ kinks. Deeper ReLU nets are still piecewise linear. They just have many more pieces, because each layer folds the pieces of the one before.</p>
+
+<div class="figure">
+  <canvas id="fig-hinge" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-hinge"></div>
+  <div class="readout" id="out-hinge"></div>
+  <div class="caption"><b>Try it:</b> the dashed curve is the target. The bold curve is $f(x) = d + \sum_k a_k\,\mathrm{relu}(x - c_k)$ with 3 hinge units (here $w_k = 1$, so the hinge sits at $x = c_k$ and $a_k$ is how much the slope changes there). The faint colored lines are the individual units. Fit the target by hand with the sliders, then press <em>best $a$, $d$</em>: it keeps your hinge positions and solves least squares for the output weights (lesson 13). That is exactly what the <em>last</em> layer of a network does. Training moves the hinges too.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="universal">4. Universal approximation, intuitively</h2>
+<p>If a sum of hinges can bend wherever you put a hinge, it can trace <em>any</em> continuous curve. Here is the construction (you'll code it in the workbook). Pick knots $x_0 \lt x_1 \lt \dots \lt x_n$ and let $s_k$ be the slope of the straight segment from $(x_k, y_k)$ to $(x_{k+1}, y_{k+1})$. Then</p>
+$$f(x) = y_0 + s_0\,\mathrm{relu}(x - x_0) + \sum_{k=1}^{n-1}(s_k - s_{k-1})\,\mathrm{relu}(x - x_k)$$
+<p>passes through every point and is straight in between. Why: on $[x_0, x_1]$ only the first hinge is on, so $f = y_0 + s_0(x-x_0)$. Each later hinge, once you pass it, changes the slope from $s_{k-1}$ to $s_k$. Now shrink the spacing. A continuous function on a closed interval is uniformly continuous, so the straight-line interpolant's error goes to zero. For a smooth function it shrinks like $1/n^2$.</p>
+
+<div class="figure">
+  <canvas id="fig-ua" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-ua"></div>
+  <div class="readout" id="out-ua"></div>
+  <div class="caption"><b>Try it:</b> raise the number of hidden units and watch the max error fall. Once $n$ is large enough to resolve the wiggles, doubling $n$ divides the error by about 4 on the smooth targets (the $1/n^2$ rate). Try the "step" target: a continuous net can only approximate a jump with a steep ramp. The error is stuck near the jump in the <em>max</em> sense, but the region where it's bad shrinks.</div>
+</div>
+
+<div class="callout warning">
+<p>The <b>universal approximation theorem</b> (Cybenko 1989, Hornik 1991) says one hidden layer with enough units can approximate any continuous function on a bounded region to any accuracy. It does <em>not</em> say how many units you need (it can be exponential in the input dimension), that gradient descent will find them, or that the result will generalize. In practice <b>depth</b> is far more efficient than width. Each layer can fold space again, so the number of linear pieces can grow exponentially with depth but only linearly with width.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="shapes">5. The forward pass, batched, with shapes</h2>
+<p>A <b>multi-layer perceptron</b> (MLP) with layer widths $d_0, d_1, \dots, d_L$ is</p>
+$$H_0 = X,\qquad H_\ell = \phi(H_{\ell-1}W_\ell + \mathbf{b}_\ell)\;\;(\ell \lt L),\qquad \text{logits} = H_{L-1}W_L + \mathbf{b}_L.$$
+<p>The last layer has no activation. Its outputs are <b>logits</b> that go into a softmax and cross-entropy (lessons 11, 14). The key to writing this correctly is the <b>batch dimension</b>. Put $N$ examples as the rows of $X \in \mathbb{R}^{N\times d_0}$. One matrix multiply then processes all of them, and the bias row $\mathbf{b}_\ell$ broadcasts down the rows (lesson 12). Row $i$ of every $H_\ell$ depends only on row $i$ of $X$: a batch is just many independent forward passes done in one go, which is what makes GPUs fast.</p>
+
+<div class="figure">
+  <canvas id="fig-shapes" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-shapes"></div>
+  <div class="readout" id="out-shapes"></div>
+  <div class="caption"><b>Try it:</b> change the batch size $N$ and the layer widths. Inner dimensions must match (the $d$ of $X$ and the rows of $W_1$), and the output keeps the batch dimension. Notice that the parameter count never depends on $N$, but the activation memory does. That is why big batches run out of memory while the model fits fine.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: a batched forward pass by hand</div>
+  <p>Two examples, $d_0=2$, $d_1=3$, $d_2=2$:</p>
+  $$X = \begin{bmatrix}1&2\\-1&0.5\end{bmatrix},\quad W_1 = \begin{bmatrix}1&-1&0.5\\0.5&1&-1\end{bmatrix},\quad \mathbf{b}_1 = (0, 0.5, 0),$$
+  $$W_2 = \begin{bmatrix}1&-1\\2&0\\-1&1\end{bmatrix},\quad \mathbf{b}_2 = (0, 0.1).$$
+  <p><b>Layer 1.</b> Row 1: $(1\cdot1 + 2\cdot0.5,\; -1 + 2 + 0.5,\; 0.5 - 2) = (2, 1.5, -1.5)$. Row 2: $(-1 + 0.25,\; 1 + 0.5 + 0.5,\; -0.5 - 0.5) = (-0.75, 2, -1)$.</p>
+  <p><b>ReLU.</b> $H_1 = \begin{bmatrix}2&1.5&0\\0&2&0\end{bmatrix}$. Negative entries are zeroed: those units are "off" for that example.</p>
+  <p><b>Layer 2.</b> Row 1: $(2 + 3 + 0,\; -2 + 0 + 0) + (0, 0.1) = (5, -1.9)$. Row 2: $(0 + 4,\; 0) + (0, 0.1) = (4, 0.1)$. Shapes: $(2\times2)(2\times3) \to (2\times3) \to (2\times3)(3\times2) \to (2\times2)$.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="params">6. Counting parameters</h2>
+<p>Layer $\ell$ has a $d_{\ell-1}\times d_\ell$ weight matrix and $d_\ell$ biases:</p>
+$$\#\text{params} = \sum_{\ell=1}^{L} (d_{\ell-1} d_\ell + d_\ell).$$
+<div class="example">
+  <div class="label">Worked example: two real networks</div>
+  <p><b>MNIST classifier</b> 784 → 128 → 10: $784\cdot128 + 128 + 128\cdot10 + 10 = 100{,}352 + 128 + 1{,}280 + 10 = 101{,}770$.</p>
+  <p><b>The MLP inside one GPT-2-small block</b> 768 → 3072 → 768 (lesson 23): $768\cdot3072 + 3072 + 3072\cdot768 + 768 = 4{,}722{,}432$. GPT-2 small has 12 of these, so its MLPs alone hold about 57 million of its 124 million parameters.</p>
+</div>
+<div class="callout ml">
+<p>Parameter count drives memory and compute. Each parameter is a float (2–4 bytes). Training with Adam (lesson 18) stores two more numbers per parameter, plus a gradient. A forward pass costs about $2\times$ the parameter count in FLOPs per example, because each weight does one multiply and one add. When you read "7B model", this sum is what's being counted.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="train">7. Training a 2-layer net on spirals</h2>
+<p>The forward pass for a 2-layer classifier, with batch $X\in\mathbb{R}^{N\times D}$ and labels $y$:</p>
+$$Z_1 = XW_1 + \mathbf{b}_1,\quad A_1 = \mathrm{relu}(Z_1),\quad S = A_1W_2 + \mathbf{b}_2,$$
+$$L = \tfrac1N\textstyle\sum_i -\log \mathrm{softmax}(S_i)_{y_i}.$$
+<p>The backward pass is lesson 07's matrix calculus applied line by line in reverse. Write $G_S = \partial L/\partial S$ and so on:</p>
+$$\begin{aligned}
+G_S &= \tfrac1N(\mathrm{softmax}(S) - Y_\text{onehot}) &&\text{lesson 14}\\
+G_{W_2} &= A_1^\top G_S, \quad G_{\mathbf{b}_2} = \textstyle\sum_\text{rows} G_S &&\text{matmul rule; broadcast} \Rightarrow \text{sum}\\
+G_{A_1} &= G_S W_2^\top\\
+G_{Z_1} &= G_{A_1} \odot \mathbb{1}[Z_1 > 0] &&\text{ReLU: a 0/1 mask}\\
+G_{W_1} &= X^\top G_{Z_1}, \quad G_{\mathbf{b}_1} = \textstyle\sum_\text{rows} G_{Z_1}.
+\end{aligned}$$
+<p>A quick shape check catches most mistakes. $G_{W_2}$ must be shaped like $W_2$, $(H\times C)$, and $A_1^\top G_S$ is $(H\times N)(N\times C)$. ✓ Then update every parameter by $\theta \leftarrow \theta - \eta\, G_\theta$ (lesson 06). Writing this by hand for every architecture would be miserable. Lesson 17 automates it.</p>
+
+<p>The <b>spirals</b> dataset has three interleaved arms. No straight line separates any arm from the others, so softmax regression (a "0 hidden layer" net) gets about 54% accuracy. Watch a hidden layer do better.</p>
+<div class="figure wide">
+  <div class="row">
+    <div style="flex:1.6 1 380px"><canvas id="fig-spiral" width="440" height="440"></canvas></div>
+    <div><canvas id="fig-spiral-loss" width="300" height="440"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-spiral"></div>
+  <div class="readout" id="out-spiral"></div>
+  <div class="caption"><b>Try it:</b> press <em>play</em>. The background color is the class the network predicts at each point: its <b>decision boundary</b>. Full-batch gradient descent on 300 points runs right in your browser. Then try: (1) hidden units = 0, which is softmax regression, and it can't get past ~55%; (2) hidden = 3 or 5, which is too few hinges to wrap around the arms; (3) a learning rate of 5, which makes the loss jump around or blow up; (4) tanh instead of ReLU, which gives smoother boundaries and slower training. Each change resets the network.</div>
+</div>
+
+<div class="callout warning">
+<p>Why random initialization? If every weight starts at the same value, every hidden unit computes the same thing and receives the same gradient, so they stay identical forever. The network then behaves as if it had a single hidden unit. Random init <b>breaks the symmetry</b>. Its <em>scale</em> matters a lot too. Lesson 18 derives the right one ("He init", which the workbook uses).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>A neuron has $\mathbf{w} = (2, -1)$, $b = 0.5$, and input $\mathbf{x} = (1, 3)$. Compute $z$, the ReLU output, and the sigmoid output.</p>
+<p>Enter the sigmoid output:</p><div class="numcheck" data-answer="0.37754" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$z = 2\cdot1 + (-1)\cdot3 + 0.5 = -0.5$. $\mathrm{relu}(-0.5) = 0$: the unit is off. $\sigma(-0.5) = 1/(1+e^{0.5}) \approx 0.3775$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>How many parameters does an MLP with widths $3072 \to 512 \to 256 \to 10$ have? (That's a CIFAR-10 image flattened: $32\times32\times3$.)</p>
+<div class="numcheck" data-answer="1707274" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$3072\cdot512 + 512 = 1{,}573{,}376$; $512\cdot256 + 256 = 131{,}328$; $256\cdot10 + 10 = 2{,}570$. Total $1{,}707{,}274$. Almost all of it sits in the first layer, which is one reason images use convolutions (shared weights) instead.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Collapse $W_1 = \begin{bmatrix}2&0\\1&-1\end{bmatrix}$, $\mathbf{b}_1 = (0, 1)$, $W_2 = \begin{bmatrix}1\\3\end{bmatrix}$, $b_2 = -2$ into a single layer $\mathbf{x}W_\text{eff} + b_\text{eff}$. Enter the two entries of $W_\text{eff}$ then $b_\text{eff}$.</p>
+<div class="numcheck" data-answer="2,-2,1" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$W_1W_2 = (2\cdot1 + 0\cdot3,\; 1\cdot1 + (-1)\cdot3) = (2, -2)$ as a column. $\mathbf{b}_1W_2 + b_2 = 0\cdot1 + 1\cdot3 - 2 = 1$. So the two-layer linear net is just $2x_1 - 2x_2 + 1$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Write the "hat" function $h(x) = \max(0, 1 - |x|)$ (a triangle of height 1 on $[-1,1]$) as $\sum_k a_k\,\mathrm{relu}(x - c_k)$. How many ReLU units do you need?</p>
+<div class="numcheck" data-answer="3" data-tol="1e-9"></div>
+<details class="hint"><summary>Hint</summary><p>The slope is 0, then $+1$, then $-1$, then 0. Where does it change, and by how much?</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Slope changes by $+1$ at $x=-1$, by $-2$ at $x=0$, by $+1$ at $x=1$: $h(x) = \mathrm{relu}(x+1) - 2\,\mathrm{relu}(x) + \mathrm{relu}(x-1)$. Three units. Shifted and scaled hats are a basis for piecewise-linear functions, which gives another proof of universal approximation in 1-D.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A batch of $N = 32$ examples with 100 features goes through a layer with 64 hidden units. (a) What are the shapes of $X$, $W_1$, $Z_1$ and $\partial L/\partial W_1$? (b) How many numbers does the hidden activation $A_1$ hold?</p>
+<div class="numcheck" data-answer="2048" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $X: 32\times100$, $W_1: 100\times64$, $Z_1: 32\times64$, and the gradient is always shaped like the parameter: $100\times 64$. (b) $32\cdot64 = 2048$. Activation memory scales with $N$; parameter memory doesn't.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · derivation</span>
+<p>In the backward pass, $G_{\mathbf{b}_2} = \sum_\text{rows} G_S$. Derive this from the chain rule. (Write $S_{ic} = \sum_h A_{ih}W_{hc} + b_c$ and compute $\partial L/\partial b_c$.)</p>
+<details class="solution"><summary>Solution</summary>
+<p>$b_c$ appears in $S_{ic}$ for <em>every</em> example $i$, with $\partial S_{ic}/\partial b_c = 1$, and in no other entry. By the multivariable chain rule, $\partial L/\partial b_c = \sum_i \frac{\partial L}{\partial S_{ic}}\cdot 1 = \sum_i (G_S)_{ic}$. General rule: <b>whatever was broadcast in the forward pass gets summed in the backward pass.</b> Lesson 17 shows this is the same rule as "a reused node accumulates gradients".</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Find weights for a 2-input network with 2 ReLU hidden units and a linear output that computes XOR on $\{0,1\}^2$: output 1 for $(0,1)$ and $(1,0)$, 0 for $(0,0)$ and $(1,1)$. Why can't a single neuron do it?</p>
+<details class="hint"><summary>Hint</summary><p>Both hidden units can look at $x_1 + x_2$ with different thresholds.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$h_1 = \mathrm{relu}(x_1 + x_2)$, $h_2 = \mathrm{relu}(x_1 + x_2 - 1)$, output $h_1 - 2h_2$. Check: $s = x_1 + x_2 \in \{0, 1, 2\}$ gives $0 - 0 = 0$, $1 - 0 = 1$, $2 - 2 = 0$. ✓ A single neuron thresholds a linear function, so its "1" region is a half-plane. No half-plane contains $(0,1)$ and $(1,0)$ but neither $(0,0)$ nor $(1,1)$, because the two pairs' midpoints coincide at $(\tfrac12, \tfrac12)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>A 1-input network with one hidden layer of $n$ ReLUs has at most $n+1$ linear pieces. Now consider a <em>deep</em> 1-D net where every layer is the "tent map" $t(x) = 2\,\mathrm{relu}(x) - 4\,\mathrm{relu}(x - \tfrac12)$ on $[0,1]$ (2 units per layer). How many linear pieces does $t\circ t\circ\cdots\circ t$ ($k$ layers) have? What does that say about depth versus width?</p>
+<details class="solution"><summary>Solution</summary>
+<p>$t$ maps $[0,\frac12]$ up onto $[0,1]$ and $[\frac12,1]$ down onto $[0,1]$. So each application makes the input traverse $[0,1]$ twice, which doubles the number of pieces: $2^k$ pieces from $2k$ units. A single hidden layer would need about $2^k$ units for the same function. Depth can buy exponentially more pieces than width (Telgarsky 2016). This is one rigorous version of "deep beats wide".</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">You build a 10-layer network but forget the activation functions. Compared with logistic regression on the same features, it can represent…</div>
+  <div class="opts">
+    <button data-k="a">much richer decision boundaries, since it has 10× the parameters</button>
+    <button data-k="b">curved boundaries, but only gently curved ones</button>
+    <button data-k="c">exactly the same set of functions: the layers collapse to one linear map</button>
+    <button data-k="d">nothing. Without activations the gradients are zero.</button>
+  </div>
+  <div class="explain">$(\mathbf{x}W_1+\mathbf{b}_1)W_2 + \dots$ collapses to $\mathbf{x}W_\text{eff} + \mathbf{b}_\text{eff}$. More parameters, same function class (and a nastier optimization problem).</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">You double the batch size from 64 to 128. What happens to the number of parameters?</div>
+  <div class="opts">
+    <button data-k="a">It doubles</button>
+    <button data-k="b">It stays the same</button>
+    <button data-k="c">The first layer's weights double</button>
+    <button data-k="d">It depends on the activation</button>
+  </div>
+  <div class="explain">Weight shapes are $(d_\text{in}, d_\text{out})$, with no $N$ anywhere. The batch is a dimension of the activations, not of the parameters.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">A network with ReLU hidden units and a linear output, viewed as a function of its input, is…</div>
+  <div class="opts">
+    <button data-k="a">continuous and piecewise linear</button>
+    <button data-k="b">smooth (infinitely differentiable)</button>
+    <button data-k="c">piecewise constant</button>
+    <button data-k="d">linear, because ReLU is linear for positive inputs</button>
+  </div>
+  <div class="explain">Compositions and sums of continuous piecewise-linear functions are continuous piecewise-linear. Kinks appear where some unit switches on or off.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Why not initialize all weights of a hidden layer to the same constant?</div>
+  <div class="opts">
+    <button data-k="a">The loss would be infinite at step 0</button>
+    <button data-k="b">ReLU's derivative is undefined at a constant</button>
+    <button data-k="c">It's fine; gradient descent quickly makes them different</button>
+    <button data-k="d">All hidden units get identical gradients and stay identical, so the layer acts like one unit</button>
+  </div>
+  <div class="explain">Symmetric units receive symmetric updates, and nothing ever breaks the tie. Randomness breaks the symmetry.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula / fact</th><th>Why it matters</th></tr>
+  <tr><td>Neuron</td><td>$\phi(\mathbf{w}\cdot\mathbf{x}+b)$</td><td>a soft half-plane detector</td></tr>
+  <tr><td>Layer (batched)</td><td>$H = \phi(XW + \mathbf{b})$, $X: N\times d$</td><td>one matmul for the whole batch</td></tr>
+  <tr><td>Collapse</td><td>$(\mathbf{x}W_1+\mathbf{b}_1)W_2+\mathbf{b}_2 = \mathbf{x}W_1W_2 + (\mathbf{b}_1W_2+\mathbf{b}_2)$</td><td>no nonlinearity, no depth</td></tr>
+  <tr><td>ReLU nets</td><td>continuous, piecewise linear</td><td>hinges stack into any shape</td></tr>
+  <tr><td>Universal approx.</td><td>1 hidden layer suffices in principle</td><td>but depth is far more efficient</td></tr>
+  <tr><td>Parameters</td><td>$\sum_\ell (d_{\ell-1}d_\ell + d_\ell)$</td><td>memory &amp; FLOPs</td></tr>
+  <tr><td>Backward</td><td>$G_W = H^\top G_Z$, $G_\mathbf{b} = \sum_\text{rows} G_Z$, $G_H = G_Z W^\top$</td><td>lesson 17 automates it</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 16: build it</h3>
+  <p>Open <code>workbooks/16_neural_networks/exercises.py</code>. You'll implement activations (including a sigmoid that can't overflow), <code>collapse_linear</code>, <code>count_params</code>, He initialization, a batched <code>mlp_forward</code>, then a 2-layer network with a hand-written <code>backward_2layer</code> (checked against numerical gradients) and train it to over 90% on the spirals. The stretch goal is <code>relu_interpolant</code>: the universal-approximation construction from §4 in code. Grade yourself with:</p>
+  <pre><code>./course check 16</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Michael Nielsen, <em>Neural Networks and Deep Learning</em>, ch. 1 and ch. 4 (a visual proof of universal approximation).</li>
+  <li>Stanford CS231n notes, "Neural Networks Part 1" and the spiral-data case study.</li>
+  <li>Goodfellow, Bengio &amp; Courville, <em>Deep Learning</em>, ch. 6 (deep feedforward networks).</li>
+  <li>Chris Olah, "Neural Networks, Manifolds, and Topology" (blog post): the folding picture.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, LA, fmt, color, withAlpha } = Course;
+  const relu = z => Math.max(0, z), sig = z => 1 / (1 + Math.exp(-z));
+
+  // ---------- fig: a single neuron ----------
+  {
+    const p = new Plot("#fig-neuron", { xmin: -3, xmax: 3, ymin: -2.2, ymax: 2.2, equal: true });
+    const w = { x: 1.5, y: 1, color: "c1" }; let b = 0, act = "sigmoid"; const out = document.getElementById("out-neuron");
+    const probe = { x: -1.5, y: 1.2, color: "c4" };
+    select("#ctl-neuron", "activation ", [["sigmoid", "sigmoid"], ["relu", "ReLU"], ["tanh", "tanh"]], v => { act = v; p.render(); });
+    slider("#ctl-neuron", { label: "bias b ", min: -3, max: 3, step: 0.1, value: 0 }, v => { b = v; p.render(); });
+    p.draggable([w, probe]).render(p => {
+      const f = act === "sigmoid" ? sig : act === "relu" ? relu : Math.tanh;
+      const lo = act === "tanh" ? -1 : 0, hi = act === "relu" ? 4 : 1;
+      p.field((x, y) => f(w.x * x + w.y * y + b), { cmap: act === "tanh" ? "div" : "seq", vmin: lo, vmax: hi, res: 5, alpha: .85 });
+      p.grid().axes();
+      const n2 = w.x * w.x + w.y * w.y || 1e-9, x0 = -b * w.x / n2, y0 = -b * w.y / n2;   // closest point of z=0 to origin
+      p.ray(x0, y0, -w.y, w.x, { color: "fg", width: 2 });
+      p.arrow(0, 0, w.x, w.y, { color: "c1", width: 3, label: "w" });
+      const z = w.x * probe.x + w.y * probe.y + b;
+      p.drawHandles();
+      p.label(probe.x, probe.y, "x", { color: "c4", dx: 10, dy: -10 });
+      p.label(10, 16, act === "relu" ? "shading: relu(z), clipped at 4" : "shading: " + act + "(z)", { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      out.textContent = `w = (${fmt(w.x)}, ${fmt(w.y)})   b = ${b.toFixed(1)}   probe x = (${fmt(probe.x)}, ${fmt(probe.y)})\n` +
+        `z = w·x + b = ${z.toFixed(3)}    ${act}(z) = ${f(z).toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: folding the plane ----------
+  {
+    const p = new Plot("#fig-fold", { xmin: -4, xmax: 4, ymin: -2.6, ymax: 2.6, equal: true });
+    const W1 = [[1.2, -0.6], [0.7, 1.1]], b1 = [0.3, -0.2], W2 = [[1, 0.8], [-0.9, 0.6]], b2 = [-0.6, -0.3];
+    let t = 2, useRelu = true; const out = document.getElementById("out-fold");
+    const aff = (v, W, b) => [v[0] * W[0][0] + v[1] * W[1][0] + b[0], v[0] * W[0][1] + v[1] * W[1][1] + b[1]];
+    const stages = v => { const s1 = aff(v, W1, b1), s2 = useRelu ? s1.map(relu) : s1.slice(), s3 = aff(s2, W2, b2); return [v, s1, s2, s3]; };
+    const at = v => { const S = stages(v), k = Math.min(2, Math.floor(t)), u = t - k; return [S[k][0] + (S[k + 1][0] - S[k][0]) * u, S[k][1] + (S[k + 1][1] - S[k][1]) * u]; };
+    const ts = slider("#ctl-fold", { label: "stage ", min: 0, max: 3, step: 0.01, value: 2 }, v => { t = v; p.render(); });
+    const anim = animator(() => { t = Math.min(3, t + 0.012); ts.set(t); p.render(); return t < 3; });
+    button("#ctl-fold", "▶ play from input", () => { t = 0; anim.start(); });
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = true;
+    cb.addEventListener("change", () => { useRelu = cb.checked; p.render(); }); lab.append(cb, " ReLU between layers"); document.getElementById("ctl-fold").appendChild(lab);
+    const R = Course.rng(3), pts = [];
+    for (let i = 0; i < 160; i++) { const x = R.uniform(-2, 2), y = R.uniform(-2, 2); pts.push([x, y, Math.hypot(x, y) < 1.1 ? "c1" : "c4"]); }
+    p.render(p => {
+      p.grid().axes();
+      for (let i = -4; i <= 4; i++) {
+        const v = [], h = [];
+        for (let j = 0; j <= 80; j++) { const s = -2 + 4 * j / 80; v.push(at([i / 2, s])); h.push(at([s, i / 2])); }
+        p.path(v, { color: "c2", width: i === 0 ? 2.2 : 1.2, alpha: .75 }); p.path(h, { color: "c3", width: i === 0 ? 2.2 : 1.2, alpha: .75 });
+      }
+      pts.forEach(([x, y, c]) => { const q = at([x, y]); p.point(q[0], q[1], { r: 3, color: c, alpha: .85 }); });
+      const names = ["input x", "x W₁ + b₁", useRelu ? "relu(x W₁ + b₁)" : "(no ReLU)", "… W₂ + b₂"];
+      p.label(10, 16, "stage " + t.toFixed(2) + ":  " + names[Math.min(3, Math.round(t))], { px: true, color: "fg", font: "600 13px sans-serif", bg: true });
+      if (!useRelu) {
+        const We = LA.matmul(W1, W2), be = aff(b1, W2, b2);
+        out.textContent = `No ReLU: the whole thing is ONE affine map  x W_eff + b_eff\nW_eff = W₁W₂ = [[${We[0].map(v => v.toFixed(2)).join(", ")}], [${We[1].map(v => v.toFixed(2)).join(", ")}]]   b_eff = (${be.map(v => v.toFixed(2)).join(", ")})`;
+      } else out.textContent = "ReLU on: stage 2 folds every point with a negative coordinate onto an axis.\nNo single matrix can do that. Grid lines that cross the fold become bent.";
+    });
+  }
+
+  // ---------- fig: sum of hinges ----------
+  {
+    const p = new Plot("#fig-hinge", { xmin: -3.2, xmax: 3.2, ymin: -2.2, ymax: 2.6 });
+    const target = x => Math.sin(1.3 * x) + 0.25 * x;
+    const U = [{ c: -1.8, a: 1.2 }, { c: 0, a: -1.8 }, { c: 1.4, a: 1.0 }]; let d = -0.8;
+    const ctl = document.getElementById("ctl-hinge"), sl = []; const out = document.getElementById("out-hinge");
+    const cols = ["c1", "c2", "c5"];
+    U.forEach((u, k) => {
+      sl.push(slider(ctl, { label: `c${k + 1} `, min: -3, max: 3, step: 0.05, value: u.c }, v => { u.c = v; p.render(); }));
+      sl.push(slider(ctl, { label: `a${k + 1} `, min: -3, max: 3, step: 0.05, value: u.a }, v => { u.a = v; p.render(); }));
+    });
+    const dsl = slider(ctl, { label: "d ", min: -2, max: 2, step: 0.05, value: d }, v => { d = v; p.render(); });
+    const xs = Array.from({ length: 121 }, (_, i) => -3 + 6 * i / 120);
+    const f = x => d + U.reduce((s, u) => s + u.a * relu(x - u.c), 0);
+    button(ctl, "best a, d (least squares)", () => {
+      // features [relu(x-c1), relu(x-c2), relu(x-c3), 1]; solve (F^T F + λI) θ = F^T y
+      const F = xs.map(x => [...U.map(u => relu(x - u.c)), 1]), y = xs.map(target), n = 4;
+      const A = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => F.reduce((s, r) => s + r[i] * r[j], 0) + (i === j ? 1e-6 : 0)));
+      const r = Array.from({ length: n }, (_, i) => F.reduce((s, row, k) => s + row[i] * y[k], 0));
+      for (let i = 0; i < n; i++) { let m = i; for (let k = i + 1; k < n; k++) if (Math.abs(A[k][i]) > Math.abs(A[m][i])) m = k; [A[i], A[m]] = [A[m], A[i]]; [r[i], r[m]] = [r[m], r[i]];
+        for (let k = i + 1; k < n; k++) { const q = A[k][i] / A[i][i]; for (let j = i; j < n; j++) A[k][j] -= q * A[i][j]; r[k] -= q * r[i]; } }
+      const th = new Array(n).fill(0); for (let i = n - 1; i >= 0; i--) { let s = r[i]; for (let j = i + 1; j < n; j++) s -= A[i][j] * th[j]; th[i] = s / A[i][i]; }
+      U.forEach((u, k) => { u.a = Math.max(-3, Math.min(3, th[k])); sl[2 * k + 1].set(u.a); }); d = Math.max(-2, Math.min(2, th[3])); dsl.set(d); p.render();
+    });
+    p.render(p => {
+      p.grid().axes();
+      U.forEach((u, k) => { p.line(u.c, p.ymin, u.c, p.ymax, { color: cols[k], width: 1, dash: [3, 4], alpha: .6 }); p.fn(x => u.a * relu(x - u.c), { color: cols[k], width: 1.5, alpha: .45 }); });
+      p.fn(target, { color: "muted", width: 2, dash: [6, 5] });
+      p.fn(f, { color: "c4", width: 3.5 });
+      U.forEach((u, k) => p.point(u.c, f(u.c), { r: 5, color: cols[k] }));
+      const mse = xs.reduce((s, x) => s + (f(x) - target(x)) ** 2, 0) / xs.length;
+      p.label(10, 16, "target (dashed)   f(x) = d + Σ aₖ relu(x − cₖ) (bold)", { px: true, color: "muted", font: "12px sans-serif", bg: true });
+      out.textContent = `f(x) = ${d.toFixed(2)} ` + U.map(u => `${u.a >= 0 ? "+" : "−"} ${Math.abs(u.a).toFixed(2)}·relu(x ${u.c >= 0 ? "−" : "+"} ${Math.abs(u.c).toFixed(2)})`).join(" ") + `\nmean squared error on [−3, 3]: ${mse.toFixed(4)}`;
+    });
+  }
+
+  // ---------- fig: universal approximation ----------
+  {
+    const p = new Plot("#fig-ua", { xmin: -3.2, xmax: 3.2, ymin: -1.6, ymax: 1.8 });
+    const targets = { wave: x => Math.sin(2 * x) * Math.exp(-0.1 * x * x) + 0.2 * x, bump: x => 1.4 * Math.exp(-2 * x * x) - 0.4, kink: x => Math.abs(x) * 0.6 - 1 + 0.25 * Math.sin(3 * x), step: x => (x > 0.3 ? 1 : -0.8) };
+    let tgt = "wave", n = 4; const out = document.getElementById("out-ua");
+    select("#ctl-ua", "target ", [["wave", "wave"], ["bump", "bump"], ["kink", "kinks"], ["step", "step (discontinuous)"]], v => { tgt = v; p.render(); });
+    slider("#ctl-ua", { label: "hidden units n ", min: 1, max: 40, step: 1, value: 4 }, v => { n = v; p.render(); });
+    p.render(p => {
+      const g = targets[tgt], xs = Array.from({ length: n + 1 }, (_, i) => -3 + 6 * i / n), ys = xs.map(g);
+      const s = xs.slice(0, -1).map((x, k) => (ys[k + 1] - ys[k]) / (xs[k + 1] - x));
+      const a = s.map((v, k) => k ? v - s[k - 1] : v);
+      const f = x => ys[0] + a.reduce((acc, ak, k) => acc + ak * relu(x - xs[k]), 0);
+      p.grid().axes();
+      p.fn(g, { color: "muted", width: 2, dash: [6, 5], samples: 800, xmin: -3, xmax: 3 });
+      p.fn(f, { color: "c1", width: 3, xmin: -3, xmax: 3, samples: 800 });
+      xs.forEach((x, k) => p.point(x, ys[k], { r: n > 20 ? 2.5 : 4, color: "c1" }));
+      let err = 0; for (let i = 0; i <= 2000; i++) { const x = -3 + 6 * i / 2000; err = Math.max(err, Math.abs(f(x) - g(x))); }
+      out.textContent = `n = ${n} ReLU units  (${3 * n + 1} parameters)    max |f − target| on [−3, 3] = ${err.toFixed(4)}`;
+    });
+  }
+
+  // ---------- fig: shapes ----------
+  {
+    const p = new Plot("#fig-shapes", { xmin: 0, xmax: 680, ymin: 0, ymax: 300 });
+    let N = 4, d = 3, h = 5, C = 2; const out = document.getElementById("out-shapes");
+    slider("#ctl-shapes", { label: "batch N ", min: 1, max: 12, step: 1, value: N }, v => { N = v; p.render(); });
+    slider("#ctl-shapes", { label: "d_in ", min: 1, max: 12, step: 1, value: d }, v => { d = v; p.render(); });
+    slider("#ctl-shapes", { label: "hidden ", min: 1, max: 12, step: 1, value: h }, v => { h = v; p.render(); });
+    slider("#ctl-shapes", { label: "classes ", min: 1, max: 12, step: 1, value: C }, v => { C = v; p.render(); });
+    let cell = 18;
+    const box = (x, ytop, rows, cols, col, name, sub) => {
+      p.rect(x, ytop - rows * cell, x + cols * cell, ytop, { fill: col, fillAlpha: .22, color: col, width: 1.5 });
+      for (let i = 1; i < rows; i++) p.line(x, ytop - i * cell, x + cols * cell, ytop - i * cell, { color: col, width: .5, alpha: .4 });
+      for (let j = 1; j < cols; j++) p.line(x + j * cell, ytop, x + j * cell, ytop - rows * cell, { color: col, width: .5, alpha: .4 });
+      p.label(x + cols * cell / 2, ytop + 14, name, { align: "center", color: col, font: "600 13px sans-serif" });
+      p.label(x + cols * cell / 2, ytop - rows * cell - 13, sub, { align: "center", color: "muted", font: "11px monospace" });
+      return x + cols * cell;
+    };
+    const op = (x, s) => { p.label(x + 11, 262 - 9, s, { align: "center", color: "fg", font: "600 18px sans-serif" }); return x + 22; };
+    p.render(() => {
+      const cols = d + h + h + C + C, rows = Math.max(N, d, h);
+      cell = Math.min(30, 215 / rows, (680 - 24 - 4 * 22) / cols);
+      const top = 262; let x = 12;
+      x = box(x, top, N, d, "c1", "X", `${N}×${d}`); x = op(x, "·");
+      x = box(x, top, d, h, "c2", "W₁", `${d}×${h}`); x = op(x, "→");
+      x = box(x, top, N, h, "c3", "H", `${N}×${h}`); x = op(x, "·");
+      x = box(x, top, h, C, "c2", "W₂", `${h}×${C}`); x = op(x, "→");
+      box(x, top, N, C, "c5", "logits", `${N}×${C}`);
+      p.label(12, 294, "H = relu(X W₁ + b₁),   logits = H W₂ + b₂   (the b vectors broadcast down the N rows)", { px: true, color: "muted", font: "12px sans-serif", baseline: "bottom" });
+      const P = d * h + h + h * C + C;
+      out.textContent = `parameters: ${d}·${h} + ${h} + ${h}·${C} + ${C} = ${P}   (independent of N)\n` +
+        `activations stored for backward: X ${N * d} + H ${N * h} + logits ${N * C} = ${N * (d + h + C)} numbers   (grows with N)`;
+    });
+  }
+
+  // ---------- fig: spirals trainer ----------
+  {
+    const p = new Plot("#fig-spiral", { xmin: -1.15, xmax: 1.15, ymin: -1.15, ymax: 1.15, equal: true });
+    const L = new Plot("#fig-spiral-loss", { xmin: 0, xmax: 3000, ymin: 0, ymax: 1.4 });
+    const out = document.getElementById("out-spiral");
+    // data: same recipe as workbooks/16 helpers.make_spirals
+    const R0 = Course.rng(0), K = 3, NP = 100, X = [], Y = [];
+    for (let j = 0; j < K; j++) for (let i = 0; i < NP; i++) { const r = i / (NP - 1), t = j * 4 + 4 * i / (NP - 1) + R0.normal(0, 0.2); X.push([r * Math.sin(t), r * Math.cos(t)]); Y.push(j); }
+    let H = 50, lr = 1.0, act = "relu", net, step, losses;
+    const reset = () => {
+      const R = Course.rng(1);
+      net = { W1: Array.from({ length: 2 }, () => Array.from({ length: H }, () => R.normal(0, Math.sqrt(2 / 2)))), b1: new Array(H).fill(0),
+              W2: Array.from({ length: H || 2 }, () => Array.from({ length: K }, () => H ? R.normal(0, Math.sqrt(2 / H)) : 0)), b2: new Array(K).fill(0) };
+      step = 0; losses = []; draw();
+    };
+    const A = z => act === "relu" ? relu(z) : Math.tanh(z), dA = (z, a) => act === "relu" ? (z > 0 ? 1 : 0) : 1 - a * a;
+    const forward = x => {
+      if (!H) { const s = [0, 1, 2].map(c => x[0] * net.W2[0][c] + x[1] * net.W2[1][c] + net.b2[c]); return { z: [], a: x, s }; }
+      const z = net.b1.map((b, k) => x[0] * net.W1[0][k] + x[1] * net.W1[1][k] + b), a = z.map(A);
+      const s = [0, 1, 2].map(c => a.reduce((acc, v, k) => acc + v * net.W2[k][c], net.b2[c])); return { z, a, s };
+    };
+    const train = () => {
+      const n = X.length, reg = 1e-3, gW1 = [new Array(H).fill(0), new Array(H).fill(0)], gb1 = new Array(H).fill(0);
+      const hin = H || 2, gW2 = Array.from({ length: hin }, () => [0, 0, 0]), gb2 = [0, 0, 0]; let loss = 0;
+      for (let i = 0; i < n; i++) {
+        const { z, a, s } = forward(X[i]), m = Math.max(...s), e = s.map(v => Math.exp(v - m)), S = e[0] + e[1] + e[2];
+        loss += -Math.log(e[Y[i]] / S) / n;
+        const g = e.map((v, c) => (v / S - (c === Y[i] ? 1 : 0)) / n);
+        for (let c = 0; c < 3; c++) { gb2[c] += g[c]; for (let k = 0; k < hin; k++) gW2[k][c] += a[k] * g[c]; }
+        if (H) for (let k = 0; k < H; k++) { const ga = g[0] * net.W2[k][0] + g[1] * net.W2[k][1] + g[2] * net.W2[k][2], gz = ga * dA(z[k], a[k]); if (gz) { gW1[0][k] += X[i][0] * gz; gW1[1][k] += X[i][1] * gz; gb1[k] += gz; } }
+      }
+      let r2 = 0;
+      for (let k = 0; k < hin; k++) for (let c = 0; c < 3; c++) { r2 += net.W2[k][c] ** 2; net.W2[k][c] -= lr * (gW2[k][c] + reg * net.W2[k][c]); }
+      for (let c = 0; c < 3; c++) net.b2[c] -= lr * gb2[c];
+      for (let k = 0; k < H; k++) { for (let r = 0; r < 2; r++) { r2 += net.W1[r][k] ** 2; net.W1[r][k] -= lr * (gW1[r][k] + reg * net.W1[r][k]); } net.b1[k] -= lr * gb1[k]; }
+      return loss + 0.5 * reg * r2;
+    };
+    const acc = () => X.reduce((s, x, i) => { const v = forward(x).s; return s + (v.indexOf(Math.max(...v)) === Y[i]); }, 0) / X.length;
+    const cls = ["c1", "c4", "c3"];
+    const draw = () => {
+      p.render(p => {
+        const c = p.ctx, res = 8, cc = cls.map(k => withAlpha(color(k), .28));
+        for (let py = 0; py < p.H; py += res) for (let px = 0; px < p.W; px += res) {
+          const [x, y] = p.toWorld(px + res / 2, py + res / 2), s = forward([x, y]).s; c.fillStyle = cc[s.indexOf(Math.max(...s))]; c.fillRect(px, py, res, res);
+        }
+        X.forEach((x, i) => p.point(x[0], x[1], { r: 3.2, color: cls[Y[i]], stroke: "bg" }));
+      });
+      L.render(L => {
+        const top = Math.max(1.4, ...losses.slice(0, 1)); L.setView(-60, 3250, 0, top * 1.1);
+        L.grid({ step: 500, stepY: 0.2 }).axes({ step: 1000, stepY: 0.2 });
+        L.path(losses.map((v, i) => [i, Math.min(v, top)]), { color: "c5", width: 2 });
+        L.label(8, 16, "training loss vs step", { px: true, color: "muted", font: "12px sans-serif" });
+      });
+      out.textContent = `step ${step}   loss ${losses.length ? losses[losses.length - 1].toFixed(4) : "—"}   training accuracy ${(100 * acc()).toFixed(1)}%   hidden units ${H}   (${H ? 2 * H + H + 3 * H + 3 : 9} parameters)`;
+    };
+    const anim = animator(() => { for (let k = 0; k < 15 && step < 3000; k++, step++) { const l = train(); if (!isFinite(l)) { step = 3000; break; } losses.push(l); } draw(); return step < 3000; });
+    button("#ctl-spiral", "▶ play / ❚❚ pause", () => anim.running ? anim.stop() : anim.start());
+    button("#ctl-spiral", "reset", () => { anim.stop(); reset(); });
+    slider("#ctl-spiral", { label: "hidden units ", min: 0, max: 100, step: 1, value: 50 }, v => { H = v; anim.stop(); reset(); });
+    select("#ctl-spiral", "lr ", [["1", "1.0"], ["0.1", "0.1"], ["0.3", "0.3"], ["3", "3"], ["5", "5"]], v => { lr = +v; anim.stop(); reset(); });
+    select("#ctl-spiral", "activation ", [["relu", "ReLU"], ["tanh", "tanh"]], v => { act = v; anim.stop(); reset(); });
+    reset();
+    // pre-train a little so the static page already shows a curved boundary
+    for (let k = 0; k < 300; k++, step++) losses.push(train()); draw();
+  }
+});
+</script>
+</body>
+</html>

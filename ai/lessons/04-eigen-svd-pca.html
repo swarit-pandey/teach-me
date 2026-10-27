@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eigenvectors, SVD & PCA</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="04">
+<main>
+
+<div class="kicker">Part 1 · Linear algebra</div>
+<h1>Eigenvectors, SVD &amp; PCA</h1>
+<p class="lede">A matrix can look like a jumble of numbers, but almost every matrix secretly does something simple: it stretches space along a few special directions. Find those directions and the matrix becomes easy to understand, compress and compute with. That's what eigenvectors, the SVD and PCA give you.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Say what an eigenvector is geometrically, and find eigenvalues of a 2×2 matrix from $\det(A-\lambda I)=0$.</li>
+    <li>Explain why power iteration converges, and how fast.</li>
+    <li>State the spectral theorem for symmetric matrices and prove that their eigenvectors are orthogonal.</li>
+    <li>Read any matrix as rotate → scale → rotate (the SVD), and build its best rank-$k$ approximation.</li>
+    <li>Derive PCA as "find the direction of maximum variance", and compute it two ways: from the covariance's eigenvectors and from the SVD of the data.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="eigen">1. Directions that only scale</h2>
+<p>In lesson 02 you saw that a 2×2 matrix $A$ moves every vector: the columns of $A$ say where $\hat\imath$ and $\hat\jmath$ land, and everything else follows by linearity. Most vectors get knocked off their original line. They are rotated as well as stretched.</p>
+<p>But usually a few special directions are <em>not</em> rotated. A vector pointing that way comes out pointing the same way (or exactly backwards), just longer or shorter. Those are the <b>eigenvectors</b> of $A$, and the stretch factor is the <b>eigenvalue</b>:</p>
+$$A\mathbf{v} = \lambda\mathbf{v}, \qquad \mathbf{v} \neq \mathbf{0}.$$
+<p>Read it as "applying $A$ to $\mathbf{v}$ is the same as multiplying $\mathbf{v}$ by the number $\lambda$". Along an eigenvector, a whole matrix collapses into a single scalar. If $\lambda \lt 0$ the vector flips; if $\lambda = 0$ it's crushed to the origin (it's in the null space from lesson 03).</p>
+<p>Any multiple of an eigenvector is also an eigenvector: $A(c\mathbf{v}) = cA\mathbf{v} = \lambda(c\mathbf{v})$. So what matters is the <em>line</em> (the span), not one particular arrow. We usually pick the unit-length one.</p>
+
+<div class="figure">
+  <canvas id="fig-eig" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-eig"></div>
+  <div class="readout" id="out-eig"></div>
+  <div class="caption"><b>Try it:</b> drag the <span style="color:var(--c1)">blue</span> and <span style="color:var(--c6)">teal</span> handles: they are $A\hat\imath$ and $A\hat\jmath$, the columns of $A$. The thin arrows show where 48 evenly spaced unit vectors land. The ones that stayed on their own line turn <span style="color:var(--c3)">green</span>, and the green bands are the exact eigen-directions. Drag the <span style="color:var(--c2)">orange</span> unit vector $\mathbf{x}$ around the circle and watch $A\mathbf{x}$ (pink) line up with it only on the bands. Then try the presets: the rotation has no green directions at all, and the shear has only one. Tick "symmetric" and the two bands snap to 90°.</div>
+</div>
+
+<div class="callout intuition">
+<p>Think of eigenvectors as the "grain" of a transformation. Along the grain, $A$ is just a scaling; everywhere else it's a mix of scalings along the grain lines. That's why they make hard problems easy: write a vector in the eigenvector basis and applying $A$ becomes "multiply each coordinate by its $\lambda$".</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="charpoly">2. Finding them: the characteristic polynomial</h2>
+<p>Move everything to one side: $A\mathbf{v} = \lambda\mathbf{v}$ is the same as</p>
+$$(A - \lambda I)\,\mathbf{v} = \mathbf{0}, \qquad \mathbf{v} \ne \mathbf{0}.$$
+<p>So the matrix $A - \lambda I$ sends a non-zero vector to zero. It has a non-trivial null space, so it's singular (lesson 03), so it squashes area to zero, so its determinant vanishes (lesson 02):</p>
+$$\boxed{\;\det(A - \lambda I) = 0\;}$$
+<p>For a 2×2 matrix $A = \begin{bmatrix} a & b \\ c & d\end{bmatrix}$ this is a quadratic in $\lambda$:</p>
+$$\det\begin{bmatrix} a-\lambda & b \\ c & d-\lambda\end{bmatrix} = (a-\lambda)(d-\lambda) - bc = \lambda^2 - (a+d)\lambda + (ad-bc) = 0.$$
+<p>The coefficients are the <b>trace</b> $\operatorname{tr}A = a+d$ and the <b>determinant</b> $\det A$. Since a monic quadratic with roots $\lambda_1,\lambda_2$ factors as $(\lambda-\lambda_1)(\lambda-\lambda_2) = \lambda^2 - (\lambda_1+\lambda_2)\lambda + \lambda_1\lambda_2$, matching coefficients gives two facts that hold in every dimension:</p>
+$$\lambda_1 + \lambda_2 = \operatorname{tr}A, \qquad \lambda_1\lambda_2 = \det A.$$
+<p>The second one is lovely: the determinant is the area scaling factor (lesson 02), and along the eigen-directions the area gets scaled by $\lambda_1$ one way and $\lambda_2$ the other.</p>
+<p>Once you have a $\lambda$, the eigenvector is any non-zero vector in the null space of $A-\lambda I$. In 2-D that's easy: the rows of $A-\lambda I$ are parallel, and $\mathbf{v}$ must be orthogonal to them. So if a row is $(p, q)$, take $\mathbf{v} = (-q, p)$.</p>
+
+<div class="example">
+  <div class="label">Worked example 1</div>
+  <p>$A = \begin{bmatrix} 2 & 1 \\ 1 & 2\end{bmatrix}$. Trace $4$, determinant $3$, so $\lambda^2 - 4\lambda + 3 = (\lambda-3)(\lambda-1) = 0$, giving $\lambda_1 = 3$, $\lambda_2 = 1$.</p>
+  <p>For $\lambda_1 = 3$: $A - 3I = \begin{bmatrix} -1 & 1 \\ 1 & -1\end{bmatrix}$. Its first row is $(-1, 1)$, so $\mathbf{v}_1 = (-1, -1) \propto (1, 1)$. Check: $A(1,1) = (3, 3) = 3\,(1,1)$. ✓</p>
+  <p>For $\lambda_2 = 1$: $A - I = \begin{bmatrix} 1 & 1 \\ 1 & 1\end{bmatrix}$, row $(1,1)$, so $\mathbf{v}_2 = (-1, 1)$. Check: $A(-1,1) = (-1, 1)$. ✓</p>
+  <p>Sanity: $3 + 1 = 4 = \operatorname{tr}A$ and $3 \cdot 1 = 3 = \det A$. Notice $\mathbf{v}_1 \cdot \mathbf{v}_2 = 0$. That's no accident, because $A$ is symmetric (section 4). This is the "symmetric" preset in the figure above.</p>
+</div>
+
+<p>Three things can happen to the quadratic, and the figure shows all three:</p>
+<table>
+  <tr><th>Discriminant $(\operatorname{tr}A)^2 - 4\det A$</th><th>Eigenvalues</th><th>Example</th></tr>
+  <tr><td>positive</td><td>two distinct real ones, two eigen-lines</td><td>$\begin{bmatrix} 2&1\\1&2\end{bmatrix}$</td></tr>
+  <tr><td>zero</td><td>one repeated value; maybe only one line</td><td>shear $\begin{bmatrix} 1&1\\0&1\end{bmatrix}$: only the x-axis survives</td></tr>
+  <tr><td>negative</td><td>complex pair, no real eigen-line</td><td>rotation: every direction turns</td></tr>
+</table>
+
+<div class="callout warning">
+<p>Never compute eigenvalues of a big matrix by finding roots of its characteristic polynomial: polynomial roots are numerically fragile and the degree is $n$. Real libraries use iterative methods. The simplest one is next.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="power">3. Power iteration: let the matrix find its own eigenvector</h2>
+<p>Take any starting vector $\mathbf{x}_0$ and keep hitting it with $A$, re-normalizing so it doesn't blow up:</p>
+$$\mathbf{x}_{k+1} = \frac{A\mathbf{x}_k}{\|A\mathbf{x}_k\|}.$$
+<p>It turns toward the eigenvector with the largest $|\lambda|$. Here's why. Suppose $A$ has eigenvectors $\mathbf{q}_1, \dots, \mathbf{q}_n$ forming a basis, with $|\lambda_1| > |\lambda_2| \ge \cdots$. Write the start in that basis, $\mathbf{x}_0 = c_1\mathbf{q}_1 + \cdots + c_n\mathbf{q}_n$. Applying $A$ just multiplies each coordinate by its eigenvalue, so after $k$ steps (ignoring normalization, which only rescales):</p>
+$$A^k\mathbf{x}_0 = c_1\lambda_1^k\mathbf{q}_1 + c_2\lambda_2^k\mathbf{q}_2 + \cdots = \lambda_1^k\Big( c_1\mathbf{q}_1 + c_2\big(\tfrac{\lambda_2}{\lambda_1}\big)^k\mathbf{q}_2 + \cdots\Big).$$
+<p>Every ratio $|\lambda_i/\lambda_1|$ is less than 1, so those terms die off geometrically and only the $\mathbf{q}_1$ direction survives (as long as $c_1 \neq 0$). The error shrinks by a factor of about $|\lambda_2/\lambda_1|$ per step. Once $\mathbf{x}$ has converged, read off the eigenvalue with the <b>Rayleigh quotient</b> $\lambda_1 \approx \mathbf{x}^\top A\mathbf{x}$ (for unit $\mathbf{x}$).</p>
+
+<div class="figure">
+  <div class="row">
+    <div style="flex:400 1 0"><canvas id="fig-power" width="400" height="380"></canvas></div>
+    <div style="flex:280 1 0"><canvas id="fig-power-err" width="280" height="380"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-power"></div>
+  <div class="readout" id="out-power"></div>
+  <div class="caption"><b>Try it:</b> press <em>Play</em>. The <span style="color:var(--c2)">orange</span> iterate swings onto the dominant eigen-line (<span style="color:var(--c3)">green</span>, $\lambda_1 = 1$). The faint line is the second eigenvector, with eigenvalue $r$. On the right, the error (log scale) falls on a straight line with slope $\log_{10}|r|$, which is the dashed prediction. Drag $r$ toward ±1 and convergence slows to a crawl. With negative $r$ the iterate zig-zags from side to side as it closes in.</div>
+</div>
+
+<div class="callout ml">
+<p>Power iteration is everywhere. Google's original PageRank is power iteration on the web's link matrix. Spectral normalization in GANs runs one power-iteration step per training step to estimate a weight matrix's largest singular value. The "exploding/vanishing" behavior of deep and recurrent nets (lessons 18 and 20) is the same story: multiply by the same matrix many times and the largest eigenvalue takes over. If $|\lambda_1| > 1$ the signal explodes; if it's less than 1, it dies.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="symmetric">4. Symmetric matrices: the spectral theorem</h2>
+<p>Symmetric matrices ($A = A^\top$) are the best-behaved matrices there are, and they're everywhere in ML: covariance matrices, Hessians (lesson 07), Gram matrices $X^\top X$ (lesson 13), kernel matrices. For them, everything goes right.</p>
+<div class="callout key">
+<p><b>Spectral theorem.</b> A real symmetric matrix has real eigenvalues and an <em>orthonormal</em> basis of eigenvectors. Stack them as the columns of an orthogonal matrix $Q$ ($Q^\top Q = I$) and put the eigenvalues on the diagonal of $\Lambda$:</p>
+$$A = Q\Lambda Q^\top = \sum_{i=1}^n \lambda_i\,\mathbf{q}_i\mathbf{q}_i^\top.$$
+</div>
+<p>The orthogonality is short enough to prove. Take two eigenpairs with $\lambda_1 \ne \lambda_2$. Compute $\mathbf{q}_1^\top A\mathbf{q}_2$ two ways:</p>
+$$\mathbf{q}_1^\top (A\mathbf{q}_2) = \lambda_2\,\mathbf{q}_1^\top\mathbf{q}_2, \qquad (A^\top\mathbf{q}_1)^\top\mathbf{q}_2 = (A\mathbf{q}_1)^\top\mathbf{q}_2 = \lambda_1\,\mathbf{q}_1^\top\mathbf{q}_2.$$
+<p>The two left sides are equal because $A = A^\top$. Subtract: $(\lambda_1 - \lambda_2)\,\mathbf{q}_1^\top\mathbf{q}_2 = 0$. Since $\lambda_1 \ne \lambda_2$, we get $\mathbf{q}_1 \cdot \mathbf{q}_2 = 0$. $\blacksquare$ (Real eigenvalues and the repeated-eigenvalue case need a bit more work; see Strang ch. 6.)</p>
+<p>Read $A = Q\Lambda Q^\top$ right-to-left as a recipe for applying $A$ to $\mathbf{x}$. $Q^\top\mathbf{x}$ finds the coordinates of $\mathbf{x}$ in the eigenbasis (each is a dot product $\mathbf{q}_i\cdot\mathbf{x}$, just like the projections of lesson 01). Then $\Lambda$ scales each coordinate by its $\lambda_i$. Then $Q$ goes back to the standard basis. So a symmetric matrix is <b>rotate, scale along the axes, rotate back</b>. It maps the unit circle to an ellipse whose axes <em>are</em> the eigenvectors, with semi-axis lengths $|\lambda_i|$.</p>
+<p>The outer-product form $\sum_i \lambda_i\mathbf{q}_i\mathbf{q}_i^\top$ is the "sum of outer products" view of matmul from lesson 03. Each term $\mathbf{q}_i\mathbf{q}_i^\top$ is the projection onto one eigen-line.</p>
+
+<!-- ============================================================ -->
+<h2 id="svd">5. The SVD: every matrix is rotate–scale–rotate</h2>
+<p>Most matrices aren't symmetric, and many aren't even square. A $768\times3072$ weight matrix in a transformer has no eigenvectors at all, because $A\mathbf{v}$ and $\mathbf{v}$ live in different spaces. But a slightly different decomposition always exists. The <b>singular value decomposition</b> (SVD) of any $m\times n$ matrix is</p>
+$$A = U\Sigma V^\top = \sum_{i=1}^{r} \sigma_i\,\mathbf{u}_i\mathbf{v}_i^\top,$$
+<p>where $V$ ($n\times n$) and $U$ ($m\times m$) are orthogonal, and $\Sigma$ is diagonal with <b>singular values</b> $\sigma_1 \ge \sigma_2 \ge \cdots \ge 0$. Geometrically: rotate (by $V^\top$), stretch along the coordinate axes (by $\Sigma$), rotate again (by $U$). The unit sphere always goes to an ellipsoid. Its semi-axes are $\sigma_i\mathbf{u}_i$, and they are the images of the orthogonal input directions $\mathbf{v}_i$.</p>
+
+<h3>Where it comes from</h3>
+<p>Here's the trick: $A^\top A$ is square ($n\times n$) and symmetric, since $(A^\top A)^\top = A^\top A$. So by the spectral theorem it has orthonormal eigenvectors $\mathbf{v}_i$ with real eigenvalues. Those eigenvalues are never negative:</p>
+$$\lambda_i = \mathbf{v}_i^\top A^\top A\,\mathbf{v}_i = (A\mathbf{v}_i)^\top(A\mathbf{v}_i) = \|A\mathbf{v}_i\|^2 \ge 0.$$
+<p>Define $\sigma_i = \sqrt{\lambda_i} = \|A\mathbf{v}_i\|$, and for $\sigma_i > 0$ let $\mathbf{u}_i = A\mathbf{v}_i/\sigma_i$. The outputs are orthogonal too: $\mathbf{u}_i\cdot\mathbf{u}_j = \mathbf{v}_i^\top A^\top A\mathbf{v}_j/(\sigma_i\sigma_j) = \lambda_j\,\mathbf{v}_i\cdot\mathbf{v}_j/(\sigma_i\sigma_j) = 0$ for $i \ne j$. So $A\mathbf{v}_i = \sigma_i\mathbf{u}_i$ for every $i$, which in matrix form is $AV = U\Sigma$, i.e. $A = U\Sigma V^\top$. $\blacksquare$</p>
+<p>In words: <em>the SVD finds the orthogonal input directions that $A$ maps to orthogonal output directions.</em></p>
+
+<div class="figure">
+  <canvas id="fig-svd" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-svd"></div>
+  <div class="readout" id="out-svd"></div>
+  <div class="caption"><b>Try it:</b> press <em>Play</em> (or scrub the stage slider) to watch $A = U\Sigma V^\top$ act in three moves. First $V^\top$ rotates the unit circle so the right singular vectors $\mathbf{v}_1$ (<span style="color:var(--c1)">blue</span>) and $\mathbf{v}_2$ (<span style="color:var(--c2)">orange</span>) lie on the axes. Then $\Sigma$ stretches along the axes. Then $U$ rotates the result into place. The dashed ellipse is the final target. Drag the handles to change $A$. When $\det A \lt 0$ the second stretch passes through zero and flips the flag, which is how the orientation reversal from lesson 02 shows up. Make the columns parallel and $\sigma_2 \to 0$: the ellipse collapses to a segment and the rank drops to 1 (lesson 03).</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example 2: SVD by hand</div>
+  <p>$A = \begin{bmatrix} 3 & 0 \\ 4 & 5\end{bmatrix}$. First $A^\top A = \begin{bmatrix} 3 & 4 \\ 0 & 5\end{bmatrix}\begin{bmatrix} 3 & 0 \\ 4 & 5\end{bmatrix} = \begin{bmatrix} 25 & 20 \\ 20 & 25\end{bmatrix}$.</p>
+  <p>Its trace is 50 and its determinant is $625 - 400 = 225$, so $\lambda^2 - 50\lambda + 225 = 0$, giving $\lambda = 45, 5$. Eigenvectors, as in example 1: $\mathbf{v}_1 = \tfrac{1}{\sqrt2}(1,1)$ and $\mathbf{v}_2 = \tfrac{1}{\sqrt2}(1,-1)$.</p>
+  <p>Singular values: $\sigma_1 = \sqrt{45} = 3\sqrt5 \approx 6.708$ and $\sigma_2 = \sqrt5 \approx 2.236$.</p>
+  <p>Left vectors: $A\mathbf{v}_1 = \tfrac{1}{\sqrt2}(3, 9)$, so $\mathbf{u}_1 = \tfrac{1}{\sqrt2}(3,9)/(3\sqrt5) = \tfrac{1}{\sqrt{10}}(1, 3)$. And $A\mathbf{v}_2 = \tfrac{1}{\sqrt2}(3,-1)$, so $\mathbf{u}_2 = \tfrac{1}{\sqrt{10}}(3,-1)$. Check that $\mathbf{u}_1\cdot\mathbf{u}_2 = 3 - 3 = 0$. ✓</p>
+  <p>Cross-check with lesson 02: $|\det A| = 15$, and $\sigma_1\sigma_2 = 3\sqrt5\cdot\sqrt5 = 15$. ✓ Rotations don't change area, so all the area scaling lives in $\Sigma$.</p>
+  <p>Notice that $A$'s <em>eigenvalues</em> are 5 and 3 (it's triangular, so they sit on the diagonal), which are <em>not</em> the singular values. For non-symmetric matrices the two decompositions answer different questions.</p>
+</div>
+
+<div class="callout warning">
+<p>Eigenvalues vs singular values. Eigenvalues answer "which directions stay put, and what happens when I apply $A$ over and over?" (dynamics, power iteration). Singular values answer "how much can $A$ stretch anything, and in which directions?" (size, rank, compression, conditioning). They coincide only for symmetric positive semi-definite matrices. For any symmetric matrix, $\sigma_i = |\lambda_i|$.</p>
+</div>
+
+<p>The SVD exposes everything lesson 03 cared about at once. The <b>rank</b> is the number of non-zero $\sigma_i$. The $\mathbf{u}_i$ with $\sigma_i > 0$ span the column space. The $\mathbf{v}_i$ with $\sigma_i = 0$ span the null space. And $\|A\mathbf{x}\| \le \sigma_1\|\mathbf{x}\|$ always, so $\sigma_1$ is the largest stretch, called the <b>spectral norm</b>. The ratio $\sigma_1/\sigma_n$ is the <b>condition number</b>, which measures how badly $A\mathbf{x}=\mathbf{b}$ amplifies errors, and how hard gradient descent struggles on a quadratic (lessons 06 and 18).</p>
+
+<!-- ============================================================ -->
+<h2 id="lowrank">6. Low-rank approximation: keep the big pieces</h2>
+<p>The outer-product form $A = \sum_i \sigma_i\mathbf{u}_i\mathbf{v}_i^\top$ writes $A$ as a sum of rank-1 "layers", sorted from most to least important. Truncate after $k$ terms:</p>
+$$A_k = \sum_{i=1}^{k} \sigma_i\,\mathbf{u}_i\mathbf{v}_i^\top.$$
+<p>Because $U$ and $V$ are orthogonal, the Frobenius norm (the square root of the sum of all squared entries) ignores the rotations, and the error is exactly what you threw away:</p>
+$$\|A - A_k\|_F = \Big\|\sum_{i>k}\sigma_i\mathbf{u}_i\mathbf{v}_i^\top\Big\|_F = \sqrt{\sigma_{k+1}^2 + \sigma_{k+2}^2 + \cdots}.$$
+<div class="callout key">
+<p><b>Eckart–Young theorem.</b> $A_k$ is the <em>best</em> rank-$k$ approximation of $A$: no matrix $B$ of rank $\le k$ has a smaller $\|A - B\|_F$ (or a smaller spectral-norm error, which is $\sigma_{k+1}$). The workbook checks this numerically against random competitors.</p>
+</div>
+<p>Storage drops from $mn$ numbers to $k(m+n+1)$. If the singular values decay fast, a small $k$ captures almost everything. Natural images, and the weight updates of fine-tuned language models, both behave like this.</p>
+
+<div class="figure">
+  <canvas id="fig-img" width="680" height="280"></canvas>
+  <div class="controls" id="ctl-img"></div>
+  <div class="readout" id="out-img"></div>
+  <div class="caption"><b>Try it:</b> a 64×64 procedurally drawn image, treated as a matrix of brightness values. Slide $k$ to rebuild it from its top $k$ singular triplets. Big flat shapes (sky gradient, house, ground) appear within a handful of terms, and the round sun by $k \approx 10$. The noisy texture patch in the corner needs nearly all of them, because fine, unstructured detail lives in the small singular values. Notice also the blocky "plaid" artifacts at small $k$: each rank-1 layer $\sigma_i\mathbf{u}_i\mathbf{v}_i^\top$ is a product of a column pattern and a row pattern. The right panel shows all 64 singular values on a log scale. The ones you keep are blue. The readout compares the measured error with the Eckart–Young prediction from the dropped $\sigma$'s. They always agree.</div>
+</div>
+
+<div class="callout ml">
+<p><b>LoRA</b> (lesson 25) fine-tunes a huge model by learning a low-rank update $\Delta W = BA$ with $B$ of size $d\times r$ and $A$ of size $r\times d$, $r \approx 8$. That's a bet that the change you need lives in a few directions, which is the Eckart–Young picture. Low-rank structure also shows up in embedding tables, in attention's $QK^\top$ (rank at most the head dimension, lesson 22), and in model compression.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="pca">7. PCA: the directions of greatest variance</h2>
+<p>Now point all of this at data. You have $n$ samples in $\mathbb{R}^d$, the rows of $X$. You want the single direction $\mathbf{u}$ (unit length) along which the data is most spread out, because that direction carries the most information.</p>
+<p>First <b>center</b> the data by subtracting the column means, so each row $\mathbf{x}_i$ is now relative to the mean. The coordinate of sample $i$ along $\mathbf{u}$ is the scalar projection $\mathbf{u}\cdot\mathbf{x}_i$ (lesson 01). Its variance across the dataset is</p>
+$$\operatorname{Var}_{\mathbf{u}} = \frac{1}{n-1}\sum_i (\mathbf{u}^\top\mathbf{x}_i)^2 = \mathbf{u}^\top\Big(\frac{1}{n-1}\sum_i\mathbf{x}_i\mathbf{x}_i^\top\Big)\mathbf{u} = \mathbf{u}^\top C\,\mathbf{u},$$
+<p>where $C = \frac{1}{n-1}X^\top X$ (with $X$ centered) is the <b>covariance matrix</b>. It's symmetric and positive semi-definite. Now apply the spectral theorem: $C = Q\Lambda Q^\top$. Write $\mathbf{u}$ in the eigenbasis, $\mathbf{w} = Q^\top\mathbf{u}$. That's still a unit vector, because rotations preserve length. Then</p>
+$$\mathbf{u}^\top C\mathbf{u} = \mathbf{w}^\top\Lambda\mathbf{w} = \lambda_1 w_1^2 + \lambda_2 w_2^2 + \cdots + \lambda_d w_d^2 \;\le\; \lambda_1(w_1^2 + \cdots + w_d^2) = \lambda_1.$$
+<p>Equality holds when $\mathbf{w} = \mathbf{e}_1$, i.e. $\mathbf{u} = \mathbf{q}_1$. <b>The direction of maximum variance is the top eigenvector of the covariance, and the variance along it is $\lambda_1$.</b> Repeat the argument among directions orthogonal to $\mathbf{q}_1$ and you get $\mathbf{q}_2$, and so on. These are the <b>principal components</b>. The fraction $\lambda_i/\sum_j\lambda_j$ is the <b>variance explained</b> by component $i$. (The denominator is $\operatorname{tr}C$, the total variance, by section 2's trace fact.)</p>
+
+<div class="figure">
+  <div class="row">
+    <div style="flex:430 1 0"><canvas id="fig-pca" width="430" height="400"></canvas></div>
+    <div style="flex:250 1 0"><canvas id="fig-pca-var" width="250" height="400"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-pca"></div>
+  <div class="readout" id="out-pca"></div>
+  <div class="caption"><b>Try it:</b> 300 samples from a 2-D Gaussian. The sliders set its spread and tilt. The arrows are the principal axes ($\pm2\sqrt{\lambda_i}$ along each eigenvector of the sample covariance). Drag the <span style="color:var(--c4)">pink</span> handle to choose a direction $\mathbf{u}$. The dots on the pink line are the projections, and the right panel plots their variance $\mathbf{u}^\top C\mathbf{u}$ against the angle of $\mathbf{u}$. The curve peaks at exactly PC1 ($\lambda_1$) and bottoms out at PC2 ($\lambda_2$), 90° away. Make the cloud round ($\sigma_1 \approx \sigma_2$) and the curve flattens: no direction is special, and the principal axes start to jitter.</div>
+</div>
+
+<h3>PCA via the SVD</h3>
+<p>You don't need to form $C$ at all. Take the SVD of the centered data, $X = U\Sigma V^\top$. Then</p>
+$$C = \frac{1}{n-1}X^\top X = \frac{1}{n-1}V\Sigma U^\top U\Sigma V^\top = V\,\frac{\Sigma^2}{n-1}\,V^\top.$$
+<p>That's an eigendecomposition of $C$. The principal components are the right singular vectors $\mathbf{v}_i$, and the variances are $\sigma_i^2/(n-1)$. This is how real libraries do it, because forming $X^\top X$ squares the condition number and loses precision. The two methods agree <em>up to the sign</em> of each component: if $\mathbf{q}$ is an eigenvector, so is $-\mathbf{q}$. The workbook makes you check this.</p>
+<p>Projecting onto the top $k$ components, $Z = XV_k$, gives each sample $k$ coordinates instead of $d$. Mapping back, $\hat X = ZV_k^\top = X V_kV_k^\top$, is exactly the rank-$k$ approximation $X_k$ from section 6. So PCA <em>is</em> Eckart–Young applied to centered data.</p>
+
+<div class="example">
+  <div class="label">Worked example 3: PCA on five points</div>
+  <p>Data: $(-2,-1), (-1,-1), (0,0), (1,1), (2,1)$. The mean is $(0,0)$, so it's already centered.</p>
+  <p>Sums: $\sum x^2 = 4+1+0+1+4 = 10$, $\sum xy = 2+1+0+1+2 = 6$, $\sum y^2 = 1+1+0+1+1 = 4$. Divide by $n-1 = 4$: $C = \begin{bmatrix} 2.5 & 1.5 \\ 1.5 & 1\end{bmatrix}$.</p>
+  <p>Trace $3.5$, determinant $2.5 - 2.25 = 0.25$. So $\lambda = \tfrac{3.5 \pm \sqrt{12.25 - 1}}{2} = \tfrac{3.5 \pm 3.354}{2}$, giving $\lambda_1 \approx 3.427$ and $\lambda_2 \approx 0.073$.</p>
+  <p>PC1: the first row of $C - \lambda_1 I$ is $(-0.927, 1.5)$, so $\mathbf{q}_1 \propto (1.5, 0.927)$, which normalizes to $(0.851, 0.526)$. That's a line about 31.7° above the x-axis, right through the cloud.</p>
+  <p>Variance explained: $3.427/3.5 \approx 97.9\%$. These 2-D points are essentially 1-D. Store one number per point, $z_i = \mathbf{q}_1\cdot\mathbf{x}_i$, and lose only 2% of the variance.</p>
+</div>
+
+<div class="callout warning">
+<p>Two classic PCA bugs. (1) <b>Forgetting to center</b>: without subtracting the mean, the "top direction" just points at the mean. (2) <b>Mixing units</b>: if one feature is in millimetres and another in kilometres, PCA will declare the millimetre feature "most important" purely because its numbers are bigger. Standardize the features (divide by their standard deviations) when units differ.</p>
+</div>
+
+<div class="callout ml">
+<p>PCA is the first thing to try when you want to <em>look</em> at high-dimensional data. Project 768-d word embeddings onto their top 2 components and clusters appear. It's also used to decorrelate ("whiten") inputs, to compress features, and to analyze what a network has learned: researchers run PCA on hidden activations to find dominant directions. The "variance along $\mathbf{u}$ is $\mathbf{u}^\top C\mathbf{u}$" identity reappears in initialization (lesson 18) and in the Gaussian chapter (lesson 09).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+<p>Pencil and paper first. Check numbers with the boxes, then read the solutions.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Find the eigenvalues and eigenvectors of $A = \begin{bmatrix} 4 & 1 \\ 2 & 3\end{bmatrix}$. Enter the eigenvalues, largest first:</p>
+<div class="numcheck" data-answer="5,2"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\operatorname{tr}A = 7$ and $\det A = 10$, so $\lambda^2 - 7\lambda + 10 = (\lambda-5)(\lambda-2) = 0$. For $\lambda=5$: $A - 5I$ has first row $(-1, 1)$, so $\mathbf{v}_1 = (1,1)$. Check: $A(1,1) = (5,5)$. ✓ For $\lambda = 2$: $A - 2I$ has first row $(2, 1)$, so $\mathbf{v}_2 = (-1, 2)$. Check: $A(-1,2) = (-2, 4)$. ✓ The eigenvectors are <em>not</em> orthogonal: $(1,1)\cdot(-1,2) = 1$, because $A$ isn't symmetric.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Without solving any quadratic, give the sum and the product of the eigenvalues of $\begin{bmatrix} 1 & 2 \\ 3 & 4\end{bmatrix}$ (in that order). What does the sign of the product tell you?</p>
+<div class="numcheck" data-answer="5,-2"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Sum = trace = $5$, product = determinant = $4 - 6 = -2$. A negative product means the eigenvalues are real with opposite signs ($\approx 5.372$ and $-0.372$). Along one eigen-line the matrix stretches, along the other it flips. That's why $\det \lt 0$: orientation is reversed (lesson 02).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core · proof</span>
+<p>Let $A\mathbf{v} = \lambda\mathbf{v}$. Show that (a) $A^k\mathbf{v} = \lambda^k\mathbf{v}$; (b) if $A$ is invertible, $A^{-1}\mathbf{v} = \lambda^{-1}\mathbf{v}$ (and why $\lambda \ne 0$); (c) $(A + cI)\mathbf{v} = (\lambda + c)\mathbf{v}$. Then explain how (c) lets power iteration find the <em>smallest</em> eigenvalue of a symmetric positive definite matrix.</p>
+<details class="hint"><summary>Hint</summary><p>For (b), multiply both sides of $A\mathbf{v} = \lambda\mathbf{v}$ by $A^{-1}$. For the last part, which eigenvalue of $A^{-1}$ is the biggest?</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) Induction: $A^{k}\mathbf{v} = A(A^{k-1}\mathbf{v}) = A(\lambda^{k-1}\mathbf{v}) = \lambda^{k-1}A\mathbf{v} = \lambda^k\mathbf{v}$. (b) If $\lambda = 0$ then $A\mathbf{v} = \mathbf{0}$ with $\mathbf{v} \ne \mathbf{0}$, so $A$ has a non-trivial null space and isn't invertible. Otherwise $\mathbf{v} = A^{-1}A\mathbf{v} = \lambda A^{-1}\mathbf{v}$, so divide by $\lambda$. (c) $(A + cI)\mathbf{v} = \lambda\mathbf{v} + c\mathbf{v}$.</p>
+<p>Smallest eigenvalue: the eigenvalues of $A^{-1}$ are $1/\lambda_i$, and the largest of these comes from the smallest $\lambda_i$. So run power iteration on $A^{-1}$ (in practice, solve $A\mathbf{y} = \mathbf{x}_k$ each step instead of inverting). This is <em>inverse iteration</em>. With a shift, $(A - cI)^{-1}$ finds the eigenvalue closest to $c$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>A matrix has eigenvalues $5$ and $2$. Power iteration's error shrinks by $|\lambda_2/\lambda_1|$ per step. Starting from an error of 1, what is the smallest number of steps that brings the error below $10^{-6}$?</p>
+<div class="numcheck" data-answer="16"></div>
+<details class="solution"><summary>Solution</summary>
+<p>We need $0.4^k \lt 10^{-6}$, i.e. $k > \ln(10^{-6})/\ln(0.4) = 15.08$. So $k = 16$. If instead the eigenvalues were 5 and 4.9 (ratio 0.98), you'd need $k > 684$. A tiny spectral gap makes power iteration crawl.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Find the singular values of $A = \begin{bmatrix} 2 & 2 \\ -1 & 1\end{bmatrix}$ (largest first). Then compute its eigenvalues. What do you notice?</p>
+<div class="numcheck" data-answer="2.8284,1.4142" data-tol="1e-3"></div>
+<details class="hint"><summary>Hint</summary><p>Form $A^\top A$, find its eigenvalues, take square roots.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$A^\top A = \begin{bmatrix} 5 & 3 \\ 3 & 5\end{bmatrix}$, with trace 10 and determinant 16, so $\lambda = 8, 2$. That gives $\sigma_1 = 2\sqrt2 \approx 2.828$ and $\sigma_2 = \sqrt2 \approx 1.414$. Check: $\sigma_1\sigma_2 = 4 = |\det A|$. ✓</p>
+<p>Eigenvalues of $A$: trace 3, determinant 4, so the discriminant is $9 - 16 \lt 0$ and the eigenvalues are the complex pair $1.5 \pm 1.323i$. $A$ rotates every direction, so it has no real eigenvectors. But it still has a perfectly real SVD. The SVD always exists; real eigenvectors don't.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · proof</span>
+<p>(a) Show that for any matrix $A$, the eigenvalues of $A^\top A$ are $\ge 0$. (b) Show that a covariance matrix $C = \frac{1}{n-1}X^\top X$ satisfies $\mathbf{u}^\top C\mathbf{u} \ge 0$ for every $\mathbf{u}$, and interpret this in words.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) If $A^\top A\mathbf{v} = \lambda\mathbf{v}$ with $\|\mathbf{v}\| = 1$, then $\lambda = \mathbf{v}^\top A^\top A\mathbf{v} = \|A\mathbf{v}\|^2 \ge 0$. (b) $\mathbf{u}^\top C\mathbf{u} = \frac{1}{n-1}\|X\mathbf{u}\|^2 \ge 0$. In words, this is the variance of the data projected onto $\mathbf{u}$, and a variance can't be negative. Matrices with this property are called <b>positive semi-definite</b>. They're exactly the symmetric matrices whose eigenvalues are all $\ge 0$. You'll meet them again as Hessians at a minimum (lesson 06).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>A matrix has singular values $10, 5, 2, 1$. What is the Frobenius error $\|A - A_2\|_F$ of its best rank-2 approximation? What fraction of $\|A\|_F^2$ (the "energy") does $A_2$ keep?</p>
+<div class="numcheck" data-answer="2.2361" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>By Eckart–Young, $\|A - A_2\|_F = \sqrt{2^2 + 1^2} = \sqrt5 \approx 2.236$. Energy: $\|A\|_F^2 = \sum\sigma_i^2 = 100+25+4+1 = 130$, and $A_2$ keeps $125/130 \approx 96.2\%$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core</span>
+<p>A centered 2-D dataset has covariance $C = \begin{bmatrix} 5 & 2 \\ 2 & 2\end{bmatrix}$. Find the first principal component and the fraction of variance it explains.</p>
+<div class="numcheck" data-answer="0.8571" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\operatorname{tr}C = 7$ and $\det C = 6$, so $\lambda^2 - 7\lambda + 6 = 0$, giving $\lambda = 6, 1$. $C - 6I$ has first row $(-1, 2)$, so $\mathbf{q}_1 = (2,1)/\sqrt5$. Variance explained $= 6/7 \approx 0.857$. The second component is $(-1,2)/\sqrt5$ with variance 1.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>A $512\times512$ grayscale image is stored as its rank-20 SVD truncation, keeping $\mathbf{u}_i$, $\mathbf{v}_i$ and $\sigma_i$ for $i \le 20$. How many numbers is that? Above what rank $k$ does the truncation stop saving space?</p>
+<div class="numcheck" data-answer="20500"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$k(m + n + 1) = 20 \cdot 1025 = 20{,}500$ numbers, versus $512^2 = 262{,}144$: about 7.8%. Break-even is $k(1025) = 262{,}144$, i.e. $k \approx 255.75$. So any $k \ge 256$ saves nothing, roughly half the full rank. Low-rank only pays when the spectrum decays fast.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 10</div><span class="difficulty">stretch · proof</span>
+<p>Let $A$ be symmetric with eigen-decomposition $Q\Lambda Q^\top$. Show that its singular values are $|\lambda_i|$, and find them for $\begin{bmatrix} 1 & 2 \\ 2 & 1\end{bmatrix}$ (largest first).</p>
+<div class="numcheck" data-answer="3,1"></div>
+<details class="hint"><summary>Hint</summary><p>Compute $A^\top A$ using $Q^\top Q = I$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$A^\top A = A^2 = Q\Lambda Q^\top Q\Lambda Q^\top = Q\Lambda^2Q^\top$, so the eigenvalues of $A^\top A$ are $\lambda_i^2$ and $\sigma_i = \sqrt{\lambda_i^2} = |\lambda_i|$. Explicitly: $A = Q\,|\Lambda|\,(Q S)^\top$, where $S$ is the diagonal matrix of signs of the $\lambda_i$ (absorbing each sign into a right singular vector). For $\begin{bmatrix} 1&2\\2&1\end{bmatrix}$: trace 2, determinant $-3$, so $\lambda = 3, -1$ and $\sigma = 3, 1$.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">How many real eigen-directions does a rotation of the plane by 90° have?</div>
+  <div class="opts">
+    <button data-k="a">Two, the x- and y-axes, because they stay perpendicular.</button>
+    <button data-k="b">Infinitely many, because a rotation preserves all lengths.</button>
+    <button data-k="c">None. Every non-zero vector is turned off its own line.</button>
+    <button data-k="d">One, the axis of rotation.</button>
+  </div>
+  <div class="explain">An eigenvector must stay on its own span. Rotation by 90° moves every direction. Algebraically $\lambda^2 + 1 = 0$ has only complex roots $\pm i$. (In 3-D, the rotation <em>axis</em> would be an eigenvector with $\lambda = 1$, but the plane has no axis.)</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">Power iteration is converging painfully slowly. The most likely reason:</div>
+  <div class="opts">
+    <button data-k="a">The largest eigenvalue is very large.</button>
+    <button data-k="b">The two largest eigenvalues are close in magnitude.</button>
+    <button data-k="c">The matrix is symmetric.</button>
+    <button data-k="d">The starting vector wasn't normalized.</button>
+  </div>
+  <div class="explain">The error shrinks like $|\lambda_2/\lambda_1|^k$. A large $\lambda_1$ alone doesn't matter, since normalization removes the overall scale. A ratio near 1 does.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">You run PCA on (height in mm, weight in kg) without standardizing. PC1 points almost exactly along the height axis. What's the best explanation?</div>
+  <div class="opts">
+    <button data-k="a">Height genuinely carries more information about people than weight.</button>
+    <button data-k="b">The data wasn't centered.</button>
+    <button data-k="c">PCA always picks the first feature.</button>
+    <button data-k="d">Height's variance is numerically huge only because of its units, so it dominates the covariance.</button>
+  </div>
+  <div class="explain">Variance scales with the square of the units. Millimetres give variances in the thousands, while kilograms give tens. PCA maximizes raw variance, so it's not unit-invariant. Standardize first.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">A $3\times3$ matrix has singular values $5, 3, 0$. Which is true?</div>
+  <div class="opts">
+    <button data-k="a">Its rank is 2, it has a 1-D null space, and it maps the unit sphere onto a flat ellipse.</button>
+    <button data-k="b">Its rank is 3, since it is a 3×3 matrix.</button>
+    <button data-k="c">Its eigenvalues must be 5, 3 and 0.</button>
+    <button data-k="d">Its determinant is 15.</button>
+  </div>
+  <div class="explain">Rank = number of non-zero singular values. The $\mathbf{v}_3$ with $\sigma_3 = 0$ spans the null space, and the image is a 2-D ellipse inside 3-D space. $|\det A| = \sigma_1\sigma_2\sigma_3 = 0$. The eigenvalues needn't match the singular values unless $A$ is symmetric.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Eigenpair</td><td>$A\mathbf{v} = \lambda\mathbf{v}$, from $\det(A-\lambda I) = 0$</td><td>a direction $A$ only scales</td></tr>
+  <tr><td>Trace / det</td><td>$\sum\lambda_i = \operatorname{tr}A$, $\prod\lambda_i = \det A$</td><td>quick sanity checks</td></tr>
+  <tr><td>Power iteration</td><td>$\mathbf{x} \leftarrow A\mathbf{x}/\|A\mathbf{x}\|$</td><td>finds the dominant eigenvector; error $\sim|\lambda_2/\lambda_1|^k$</td></tr>
+  <tr><td>Spectral theorem</td><td>$A = A^\top \Rightarrow A = Q\Lambda Q^\top$</td><td>real $\lambda$, orthonormal eigenvectors</td></tr>
+  <tr><td>SVD</td><td>$A = U\Sigma V^\top = \sum\sigma_i\mathbf{u}_i\mathbf{v}_i^\top$</td><td>rotate, scale, rotate; any matrix</td></tr>
+  <tr><td>Eckart–Young</td><td>$\|A - A_k\|_F = \sqrt{\sum_{i>k}\sigma_i^2}$</td><td>truncated SVD is the best rank-$k$ fit</td></tr>
+  <tr><td>PCA</td><td>$\max_{\|\mathbf{u}\|=1}\mathbf{u}^\top C\mathbf{u} = \lambda_1$</td><td>top covariance eigenvectors = right singular vectors of centered $X$</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 04: build it</h3>
+  <p>Open <code>workbooks/04_eigen_svd_pca/exercises.py</code>. In plain Python you'll write <code>char_poly_2x2</code> and <code>eig_2x2</code> (including the rotation and shear edge cases). With NumPy you'll write <code>power_iteration</code>, <code>covariance</code>, PCA two ways (<code>pca_eig</code> and <code>pca_svd</code>, which must agree up to sign), <code>explained_variance_ratio</code>, <code>project</code>/<code>reconstruct</code>, and <code>low_rank_approx</code> with an <code>eckart_young_error</code> check that random rank-$k$ competitors never beat. Stretch: top-$k$ eigenpairs by power iteration plus deflation. Grade yourself with:</p>
+  <pre><code>./course check 04</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>3Blue1Brown, <em>Essence of Linear Algebra</em>, ch. 14 (eigenvectors and eigenvalues).</li>
+  <li>Gilbert Strang, <em>Introduction to Linear Algebra</em>, ch. 6 (eigenvalues) and ch. 7 (SVD), and his MIT 18.06 lectures.</li>
+  <li>Trefethen &amp; Bau, <em>Numerical Linear Algebra</em>, lectures 4–5 (the SVD) and 27 (power and inverse iteration).</li>
+  <li>Jonathon Shlens, <em>A Tutorial on Principal Component Analysis</em> (arXiv:1404.1100).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, LA, fmt, rng } = Course;
+  const f2 = v => (Math.abs(v) < 5e-3 ? 0 : v).toFixed(2);
+  const checkbox = (host, text, onChange) => {
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox";
+    cb.addEventListener("change", () => onChange(cb.checked)); lab.append(cb, " " + text);
+    document.querySelector(host).appendChild(lab); return cb;
+  };
+  // real eigen-decomposition of a general 2x2, or null if complex. vecs[i] === null => every direction works
+  const eig2 = ([[a, b], [c, d]]) => {
+    const tr = a + d, det = a * d - b * c, disc = tr * tr / 4 - det;
+    if (disc < -1e-9) return null;
+    const r = Math.sqrt(Math.max(disc, 0)), vals = [tr / 2 + r, tr / 2 - r];
+    const vecs = vals.map(l => {
+      const r1 = [a - l, b], r2 = [c, d - l], s1 = Math.abs(r1[0]) + Math.abs(r1[1]), s2 = Math.abs(r2[0]) + Math.abs(r2[1]);
+      const row = s1 >= s2 ? r1 : r2; if (Math.max(s1, s2) < 1e-9) return null;
+      const v = [-row[1], row[0]], n = Math.hypot(...v); return [v[0] / n, v[1] / n];
+    });
+    return { vals, vecs };
+  };
+  const mv = (M, [x, y]) => [M[0][0] * x + M[0][1] * y, M[1][0] * x + M[1][1] * y];
+  const circlePts = (n = 120) => Array.from({ length: n + 1 }, (_, i) => [Math.cos(2 * Math.PI * i / n), Math.sin(2 * Math.PI * i / n)]);
+
+  // ---------- fig: eigenvectors ----------
+  {
+    const p = new Plot("#fig-eig", { xmin: -4.2, xmax: 4.2, ymin: -3, ymax: 3, equal: true });
+    const I = { x: 2, y: 1, color: "c1", snap: 0.1 }, J = { x: 1, y: 2, color: "c6", snap: 0.1 };
+    const X = { x: Math.cos(2.2), y: Math.sin(2.2), color: "c2", r: 6, constrain: (x, y) => { const n = Math.hypot(x, y) || 1; return [x / n, y / n]; } };
+    let sym = false; const out = document.getElementById("out-eig");
+    const presets = { sym: [[2, 1], [1, 2]], gen: [[1.5, 0.5], [1, 1]], scale: [[2, 0], [0, 0.5]], shear: [[1, 1], [0, 1]], rot: [[0.87, -0.5], [0.5, 0.87]], refl: [[0, 1], [1, 0]], proj: [[1, 0], [0, 0]] };
+    select("#ctl-eig", "preset ", [["sym", "symmetric [[2,1],[1,2]]"], ["gen", "general [[1.5,.5],[1,1]]"], ["scale", "axis scaling"], ["shear", "shear"], ["rot", "rotation 30°"], ["refl", "reflection (swap x,y)"], ["proj", "projection onto x"]], k => {
+      const M = presets[k]; I.x = M[0][0]; I.y = M[1][0]; J.x = M[0][1]; J.y = M[1][1];
+      if (sym && Math.abs(J.x - I.y) > 1e-9) { sym = false; cb.checked = false; } p.render();
+    });
+    const cb = checkbox("#ctl-eig", "symmetric (lock A₁₂ = A₂₁)", v => { sym = v; if (v) { const m = (I.y + J.x) / 2; I.y = J.x = Math.round(m * 10) / 10; } p.render(); });
+    p.draggable([I, J, X], h => { if (!sym) return; if (h === I) J.x = I.y; if (h === J) I.y = J.x; }).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const A = [[I.x, J.x], [I.y, J.y]], E = eig2(A);
+      p.path(circlePts(), { color: "muted", width: 1, dash: [3, 4] });
+      p.path(circlePts().map(q => mv(A, q)), { color: "c5", width: 1.5, alpha: .55 });
+      if (E) E.vecs.forEach((v, i) => { if (v) p.ray(0, 0, v[0], v[1], { color: "c3", width: 9, alpha: .16 }); });
+      for (let k = 0; k < 48; k++) {
+        const t = k * Math.PI / 24, x = [Math.cos(t), Math.sin(t)], y = mv(A, x), ny = Math.hypot(...y);
+        const aligned = ny < 1e-6 || Math.abs(x[0] * y[1] - x[1] * y[0]) / ny < Math.sin(2.5 * Math.PI / 180);
+        p.arrow(0, 0, y[0], y[1], { color: aligned ? "c3" : "muted", width: aligned ? 2.5 : 1, alpha: aligned ? 1 : .45, head: aligned ? 10 : 6 });
+      }
+      if (E) E.vecs.forEach((v, i) => { if (!v) return; const s = (i ? -1 : 1) * 2.6, lx = v[0] * s, ly = v[1] * s; p.label(lx, ly, `λ${i ? "₂" : "₁"} = ${f2(E.vals[i])}`, { color: "c3", bg: true, align: "center" }); });
+      p.arrow(0, 0, I.x, I.y, { color: "c1", width: 2, alpha: .8, label: "Aî" });
+      p.arrow(0, 0, J.x, J.y, { color: "c6", width: 2, alpha: .8, label: "Aĵ" });
+      const Ax = mv(A, [X.x, X.y]);
+      p.arrow(0, 0, Ax[0], Ax[1], { color: "c4", width: 3, label: "Ax" });
+      p.arrow(0, 0, X.x, X.y, { color: "c2", width: 3 });
+      p.label(X.x, X.y, "x", { color: "c2", dx: X.x * 12 - 4, dy: -X.y * 12 });
+      p.drawHandles();
+      const nAx = Math.hypot(...Ax), ang = nAx < 1e-9 ? 0 : Math.acos(Math.max(-1, Math.min(1, (Ax[0] * X.x + Ax[1] * X.y) / nAx))) * 180 / Math.PI;
+      let s = `A = [[${f2(A[0][0])}, ${f2(A[0][1])}], [${f2(A[1][0])}, ${f2(A[1][1])}]]   tr = ${f2(A[0][0] + A[1][1])}   det = ${f2(LA.det2(A))}\n`;
+      if (!E) s += "eigenvalues: complex pair. No real direction survives (every vector is rotated).\n";
+      else if (E.vecs.every(v => !v)) s += `A = ${f2(E.vals[0])}·I: every direction is an eigenvector.\n`;
+      else {
+        s += `λ₁ = ${f2(E.vals[0])}, v₁ = (${f2(E.vecs[0][0])}, ${f2(E.vecs[0][1])})    λ₂ = ${f2(E.vals[1])}, v₂ = (${f2(E.vecs[1][0])}, ${f2(E.vecs[1][1])})`;
+        const c = Math.abs(LA.dot(E.vecs[0], E.vecs[1]));
+        s += c > 1 - 1e-6 ? "\n(repeated: only one eigen-line)" : `\nangle between eigen-lines = ${(Math.acos(c) * 180 / Math.PI).toFixed(1)}°`;
+      }
+      s += (s.endsWith("\n") ? "" : "    ") + `angle between x and Ax = ${ang.toFixed(1)}°` + (ang < 1 || ang > 179 ? `  ← eigenvector! Ax = ${f2((Ax[0] * X.x + Ax[1] * X.y))}·x` : "");
+      out.textContent = s;
+    });
+  }
+
+  // ---------- fig: power iteration ----------
+  {
+    const p = new Plot("#fig-power", { xmin: -1.6, xmax: 1.6, ymin: -1.5, ymax: 1.5, equal: true });
+    const e = new Plot("#fig-power-err", { xmin: -4, xmax: 31, ymin: -9, ymax: 0.8 });
+    const out = document.getElementById("out-power"), R = rng(3);
+    const a1 = 20 * Math.PI / 180, a2 = 115 * Math.PI / 180, q1 = [Math.cos(a1), Math.sin(a1)], q2 = [Math.cos(a2), Math.sin(a2)];
+    let r = 0.7, start = 150 * Math.PI / 180, its = [];
+    const mat = () => { // A = P diag(1, r) P^-1, P = [q1 q2]
+      const P = [[q1[0], q2[0]], [q1[1], q2[1]]], d = LA.det2(P), Pi = [[P[1][1] / d, -P[0][1] / d], [-P[1][0] / d, P[0][0] / d]];
+      return LA.matmul(LA.matmul(P, [[1, 0], [0, r]]), Pi);
+    };
+    const err = v => Math.abs(v[0] * q1[1] - v[1] * q1[0]); // sin(angle to q1's line)
+    const reset = () => { its = [[Math.cos(start), Math.sin(start)]]; };
+    const step = () => { if (its.length > 30) return false; const A = mat(), w = mv(A, its[its.length - 1]), n = Math.hypot(...w); its.push([w[0] / n, w[1] / n]); draw(); return true; };
+    let frame = 0; const anim = animator(() => { if (++frame % 14) return true; return step(); });
+    const draw = () => { p.render(); e.render(); };
+    slider("#ctl-power", { label: "r = λ₂/λ₁ ", min: -0.95, max: 0.95, step: 0.05, value: 0.7 }, v => { r = v; reset(); draw(); });
+    button("#ctl-power", "Step", () => { anim.stop(); step(); });
+    button("#ctl-power", "Play", () => { if (its.length > 30) reset(); frame = 0; anim.start(); });
+    button("#ctl-power", "New start", () => { anim.stop(); start = R.uniform(0, 2 * Math.PI); reset(); draw(); });
+    reset();
+    const upd = () => { const A = mat(), v = its[its.length - 1]; out.textContent = `A = [[${f2(A[0][0])}, ${f2(A[0][1])}], [${f2(A[1][0])}, ${f2(A[1][1])}]]   step k = ${its.length - 1}   error sin∠(xₖ, q₁) = ${err(v).toExponential(2)}\nRayleigh quotient xᵀAx = ${(LA.dot(v, mv(A, v))).toFixed(4)} (→ λ₁ = 1)   ratio per step |r| = ${Math.abs(r).toFixed(2)}`; };
+    p.render(p => {
+      p.grid({ step: .5 }).axes({ step: .5, ticks: false });
+      p.circle(0, 0, 1, { color: "muted", width: 1, dash: [3, 4] });
+      p.ray(0, 0, q1[0], q1[1], { color: "c3", width: 6, alpha: .3 });
+      p.ray(0, 0, q2[0], q2[1], { color: "muted", width: 2, alpha: .5 });
+      p.label(1.25 * q1[0] + .05, 1.25 * q1[1] - .12, "q₁ (λ=1)", { color: "c3", bg: true });
+      p.label(1.25 * q2[0] + .08, 1.25 * q2[1], `q₂ (λ=${r.toFixed(2)})`, { color: "muted", bg: true });
+      const n = its.length;
+      its.forEach((v, i) => { if (i < n - 1) p.arrow(0, 0, v[0], v[1], { color: "c2", width: 1.5, alpha: .15 + .5 * i / n, head: 7 }); });
+      const v = its[n - 1]; p.arrow(0, 0, v[0], v[1], { color: "c2", width: 3.5 });
+      p.label(v[0], v[1], `x${n - 1 < 10 ? String.fromCharCode(0x2080 + n - 1) : "ₖ"}`, { color: "c2", dx: v[0] * 14 - 4, dy: -v[1] * 14 });
+      p.point(its[0][0], its[0][1], { r: 4, color: "c2", alpha: .6 });
+      upd();
+    });
+    e.render(e => {
+      for (let y = -8; y <= 0; y += 2) { e.line(0, y, 30, y, { color: "grid", width: 1 }); e.label(0, y, y ? `1e${y}` : "1", { align: "right", dx: -4, color: "muted", font: "11px monospace" }); }
+      for (let x = 0; x <= 30; x += 10) e.label(x, -9, String(x), { align: "center", dy: -8, color: "muted", font: "11px monospace" });
+      e.line(0, -9, 0, 0.5, { color: "axis", width: 1 });
+      e.label(30, 0.5, "error (log₁₀)", { align: "right", color: "muted", font: "12px sans-serif" });
+      e.label(15, -8.4, "iteration k", { align: "center", color: "muted", font: "12px sans-serif" });
+      const e0 = Math.log10(Math.max(err(its[0]), 1e-12)), sl = Math.log10(Math.max(Math.abs(r), 1e-12));
+      e.line(0, e0, 30, Math.max(e0 + 30 * sl, -12), { color: "c5", dash: [5, 4], width: 1.5 });
+      const pts = its.map((v, k) => [k, Math.max(Math.log10(Math.max(err(v), 1e-12)), -9)]);
+      e.path(pts, { color: "c2", width: 1.5, alpha: .6 }); pts.forEach(([x, y]) => e.point(x, y, { r: 3, color: "c2" }));
+    });
+  }
+
+  // ---------- fig: SVD rotate-scale-rotate ----------
+  {
+    const p = new Plot("#fig-svd", { xmin: -4.2, xmax: 4.2, ymin: -3, ymax: 3, equal: true });
+    const I = { x: 1.6, y: 0.9, color: "c6", snap: 0.1 }, J = { x: -0.4, y: 1.1, color: "c6", snap: 0.1 };
+    let t = 3; const out = document.getElementById("out-svd");
+    const rot = a => [[Math.cos(a), -Math.sin(a)], [Math.sin(a), Math.cos(a)]];
+    const wrap = a => { while (a > Math.PI) a -= 2 * Math.PI; while (a <= -Math.PI) a += 2 * Math.PI; return a; };
+    const svd2 = A => {
+      const e = LA.eigSym2(LA.matmul(LA.T(A), A));
+      let v1 = e.vecs[0], th = Math.atan2(v1[1], v1[0]);
+      if (th > Math.PI / 2) th -= Math.PI; else if (th <= -Math.PI / 2) th += Math.PI;
+      v1 = [Math.cos(th), Math.sin(th)]; const v2 = [-v1[1], v1[0]];
+      const s1 = Math.sqrt(Math.max(e.vals[0], 0)), Av1 = mv(A, v1), Av2 = mv(A, v2);
+      const u1 = s1 > 1e-9 ? [Av1[0] / s1, Av1[1] / s1] : [1, 0], u2 = [-u1[1], u1[0]];
+      return { thv: th, s1, s2: LA.dot(Av2, u2), thu: wrap(Math.atan2(u1[1], u1[0])), v1, v2, u1, u2 };
+    };
+    const ts = slider("#ctl-svd", { label: "stage ", min: 0, max: 3, step: 0.01, value: 3 }, v => { anim.stop(); t = v; p.render(); });
+    const anim = animator(() => { t = Math.min(3, t + 0.015); ts.set(t); p.render(); return t < 3; });
+    button("#ctl-svd", "Play", () => { t = 0; anim.start(); });
+    button("#ctl-svd", "Make it symmetric", () => { const m = (I.y + J.x) / 2; I.y = J.x = Math.round(m * 10) / 10; p.render(); });
+    const flag = [[0, 0], [0, 0.75], [0.45, 0.6], [0, 0.45]];
+    p.draggable([I, J]).render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const A = [[I.x, J.x], [I.y, J.y]], S = svd2(A);
+      const a = Math.min(t, 1), b = Math.max(0, Math.min(t - 1, 1)), c = Math.max(0, Math.min(t - 2, 1));
+      const M = LA.matmul(rot(S.thu * c), LA.matmul([[1 + (S.s1 - 1) * b, 0], [0, 1 + (S.s2 - 1) * b]], rot(-S.thv * a)));
+      p.path(circlePts().map(q => mv(A, q)), { color: "muted", width: 1.5, dash: [5, 4] });
+      p.path(circlePts(), { color: "muted", width: 1, alpha: .35 });
+      p.path(circlePts().map(q => mv(M, q)), { color: "c5", width: 2.5, fill: "c5", fillAlpha: .07 });
+      p.polygon(flag.map(q => mv(M, q)), { color: "c4", fill: "c4", fillAlpha: .35, width: 1.5 });
+      const mv1 = mv(M, S.v1), mv2 = mv(M, S.v2);
+      p.arrow(0, 0, mv1[0], mv1[1], { color: "c1", width: 3, label: t < 2.5 ? (t < 0.5 ? "v₁" : "") : "σ₁u₁" });
+      p.arrow(0, 0, mv2[0], mv2[1], { color: "c2", width: 3, label: t < 2.5 ? (t < 0.5 ? "v₂" : "") : "σ₂u₂" });
+      p.arrow(0, 0, I.x, I.y, { color: "c6", width: 1.5, alpha: .6 }); p.arrow(0, 0, J.x, J.y, { color: "c6", width: 1.5, alpha: .6 });
+      p.label(I.x, I.y, "Aî", { color: "c6", dx: 9, dy: 12 }); p.label(J.x, J.y, "Aĵ", { color: "c6", dx: 9, dy: 12 });
+      const stage = t < 0.02 ? "start: unit circle, v₁ and v₂ marked" : t <= 1 ? "1/3  Vᵀ: rotate v₁, v₂ onto the axes" : t <= 2 ? "2/3  Σ: stretch along the axes by σ₁, σ₂" : t < 2.98 ? "3/3  U: rotate into place" : "done: UΣVᵀ = A (matches the dashed target)";
+      p.label(10, 16, stage, { px: true, color: "fg", bg: true, font: "600 13px sans-serif" });
+      p.drawHandles();
+      const deg = x => (x * 180 / Math.PI).toFixed(1) + "°", det = LA.det2(A);
+      out.textContent = `A = [[${f2(A[0][0])}, ${f2(A[0][1])}], [${f2(A[1][0])}, ${f2(A[1][1])}]]\n` +
+        `V: v₁ = (${f2(S.v1[0])}, ${f2(S.v1[1])}) at ${deg(S.thv)}\nΣ: σ₁ = ${S.s1.toFixed(3)}, σ₂ = ${Math.abs(S.s2).toFixed(3)}${S.s2 < -1e-9 ? " (Σ carries a −1: reflection)" : ""}\nU: u₁ = (${f2(S.u1[0])}, ${f2(S.u1[1])}) at ${deg(S.thu)}\n` +
+        `σ₁σ₂ = ${(S.s1 * Math.abs(S.s2)).toFixed(3)}   |det A| = ${Math.abs(det).toFixed(3)}   rank = ${Math.abs(S.s2) < 1e-6 ? (S.s1 < 1e-6 ? 0 : 1) : 2}   condition number σ₁/σ₂ = ${Math.abs(S.s2) < 1e-9 ? "∞" : (S.s1 / Math.abs(S.s2)).toFixed(2)}`;
+    });
+  }
+
+  // ---------- fig: low-rank image ----------
+  {
+    const N = 64, cv = document.getElementById("fig-img"), p = new Plot(cv, { xmin: 0, xmax: 680, ymin: 0, ymax: 280 });
+    const out = document.getElementById("out-img");
+    // procedural image: sky gradient, sun, house with roof and window, ground, checkerboard patch
+    const img = [], NR = rng(5), noise = Array.from({ length: 32 * 32 }, () => NR.uniform(0.05, 0.95));
+    for (let i = 0; i < N; i++) { const row = []; for (let j = 0; j < N; j++) {
+      const x = (j + .5) / N, y = (i + .5) / N; let v = 0.9 - 0.45 * y;
+      if (Math.hypot(x - 0.76, y - 0.22) < 0.12) v = 1;
+      if (y > 0.72) v = 0.38 + 0.06 * Math.sin(x * 20);
+      if (x > 0.12 && x < 0.48 && y > 0.48 && y < 0.82) v = 0.18;
+      if (y > 0.3 && y <= 0.48 && Math.abs(x - 0.3) < (y - 0.3) * 1.15) v = 0.08;
+      if (x > 0.2 && x < 0.3 && y > 0.56 && y < 0.66) v = 0.95;
+      if (x > 0.36 && x < 0.44 && y > 0.64 && y < 0.82) v = 0.55;
+      if (x > 0.58 && x < 0.94 && y > 0.78 && y < 0.96) v = noise[(i >> 1) * 32 + (j >> 1)];
+      row.push(v); } img.push(row); }
+    // SVD via Jacobi eigen-decomposition of the symmetric AᵀA (fine for a 64×64 demo)
+    const jacobi = S0 => {
+      const n = S0.length, A = S0.map(r => r.slice()), V = A.map((_, i) => A.map((_, j) => +(i === j)));
+      for (let sweep = 0; sweep < 60; sweep++) {
+        let off = 0; for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += A[p][q] * A[p][q];
+        if (off < 1e-22) break;
+        for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+          if (Math.abs(A[p][q]) < 1e-300) continue;
+          const th = (A[q][q] - A[p][p]) / (2 * A[p][q]), t = (th >= 0 ? 1 : -1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+          for (let k = 0; k < n; k++) { const akp = A[k][p], akq = A[k][q]; A[k][p] = c * akp - s * akq; A[k][q] = s * akp + c * akq; }
+          for (let k = 0; k < n; k++) { const apk = A[p][k], aqk = A[q][k]; A[p][k] = c * apk - s * aqk; A[q][k] = s * apk + c * aqk; }
+          for (let k = 0; k < n; k++) { const vkp = V[k][p], vkq = V[k][q]; V[k][p] = c * vkp - s * vkq; V[k][q] = s * vkp + c * vkq; }
+        }
+      }
+      return { vals: A.map((r, i) => r[i]), V };
+    };
+    const { vals, V } = jacobi(LA.matmul(LA.T(img), img));
+    const order = vals.map((v, i) => i).sort((a, b) => vals[b] - vals[a]);
+    const sig = order.map(i => Math.sqrt(Math.max(vals[i], 0))), Vs = V.map(r => order.map(i => r[i])); // Vs[j][l] = v_l[j]
+    const B = LA.matmul(img, Vs); // B[:, l] = A v_l = σ_l u_l
+    const fro2 = img.flat().reduce((s, x) => s + x * x, 0);
+    let k = 10;
+    const recon = k => img.map((_, i) => Array.from({ length: N }, (_, j) => { let s = 0; for (let l = 0; l < k; l++) s += B[i][l] * Vs[j][l]; return s; }));
+    const off = document.createElement("canvas"); off.width = off.height = N; const octx = off.getContext("2d");
+    const blit = (M, x0, y0, size) => {
+      const d = octx.createImageData(N, N);
+      M.forEach((row, i) => row.forEach((v, j) => { const g = Math.round(255 * Math.max(0, Math.min(1, v))), o = 4 * (i * N + j); d.data[o] = d.data[o + 1] = d.data[o + 2] = g; d.data[o + 3] = 255; }));
+      octx.putImageData(d, 0, 0); const c = p.ctx; c.save(); c.imageSmoothingEnabled = false; c.drawImage(off, x0, y0, size, size); c.restore();
+    };
+    slider("#ctl-img", { label: "rank k ", min: 1, max: 64, step: 1, value: 10, digits: 0 }, v => { k = v; p.render(); });
+    p.render(p => {
+      const Ak = recon(k), S = 206, top = 40;
+      p.label(14, 20, "original (rank 64)", { px: true, color: "muted", font: "12px sans-serif" });
+      p.label(236, 20, `rank-${k} approximation`, { px: true, color: "fg", font: "600 12px sans-serif" });
+      blit(img, 14, top, S); blit(Ak, 236, top, S);
+      // singular values, log scale
+      const x0 = 494, x1 = 670, yT = top, yB = top + S, lo = -3, hi = Math.log10(sig[0]) + 0.2;
+      const Y = v => yB - (Math.log10(Math.max(v, 10 ** lo)) - lo) / (hi - lo) * (yB - yT);
+      const c = p.ctx; c.save(); c.strokeStyle = Course.color("axis"); c.lineWidth = 1; c.beginPath(); c.moveTo(x0, yT); c.lineTo(x0, yB); c.lineTo(x1, yB); c.stroke(); c.restore();
+      for (let e = lo; e <= Math.floor(hi); e++) p.label(x0 - 4, Y(10 ** e), e ? `1e${e}` : "1", { px: true, align: "right", color: "muted", font: "10px monospace" });
+      const w = (x1 - x0 - 4) / N;
+      sig.forEach((s, i) => { const X = x0 + 3 + i * w; c.save(); c.fillStyle = Course.color(i < k ? "c1" : "muted"); c.globalAlpha = i < k ? .9 : .4; c.fillRect(X, Y(s), Math.max(1, w - 0.6), yB - Y(s)); c.restore(); });
+      p.label(x0 + 4, 20, "singular values σᵢ (log)", { px: true, color: "muted", font: "12px sans-serif" });
+      p.label((x0 + x1) / 2, yB + 14, "i = 1 … 64", { px: true, align: "center", color: "muted", font: "11px sans-serif" });
+      const err = Math.sqrt(img.reduce((s, r, i) => s + r.reduce((t, v, j) => t + (v - Ak[i][j]) ** 2, 0), 0));
+      const pred = Math.sqrt(sig.slice(k).reduce((s, x) => s + x * x, 0));
+      out.textContent = `k = ${k}: storage k(m+n+1) = ${k * (2 * N + 1)} numbers vs m·n = ${N * N} (${(100 * k * (2 * N + 1) / (N * N)).toFixed(1)}%)\n` +
+        `measured ‖A − A_k‖_F = ${err.toFixed(4)}   Eckart–Young √(Σ_{i>k} σᵢ²) = ${pred.toFixed(4)}\nrelative error = ${(100 * err / Math.sqrt(fro2)).toFixed(2)}%   σ₁ = ${sig[0].toFixed(2)}, σ_k = ${sig[k - 1].toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: PCA ----------
+  {
+    const p = new Plot("#fig-pca", { xmin: -5, xmax: 5, ymin: -4.6, ymax: 4.6, equal: true });
+    const q = new Plot("#fig-pca-var", { xmin: -30, xmax: 190, ymin: -1, ymax: 8 });
+    const out = document.getElementById("out-pca"), R = rng(11), mu = [0.6, 0.4];
+    const Z = Array.from({ length: 300 }, () => [R.normal(), R.normal()]);
+    let s1 = 2, s2 = 0.6, ang = 30, showProj = true;
+    const U = { x: mu[0] + 3 * Math.cos(1.6), y: mu[1] + 3 * Math.sin(1.6), color: "c4", constrain: (x, y) => { const dx = x - mu[0], dy = y - mu[1], n = Math.hypot(dx, dy) || 1; return [mu[0] + 3 * dx / n, mu[1] + 3 * dy / n]; } };
+    const data = () => { const a = ang * Math.PI / 180, c = Math.cos(a), s = Math.sin(a); return Z.map(([z1, z2]) => [mu[0] + c * s1 * z1 - s * s2 * z2, mu[1] + s * s1 * z1 + c * s2 * z2]); };
+    const stats = X => {
+      const n = X.length, m = [0, 1].map(d => X.reduce((s, x) => s + x[d], 0) / n);
+      let a = 0, b = 0, d = 0; X.forEach(([x, y]) => { const u = x - m[0], v = y - m[1]; a += u * u; b += u * v; d += v * v; });
+      const C = [[a / (n - 1), b / (n - 1)], [b / (n - 1), d / (n - 1)]]; return { m, C, E: LA.eigSym2(C) };
+    };
+    const redraw = () => { p.render(); q.render(); };
+    slider("#ctl-pca", { label: "σ₁ ", min: 0.3, max: 2.5, step: 0.05, value: 2 }, v => { s1 = v; redraw(); });
+    slider("#ctl-pca", { label: "σ₂ ", min: 0.1, max: 2, step: 0.05, value: 0.6 }, v => { s2 = v; redraw(); });
+    slider("#ctl-pca", { label: "tilt° ", min: 0, max: 180, step: 1, value: 30, digits: 0 }, v => { ang = v; redraw(); });
+    const cb = checkbox("#ctl-pca", "show projections onto u", v => { showProj = v; redraw(); }); cb.checked = true;
+    let st;
+    p.draggable([U], () => q.render()).render(p => {
+      const X = data(); st = stats(X); const { m, C, E } = st;
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const u = [(U.x - mu[0]) / 3, (U.y - mu[1]) / 3];
+      X.forEach(x => p.point(x[0], x[1], { r: 2.3, color: "c1", alpha: .45 }));
+      p.ray(m[0], m[1], u[0], u[1], { color: "c4", width: 1.5, dash: [6, 4], alpha: .8 });
+      if (showProj) X.forEach(x => { const t = (x[0] - m[0]) * u[0] + (x[1] - m[1]) * u[1]; p.point(m[0] + t * u[0], m[1] + t * u[1], { r: 2, color: "c4", alpha: .5 }); });
+      E.vecs.forEach((v, i) => { const L = 2 * Math.sqrt(Math.max(E.vals[i], 0)), col = i ? "c3" : "c2";
+        p.line(m[0] - L * v[0], m[1] - L * v[1], m[0], m[1], { color: col, width: 3 });
+        p.arrow(m[0], m[1], m[0] + L * v[0], m[1] + L * v[1], { color: col, width: 3, label: i ? "PC2" : "PC1" }); });
+      p.point(m[0], m[1], { r: 4, color: "fg" });
+      p.drawHandles(); p.label(U.x, U.y, "u", { color: "c4", dx: 10, dy: -10 });
+    });
+    q.render(q => {
+      const { C, E } = st, top = E.vals[0] * 1.18 + 0.05;
+      q.setView(-30, 190, -top * 0.12, top);
+      const f = th => { const a = th * Math.PI / 180, c = Math.cos(a), s = Math.sin(a); return c * c * C[0][0] + 2 * c * s * C[0][1] + s * s * C[1][1]; };
+      q.line(0, 0, 180, 0, { color: "axis", width: 1 }); q.line(0, 0, 0, top * 0.95, { color: "axis", width: 1 });
+      [0, 90, 180].forEach(t => q.label(t, 0, t + "°", { align: "center", dy: 11, color: "muted", font: "11px monospace" }));
+      const pc = th => ((Math.atan2(th[1], th[0]) * 180 / Math.PI) % 180 + 180) % 180;
+      const a1 = pc(E.vecs[0]), a2 = pc(E.vecs[1]);
+      q.line(a1, 0, a1, E.vals[0], { color: "c2", dash: [4, 3], width: 1.5 }); q.line(a2, 0, a2, E.vals[1], { color: "c3", dash: [4, 3], width: 1.5 });
+      q.fn(f, { xmin: 0, xmax: 180, color: "c5", width: 2.5 });
+      q.label(a1, E.vals[0], "λ₁", { color: "c2", align: "center", dy: -10 }); q.label(a2, E.vals[1], "λ₂", { color: "c3", align: "center", dy: -10 });
+      const u = [(U.x - mu[0]) / 3, (U.y - mu[1]) / 3], au = pc(u);
+      q.point(au, f(au), { r: 5, color: "c4" });
+      q.label(8, 14, "variance along u  vs  angle of u", { px: true, color: "muted", font: "12px sans-serif" });
+      const vu = f(au), tot = E.vals[0] + E.vals[1];
+      out.textContent = `sample covariance C = [[${C[0][0].toFixed(2)}, ${C[0][1].toFixed(2)}], [${C[1][0].toFixed(2)}, ${C[1][1].toFixed(2)}]]\n` +
+        `u at ${au.toFixed(0)}°: uᵀCu = ${vu.toFixed(3)}    λ₁ = ${E.vals[0].toFixed(3)} (PC1 at ${a1.toFixed(0)}°)   λ₂ = ${E.vals[1].toFixed(3)}\n` +
+        `variance explained: PC1 ${(100 * E.vals[0] / tot).toFixed(1)}%, PC2 ${(100 * E.vals[1] / tot).toFixed(1)}%   (total = tr C = ${tot.toFixed(3)})`;
+    });
+  }
+});
+</script>
+</body>
+</html>

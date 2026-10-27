@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Policy gradients → PPO</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="27">
+<main>
+
+<div class="kicker">Part 7 · RL on transformers</div>
+<h1>Policy gradients → PPO</h1>
+<p class="lede">Lesson 26 learned a value for every state and acted greedily. That can't work when the "state" is a paragraph of text. Instead, treat the policy as a differentiable function and push its parameters up the slope of expected reward. This lesson derives that slope from one line of calculus, tames its variance with baselines and GAE, and arrives at PPO, the algorithm behind ChatGPT's RLHF.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Derive the policy gradient $\nabla J = \mathbb E[\nabla\log\pi(a\mid s)\,G]$ with the log-derivative trick, and explain why the environment's dynamics drop out.</li>
+    <li>Prove that subtracting a baseline leaves the gradient unbiased, and measure how much variance it removes.</li>
+    <li>Compute advantages with TD residuals and GAE, and explain the bias–variance knob $\lambda$.</li>
+    <li>Explain importance sampling, the probability ratio, and why large policy updates are dangerous.</li>
+    <li>Write the PPO clipped objective and its gradient case by case, including the entropy bonus.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="why">1. Optimize the policy itself</h2>
+<p>Value-based RL (lesson 26) learns $Q(s,a)$ and acts with $\arg\max_a Q$. That has three problems for language models:</p>
+<ul>
+  <li>The argmax over 50 000 tokens has to be recomputed at every step, and a deterministic argmax policy can't express "either phrasing is fine".</li>
+  <li>We <em>already have</em> an excellent stochastic policy: the pretrained LM. We want to <em>adjust</em> it, not replace it with a value table.</li>
+  <li>Rewards arrive once, at the end of a long completion. Bootstrapping a $Q$ through hundreds of tokens is fragile.</li>
+</ul>
+<p><b>Policy-gradient</b> methods skip the middleman. Write the policy as $\pi_\theta(a\mid s)$ with parameters $\theta$ (for an LM, all its weights) and define the objective as expected return:</p>
+$$J(\theta) = \mathbb E_{\tau\sim\pi_\theta}\big[R(\tau)\big], \qquad R(\tau) = \sum_t \gamma^t r_t .$$
+<p>Then do gradient <em>ascent</em>: $\theta \leftarrow \theta + \alpha\nabla_\theta J$. The whole difficulty is that $J$ is an expectation over trajectories <em>sampled from the thing we're differentiating</em>. You can't backprop through "sample a token" (lesson 25), and you can't backprop through the environment or the reward at all. The reward might be a human's thumbs-up. The next section's trick sidesteps both.</p>
+
+<!-- ============================================================ -->
+<h2 id="softmax">2. Softmax policies and the score function</h2>
+<p>For discrete actions the policy is a softmax over logits $z = f_\theta(s)$ (a table row, a linear layer or a transformer's final layer): $\pi(a\mid s) = e^{z_a}/\sum_j e^{z_j}$. We'll need the gradient of its <b>log</b>-probability. This is lesson 14's softmax gradient, now from the log side:</p>
+$$\log \pi_a = z_a - \log\sum_j e^{z_j} \quad\Longrightarrow\quad \frac{\partial \log\pi_a}{\partial z_j} = \mathbb 1[j = a] - \frac{e^{z_j}}{\sum_k e^{z_k}} = \mathbb 1[j=a] - \pi_j .$$
+$$\boxed{\;\nabla_z \log\pi(a) = \mathbf e_a - \boldsymbol\pi\;}$$
+<p>This vector is called the <b>score function</b>. Read it as an instruction: "raise the logit of the action you took, and lower every logit in proportion to how likely it already was." Its components sum to zero, and its expectation under the policy is zero: $\sum_a \pi_a(\mathbf e_a - \boldsymbol\pi) = \boldsymbol\pi - \boldsymbol\pi = \mathbf 0$. Remember that second fact. It is the whole reason baselines work (section 4).</p>
+<p>When $z$ comes from a network, the chain rule (lesson 17) takes over: $\nabla_\theta\log\pi(a\mid s) = J_z^\top(\mathbf e_a - \boldsymbol\pi)$. That is exactly what autograd computes when you call <code>backward()</code> on <code>log_softmax(logits)[a]</code>.</p>
+
+<!-- ============================================================ -->
+<h2 id="pg">3. The policy gradient, step by step</h2>
+<h3>Warm-up: a bandit</h3>
+<p>One state, $K$ arms with mean rewards $\mu_a$. Then $J(\theta) = \sum_a \pi_\theta(a)\,\mu_a$. Differentiate. The $\mu_a$ don't depend on $\theta$:</p>
+$$\nabla J = \sum_a \mu_a\, \nabla\pi(a).$$
+<p>This is exact, but it needs every $\mu_a$, which we don't know. We only see sampled rewards. The <b>log-derivative trick</b> rewrites $\nabla\pi$ as $\pi$ times something, using $\nabla\log\pi = \nabla\pi/\pi$:</p>
+$$\nabla J = \sum_a \mu_a\, \pi(a)\,\nabla\log\pi(a) = \mathbb E_{a\sim\pi}\big[\mu_a\,\nabla\log\pi(a)\big] = \mathbb E_{a\sim\pi,\ r}\big[\,r\;\nabla\log\pi(a)\big].$$
+<p>An expectation under the policy can be estimated by <em>sampling from the policy</em>. Pull an arm, observe $r$, and $r\,\nabla\log\pi(a)$ is an unbiased estimate of the gradient. For softmax, $\nabla J = \sum_a \pi_a\mu_a(\mathbf e_a - \boldsymbol\pi) = \boldsymbol\pi\odot(\boldsymbol\mu - \bar\mu)$ with $\bar\mu = \boldsymbol\pi\cdot\boldsymbol\mu$. Arms better than average grow, worse ones shrink.</p>
+
+<h3>The general case: trajectories</h3>
+<p>Now $J = \sum_\tau p_\theta(\tau) R(\tau)$, where the probability of a trajectory multiplies the start-state distribution, every policy choice and every environment transition:</p>
+$$p_\theta(\tau) = \rho(s_0)\prod_{t} \pi_\theta(a_t\mid s_t)\, P(s_{t+1}\mid s_t, a_t).$$
+<p><b>Step 1</b>, the same trick: $\nabla J = \sum_\tau R(\tau)\nabla p_\theta(\tau) = \sum_\tau p_\theta(\tau)\, R(\tau)\,\nabla\log p_\theta(\tau) = \mathbb E_\tau[R(\tau)\nabla\log p_\theta(\tau)]$.</p>
+<p><b>Step 2</b>: take the log of the product. It becomes a sum:</p>
+$$\log p_\theta(\tau) = \log\rho(s_0) + \sum_t \log\pi_\theta(a_t\mid s_t) + \sum_t \log P(s_{t+1}\mid s_t,a_t).$$
+<p><b>Step 3</b>: differentiate in $\theta$. The first and last terms don't depend on $\theta$ and <b>vanish</b>:</p>
+$$\nabla_\theta\log p_\theta(\tau) = \sum_t \nabla_\theta\log\pi_\theta(a_t\mid s_t).$$
+<p>This is the punchline. <em>You never need the environment's model, or the derivative of the reward.</em> You need the rewards you observed and the gradients of your own log-probabilities. That's why RLHF works with a reward that comes from a separate network or a human, and why an LLM can be trained against a unit-test runner.</p>
+<p><b>Step 4, causality</b>: an action at time $t$ can't affect rewards earned before $t$. Those earlier terms average to zero, by the same "score has mean zero" fact, so we drop them and keep only the <b>reward-to-go</b> $G_t = \sum_{k\ge t}\gamma^{k-t} r_k$:</p>
+$$\boxed{\;\nabla_\theta J = \mathbb E_{\tau\sim\pi_\theta}\Big[\sum_t \nabla_\theta\log\pi_\theta(a_t\mid s_t)\; G_t\Big]\;}$$
+<p>This is the <b>policy gradient theorem</b>. Turning it into an algorithm gives <b>REINFORCE</b> (Williams, 1992): sample $N$ episodes, compute every $G_t$ with the backward recursion from lesson 26, and step</p>
+$$\theta \leftarrow \theta + \alpha\,\frac1N\sum_{\text{episodes}}\sum_t G_t\,\nabla_\theta\log\pi_\theta(a_t\mid s_t).$$
+<p>In code, that's one line of autograd: <code>loss = -(G * logp).mean(); loss.backward()</code>. The minus sign turns ascent into the descent your optimizer expects. Strictly the theorem has an extra $\gamma^t$ in front of each term. Practitioners drop it and treat $\gamma$ as a variance-reduction knob rather than part of the objective.</p>
+
+<div class="figure">
+  <canvas id="fig-simplex" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-simplex"></div>
+  <div class="readout" id="out-simplex"></div>
+  <div class="caption"><b>Try it:</b> every point of the triangle is a policy over three arms (mean rewards 0.2, 0.5, 0.9); each corner is a deterministic policy. The faint arrows show the <em>exact</em> gradient flow, and the dashed curve is exact gradient ascent from the start. Press <em>play</em> to run REINFORCE from single noisy pulls (the solid path). It wobbles but follows the flow <em>on average</em>, because the estimate is unbiased. Now raise the <em>reward offset</em> (add a constant to every reward) with no baseline: the path turns into a drunken walk. Switch the baseline on and it's calm again. That's section 4 in one picture.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: one REINFORCE step</div>
+  <p>Three arms, $\theta = (0,0,0)$, so $\boldsymbol\pi = (\tfrac13,\tfrac13,\tfrac13)$. We pull arm 3 and get $r = 1$. With $\alpha = 0.1$:</p>
+  $$\Delta\theta = \alpha\, r\,(\mathbf e_3 - \boldsymbol\pi) = 0.1\cdot 1\cdot(-\tfrac13, -\tfrac13, \tfrac23) = (-0.0333,\,-0.0333,\,0.0667).$$
+  <p>New policy: $\operatorname{softmax}(\Delta\theta) = (0.3220, 0.3220, 0.3559)$. Arm 3 went up, the others down. Note: if every reward were $+1$ regardless of the arm, every pull would still push its own arm up. Only the <em>relative</em> frequency of pushes would carry the signal, and it would take many samples to cancel out the noise. Hold that thought.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="baseline">4. Variance and baselines</h2>
+<p>REINFORCE is unbiased but <b>very noisy</b>. Look at the update: the score $\nabla\log\pi$ gets multiplied by the raw return. If all returns are around $+10$, every sampled action is pushed up hard, and the useful signal (some actions give $10.9$, others $10.2$) is a small difference between large random pushes.</p>
+<p>The fix is to subtract a <b>baseline</b> $b(s)$ that doesn't depend on the action:</p>
+$$\nabla J = \mathbb E\big[\nabla\log\pi(a\mid s)\,(G - b(s))\big].$$
+<p><b>Proof that it's still unbiased.</b> The extra term has expectation zero:</p>
+$$\mathbb E_{a\sim\pi}\big[\nabla\log\pi(a\mid s)\, b(s)\big] = b(s)\sum_a \pi(a\mid s)\frac{\nabla\pi(a\mid s)}{\pi(a\mid s)} = b(s)\,\nabla\!\sum_a\pi(a\mid s) = b(s)\,\nabla 1 = 0.$$
+<p>So <em>any</em> action-independent $b$ leaves the mean alone. It does, however, change the variance. A good choice is the average return from $s$, i.e. the value $V(s)$. Then $G - V(s)$ asks "was this outcome better or worse than usual?" Better-than-usual actions get pushed up and worse ones down, even when every raw reward is positive.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-var" width="420" height="300"></canvas></div>
+    <div><canvas id="fig-var-curve" width="360" height="300"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-var"></div>
+  <div class="readout" id="out-var"></div>
+  <div class="caption"><b>Try it:</b> left, a histogram of 4000 single-sample gradient estimates (the component for the best arm) at the uniform policy. The dashed line is the true gradient. Right, the total variance of the estimate as a function of the baseline $b$, computed exactly. Slide $b$: the histogram's centre never moves (unbiased), but its spread changes enormously. Raise the reward offset to 10 with $b=0$, then drag $b$ to the bottom of the parabola. The minimum sits at (almost exactly) the mean reward.</div>
+</div>
+
+<div class="callout key">
+<p>In the workbook you measure this. With every reward shifted by $+10$ on a 3-armed bandit, the summed variance of the single-sample gradient is <b>74.7</b> with $b=0$ and <b>0.69</b> with $b = \bar r$. That's a 107× reduction, so you need 107× fewer samples for the same accuracy. Training REINFORCE on the shifted bandit for 500 pulls puts 0.91 probability on the best arm with a running-mean baseline and only 0.64 without one (average of 20 seeds).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gae">5. Advantages and GAE</h2>
+<p>With $b = V(s_t)$, the weight on each score is an estimate of the <b>advantage</b></p>
+$$A(s,a) = Q(s,a) - V(s),$$
+<p>which measures how much better $a$ is than the policy's average behaviour in $s$. Its expectation under $\pi$ is zero by construction. So the question becomes how to <em>estimate</em> $A$ from one trajectory and an imperfect learned $V$ (the "critic"). There's a whole family of estimators.</p>
+<p>Start from the <b>TD residual</b> (lesson 26):</p>
+$$\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t).$$
+<p>If $V$ were exact, $\mathbb E[\delta_t \mid s_t, a_t] = Q(s_t,a_t) - V(s_t) = A$. So $\delta_t$ is a one-step advantage estimate. It has low variance (one random reward) but is biased whenever $V$ is wrong. At the other extreme, $G_t - V(s_t)$ uses the actual Monte-Carlo return. It is unbiased, but has high variance because every future reward adds noise. In between, the $k$-step estimates <b>telescope</b> into sums of residuals:</p>
+$$\hat A^{(k)}_t = r_t + \gamma r_{t+1} + \dots + \gamma^{k-1}r_{t+k-1} + \gamma^k V(s_{t+k}) - V(s_t) = \sum_{l=0}^{k-1}\gamma^l\,\delta_{t+l}.$$
+<p>(Write out $\delta_t + \gamma\delta_{t+1}$: the $\gamma V(s_{t+1})$ terms cancel.) <b>Generalized advantage estimation</b> (Schulman et al., 2016) takes an exponentially weighted average of all of them, with weights $(1-\lambda)\lambda^{k-1}$. Collecting the coefficient of each $\delta$ gives a strikingly simple result:</p>
+$$\boxed{\;\hat A^{\text{GAE}(\gamma,\lambda)}_t = \sum_{l\ge0}(\gamma\lambda)^l\,\delta_{t+l}\;} \qquad\text{computed backwards as}\qquad \hat A_t = \delta_t + \gamma\lambda\,\hat A_{t+1}.$$
+<p>$\lambda = 0$ gives the TD residual (low variance, biased). $\lambda = 1$ gives $G_t - V(s_t)$ (unbiased, high variance). PPO implementations typically use $\lambda \approx 0.95$.</p>
+
+<div class="figure">
+  <canvas id="fig-gae" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-gae"></div>
+  <div class="readout" id="out-gae"></div>
+  <div class="caption"><b>Try it:</b> one 20-step episode with a reward of +1 at the very end and a small one at step 8. The critic $V$ is imperfect. Bars are the TD residuals $\delta_t$. The solid line is the GAE advantage and the dashed line is the Monte-Carlo advantage $G_t - V(s_t)$. Slide $\lambda$ from 0 to 1. At 0 the line sits on the bars, so each step is judged only by its immediate surprise. At 1 it matches the dashed line, and the final reward's credit flows all the way back. Click a step to see how much weight it gives each later residual.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: GAE by hand</div>
+  <p>Rewards $(0, 0, 1)$, critic values $V(s_0..s_2) = (0.5, 0.6, 0.8)$, the episode ends after step 2 (so $V(s_3)=0$), $\gamma = 0.9$, $\lambda = 0.5$, so $\gamma\lambda = 0.45$.</p>
+  <p>Residuals: $\delta_2 = 1 + 0 - 0.8 = 0.2$; $\delta_1 = 0 + 0.9(0.8) - 0.6 = 0.12$; $\delta_0 = 0 + 0.9(0.6) - 0.5 = 0.04$.</p>
+  <p>Backwards: $\hat A_2 = 0.2$; $\hat A_1 = 0.12 + 0.45(0.2) = 0.21$; $\hat A_0 = 0.04 + 0.45(0.21) = 0.1345$. For comparison, $\lambda=1$ gives $G_t - V = (0.81-0.5,\ 0.9-0.6,\ 1-0.8) = (0.31, 0.30, 0.20)$.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="is">6. Reusing samples: importance sampling and trust regions</h2>
+<p>REINFORCE is <b>on-policy</b>: the expectation is under the <em>current</em> $\pi_\theta$, so after one gradient step the batch is stale and must be thrown away. For an LLM, generating that batch is the expensive part. Can we take several gradient steps per batch?</p>
+<p><b>Importance sampling</b> lets you compute an expectation under one distribution using samples from another:</p>
+$$\mathbb E_{a\sim\pi_\theta}[f(a)] = \sum_a \pi_\theta(a) f(a) = \sum_a \pi_{\text{old}}(a)\,\frac{\pi_\theta(a)}{\pi_{\text{old}}(a)}\,f(a) = \mathbb E_{a\sim\pi_{\text{old}}}\big[\rho(a)\,f(a)\big],\qquad \rho = \frac{\pi_\theta(a)}{\pi_{\text{old}}(a)}.$$
+<p>Apply it to the policy gradient (with advantages $\hat A$ computed once from the old batch). This gives the <b>surrogate objective</b></p>
+$$L(\theta) = \mathbb E_{\pi_{\text{old}}}\big[\rho_t(\theta)\,\hat A_t\big], \qquad \rho_t(\theta) = \frac{\pi_\theta(a_t\mid s_t)}{\pi_{\text{old}}(a_t\mid s_t)} = \exp\big(\log\pi_\theta - \log\pi_{\text{old}}\big).$$
+<p>At $\theta = \theta_{\text{old}}$ we have $\rho = 1$ and $\nabla\rho = \nabla\log\pi$, so $\nabla L$ is exactly the policy gradient. Further from $\theta_{\text{old}}$, two things go wrong. The advantages were estimated for the old policy and become stale. And the ratios become extreme, so a few samples with huge $\rho$ dominate. The variance of the weights is the χ² divergence $\mathbb E_{\text{old}}[\rho^2] - 1$, which explodes as the policies separate.</p>
+
+<div class="figure">
+  <canvas id="fig-is" width="680" height="320"></canvas>
+  <div class="controls" id="ctl-is"></div>
+  <div class="readout" id="out-is"></div>
+  <div class="caption"><b>Try it:</b> grey bars are the old policy over 6 actions; coloured bars are a new policy, moved away by the slider. The numbers above are the ratios $\rho$. Watch the readout as you slide: the KL divergence grows smoothly, but the importance weights' variance grows much faster. The <em>effective sample size</em> of a 100-sample batch collapses, and so does the accuracy of the reweighted reward estimate. Small policy steps keep the old data trustworthy.</div>
+</div>
+
+<p>This is the <b>trust region</b> idea: only trust the surrogate near the old policy. TRPO (Schulman et al., 2015) makes it a hard constraint, maximizing $L(\theta)$ subject to $\mathbb E[\mathrm{KL}(\pi_{\text{old}}\,\|\,\pi_\theta)] \le \delta$. That's principled, but it needs second-order machinery (conjugate gradients on the Fisher matrix). PPO gets most of the benefit with a one-line change to the loss.</p>
+
+<!-- ============================================================ -->
+<h2 id="ppo">7. PPO: the clipped objective</h2>
+<p><b>Proximal Policy Optimization</b> (Schulman et al., 2017) replaces the constraint with clipping:</p>
+$$\boxed{\;L^{\text{CLIP}}(\theta) = \mathbb E_t\Big[\min\big(\rho_t\hat A_t,\ \operatorname{clip}(\rho_t,\,1-\varepsilon,\,1+\varepsilon)\,\hat A_t\big)\Big]\;}\qquad \varepsilon\approx0.1\text{–}0.2.$$
+<p>Go case by case. That's the only way to really understand it.</p>
+<ul>
+  <li><b>$\hat A > 0$ (a good action).</b> We want to raise $\rho$, and the objective grows like $\rho\hat A$, but only up to $\rho = 1+\varepsilon$. Beyond that the clipped term is the smaller one, so the min picks it. It is flat, and <b>its gradient is zero</b>: no more incentive to push this action further on this batch.</li>
+  <li><b>$\hat A \lt 0$ (a bad action).</b> We want to lower $\rho$, and the incentive stops once $\rho \lt 1-\varepsilon$.</li>
+  <li><b>The min is pessimistic.</b> If an update has <em>accidentally</em> moved the wrong way (for example $\hat A \lt 0$ but $\rho$ grew above $1+\varepsilon$), the unclipped term $\rho\hat A$ is the smaller one. The min keeps it, and the gradient pulls back. Clipping only ever removes incentives to move <em>further in the good direction</em>. It never hides a mistake. Formally, $L^{\text{CLIP}}$ is a lower bound on the unclipped surrogate.</li>
+</ul>
+<p>So, per sample, the gradient with respect to the logits is</p>
+$$\nabla L^{\text{CLIP}}_t = \begin{cases} 0 & \text{if } (\hat A_t > 0 \text{ and } \rho_t > 1+\varepsilon) \text{ or } (\hat A_t \lt 0 \text{ and } \rho_t \lt 1-\varepsilon),\\ \hat A_t\,\rho_t\,\nabla\log\pi_\theta(a_t\mid s_t) & \text{otherwise,}\end{cases}$$
+<p>using $\nabla\rho = \rho\,\nabla\log\pi$. You implement exactly this by hand in the workbook and check it against finite differences.</p>
+
+<div class="figure">
+  <canvas id="fig-clip" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-clip"></div>
+  <div class="readout" id="out-clip"></div>
+  <div class="caption"><b>Try it:</b> left $\hat A>0$, right $\hat A\lt0$. The dashed line is the unclipped $\rho\hat A$ and the solid line is $L^{\text{CLIP}}$. Shaded regions are where the gradient is zero. Drag $\rho$ with the slider and watch the slope readout. Notice the asymmetry: for $\hat A > 0$ the flat part is on the right, and for $\hat A \lt 0$ it is on the left. On the "wrong" side (for example $\hat A\lt0$, $\rho = 1.6$) the solid line follows the dashed one and the gradient is fully alive. Change $\varepsilon$ to widen or narrow the trust region.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: three samples, ε = 0.2</div>
+  <ul>
+    <li>$\hat A = +2$, $\rho = 1.5$: $\min(3.0,\ 1.2\cdot2) = 2.4$. Clipped branch active, so the gradient is 0. This action is already up 50%, so stop pushing.</li>
+    <li>$\hat A = -1$, $\rho = 0.7$: $\min(-0.7,\ 0.8\cdot(-1)) = -0.8$. Clipped branch active, gradient 0. It is already down 30%.</li>
+    <li>$\hat A = -1$, $\rho = 1.5$: $\min(-1.5,\ -1.2) = -1.5$. The <em>unclipped</em> term wins, so the gradient is $\hat A\rho\nabla\log\pi = -1.5\,\nabla\log\pi$. A bad action whose probability went <em>up</em> gets pushed back down at full strength.</li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="full">8. The full algorithm: critic, entropy, epochs</h2>
+<p>A practical PPO loss has three terms, minimized together:</p>
+$$\mathcal L(\theta) = -L^{\text{CLIP}}(\theta) \;+\; c_v\,\mathbb E_t\big[(V_\theta(s_t) - \hat R_t)^2\big] \;-\; c_H\,\mathbb E_t\big[\mathcal H(\pi_\theta(\cdot\mid s_t))\big].$$
+<ul>
+  <li>The <b>value loss</b> trains the critic toward return targets $\hat R_t = \hat A_t + V_{\text{old}}(s_t)$. In LLMs the critic is usually a second head on (a copy of) the policy transformer.</li>
+  <li>The <b>entropy bonus</b> $\mathcal H(\pi) = -\sum_a\pi_a\log\pi_a$ rewards staying uncertain, so the policy doesn't collapse onto one action before it has explored (lesson 26 §7). For a softmax, $\nabla_z\mathcal H = -\boldsymbol\pi\odot(\log\boldsymbol\pi + \mathcal H)$ (problem 7). In RLHF, the KL penalty to a reference model (lesson 28) plays a similar "don't collapse" role, and the entropy bonus is often set to 0.</li>
+</ul>
+<p>The loop:</p>
+<pre><code>for iteration in range(N):
+    batch = rollout(policy, n_episodes)              # sample with π_old = current policy
+    adv   = gae(batch.rewards, critic(batch.states), γ, λ)
+    adv   = (adv - adv.mean()) / adv.std()           # normalize: scale-free step sizes
+    for epoch in range(K):                           # REUSE the batch K times (the point of PPO)
+        for minibatch in batch.shuffle():
+            ρ    = exp(logπ_θ(a|s) - logπ_old(a|s))
+            loss = -min(ρ·adv, clip(ρ, 1-ε, 1+ε)·adv).mean() + c_v·value_loss - c_H·entropy
+            loss.backward(); optimizer.step()</code></pre>
+
+<div class="callout key">
+<p>The workbook runs this on a 10-cell corridor (start at the left end, +1 for reaching the right end within 25 steps; a random policy succeeds 12% of the time). Averaged over 10 seeds with 16 episodes per iteration, PPO with GAE ($\lambda=0.9$) and 4 epochs per batch passes 90% success after <b>3</b> iterations. Plain REINFORCE with a value baseline at the same learning rate needs <b>17</b>. Same data budget per iteration; PPO simply extracts more from each batch, safely.</p>
+</div>
+
+<div class="callout ml">
+<p>For a language model, everything carries over with "state = prefix, action = token". $\rho_t$ is the ratio of a token's probability under the current versus the sampling-time weights. The advantage comes from GAE over the tokens of a completion, the clipping happens per token, and "epochs" means 1–4 passes over a batch of generated completions. Lesson 28 adds the one RLHF-specific ingredient, a per-token KL penalty to the SFT model. Lesson 29's GRPO keeps this clipped loss but drops the critic entirely.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Logits $z = (1, 0, 0)$. Compute $\boldsymbol\pi$ and $\nabla_z\log\pi_1$. Enter the first component of the gradient.</p>
+<div class="numcheck" data-answer="0.4239" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\boldsymbol\pi = (e, 1, 1)/(e+2) = (0.5761, 0.2119, 0.2119)$. $\nabla\log\pi_1 = \mathbf e_1 - \boldsymbol\pi = (0.4239, -0.2119, -0.2119)$. It sums to zero. A likely action gets a smaller push than an unlikely one would.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Three arms, $\theta=(0,0,0)$, learning rate $0.5$, no baseline. You pull arm 3 and receive $r = 2$. What is the new probability of arm 3?</p>
+<div class="numcheck" data-answer="0.5761" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\Delta\theta = 0.5\cdot2\cdot(-\tfrac13,-\tfrac13,\tfrac23)$. Softmax is shift-invariant, so only the differences matter: arm 3's logit is 1 higher than the others. $\pi_3 = e/(e+2) = 0.5761$, the same distribution as problem 1.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core · proof</span>
+<p>Show that a <em>state-dependent</em> baseline $b(s_t)$ leaves the trajectory policy gradient unbiased. Then explain why an <em>action-dependent</em> $b(s_t, a_t)$ generally does not.</p>
+<details class="solution"><summary>Solution</summary>
+<p>Condition on $s_t$: $\mathbb E_{a_t\sim\pi(\cdot\mid s_t)}[\nabla\log\pi(a_t\mid s_t)\,b(s_t)] = b(s_t)\sum_a\nabla\pi(a\mid s_t) = b(s_t)\nabla 1 = 0$. Then take the outer expectation over $s_t$ (tower rule); each term is still 0. With $b(s,a)$ you can't pull $b$ out of the sum over $a$, and $\sum_a\nabla\pi(a\mid s)\,b(s,a)$ is generally non-zero. (Action-dependent "control variates" exist, but they need a correction term.)</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Rewards $(0,0,1)$, $V = (0.5, 0.6, 0.8)$, terminal after the third step, $\gamma=0.9$, $\lambda=0.5$. Enter $\hat A_0, \hat A_1, \hat A_2$.</p>
+<div class="numcheck" data-answer="0.1345,0.21,0.2" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>See the worked example in section 5: $\delta = (0.04, 0.12, 0.2)$, then backwards with $\gamma\lambda = 0.45$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>With $\varepsilon=0.2$, a sample has $\hat A = -1$ and $\rho = 0.7$. What is its $L^{\text{CLIP}}$ term, and what is its gradient?</p>
+<div class="numcheck" data-answer="-0.8" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\min(0.7\cdot(-1),\ 0.8\cdot(-1)) = \min(-0.7, -0.8) = -0.8$. The clipped branch is active ($\hat A\lt0$ and $\rho \lt 0.8$), so the gradient is 0. The probability of this bad action has already been cut by 30%, which is more than the trust region allows per batch.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Old policy $(0.5, 0.3, 0.2)$, new policy $(0.2, 0.3, 0.5)$. Compute the ratios and the χ² divergence $\mathbb E_{\text{old}}[\rho^2]-1$ (the variance of the importance weights).</p>
+<div class="numcheck" data-answer="0.63" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\rho = (0.4, 1, 2.5)$. Check that $\mathbb E_{\text{old}}[\rho] = 0.2 + 0.3 + 0.5 = 1$, as it must. $\mathbb E_{\text{old}}[\rho^2] = 0.5(0.16) + 0.3(1) + 0.2(6.25) = 1.63$, so χ² = 0.63. The effective sample size is about $n/1.63$: a batch of 100 old samples is worth about 61 fresh ones. For comparison, KL(new‖old) = 0.275 nats.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · derivation</span>
+<p>Derive $\nabla_z\mathcal H(\operatorname{softmax}(z)) = -\boldsymbol\pi\odot(\log\boldsymbol\pi + \mathcal H)$. Check it on the uniform distribution and explain the answer.</p>
+<details class="hint"><summary>Hint</summary><p>$\partial\pi_i/\partial z_j = \pi_i(\mathbb 1[i=j]-\pi_j)$ (lesson 14). Differentiate $-\sum_i\pi_i\log\pi_i$ with the product rule.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\partial\mathcal H/\partial z_j = -\sum_i (\log\pi_i + 1)\,\pi_i(\mathbb 1[i=j]-\pi_j) = -\pi_j(\log\pi_j + 1) + \pi_j\sum_i\pi_i(\log\pi_i+1) = -\pi_j(\log\pi_j+1) + \pi_j(1-\mathcal H) = -\pi_j(\log\pi_j + \mathcal H)$. Uniform: $\log\pi_j = -\log K = -\mathcal H$, so the gradient is 0. The uniform distribution is the entropy maximum, so it's a stationary point.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · concept</span>
+<p>A colleague proposes dropping the $\min$ and using just $\operatorname{clip}(\rho,1-\varepsilon,1+\varepsilon)\hat A$. Give a concrete sample where this fails, and say what goes wrong.</p>
+<details class="solution"><summary>Solution</summary>
+<p>Take $\hat A \lt 0$ and $\rho = 1.5$: the bad action became <em>more</em> likely during the epochs. The clipped term is constant $1.2\hat A$ there, so its gradient is 0, and nothing pulls the probability back. With the min, the unclipped $1.5\hat A$ is smaller and supplies the corrective gradient. Without it, errors outside the trust region become invisible and can compound across epochs.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>For a single-sample bandit estimate $\hat g = (r-b)\,\nabla\log\pi(a)$, find the constant $b$ that minimizes the total variance $\mathbb E\|\hat g\|^2 - \|\nabla J\|^2$. Evaluate it at $\theta = 0$ with $\boldsymbol\mu = (0.2, 0.5, 0.9)$ and unit-variance rewards.</p>
+<div class="numcheck" data-answer="0.5333" data-tol="1e-3"></div>
+<details class="hint"><summary>Hint</summary><p>$\nabla J$ doesn't depend on $b$. Set $\frac{d}{db}\mathbb E[(r-b)^2\|\nabla\log\pi\|^2] = 0$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$-2\,\mathbb E[(r-b)\|\nabla\log\pi\|^2] = 0$ gives $b^* = \mathbb E[r\,\|\nabla\log\pi\|^2]/\mathbb E[\|\nabla\log\pi\|^2]$, a mean reward weighted by squared score norm. At $\theta=0$ every $\|\mathbf e_a - \boldsymbol\pi\|^2 = 2/3$ is the same, so the weights cancel and $b^* = \bar\mu = (0.2+0.5+0.9)/3 = 0.5333$. In general $b^*$ is close to, but not exactly, the mean reward. Practice uses $V(s)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 10</div><span class="difficulty">stretch · proof</span>
+<p>Prove the telescoping identity $\sum_{l=0}^{k-1}\gamma^l\delta_{t+l} = \sum_{l=0}^{k-1}\gamma^l r_{t+l} + \gamma^kV(s_{t+k}) - V(s_t)$. Then show that the weights $(1-\lambda)\lambda^{k-1}$ on $\hat A^{(k)}$ produce $\sum_l(\gamma\lambda)^l\delta_{t+l}$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>Substitute $\delta_{t+l} = r_{t+l} + \gamma V(s_{t+l+1}) - V(s_{t+l})$. The $V$ part is $\sum_l(\gamma^{l+1}V(s_{t+l+1}) - \gamma^l V(s_{t+l}))$, a telescoping sum that leaves $\gamma^kV(s_{t+k}) - V(s_t)$. For GAE, $\delta_{t+l}$ appears (with factor $\gamma^l$) in every $\hat A^{(k)}$ with $k > l$. Its total weight is $\gamma^l(1-\lambda)\sum_{k>l}\lambda^{k-1} = \gamma^l(1-\lambda)\cdot\frac{\lambda^l}{1-\lambda} = (\gamma\lambda)^l$.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">Why doesn't the policy gradient need the derivative of the environment's transition probabilities?</div>
+  <div class="opts">
+    <button data-k="a">Because we assume the environment is deterministic.</button>
+    <button data-k="b">Because autograd differentiates through the environment automatically.</button>
+    <button data-k="c">Because $\log p_\theta(\tau)$ splits into a sum, and the transition terms don't depend on $\theta$, so their gradient is zero.</button>
+    <button data-k="d">Because we only use the final reward.</button>
+  </div>
+  <div class="explain">The log turns the product into a sum, and only the $\log\pi_\theta$ terms involve $\theta$. The environment can be a black box: a simulator, a reward model or a human.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">You subtract a baseline $b = 10$ from every return. What happens to the expected gradient and its variance?</div>
+  <div class="opts">
+    <button data-k="a">The expected gradient shrinks by 10; the variance is unchanged.</button>
+    <button data-k="b">The expected gradient is unchanged; the variance can go up or down (down if $b$ is near the typical return).</button>
+    <button data-k="c">Both are unchanged.</button>
+    <button data-k="d">The estimate becomes biased but has lower variance.</button>
+  </div>
+  <div class="explain">$\mathbb E[\nabla\log\pi\cdot b] = 0$, so the mean is untouched. The variance depends on $b$ through a parabola (figure in section 4), minimized near the mean return.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">With $\lambda = 0$, GAE's advantage for step $t$ is…</div>
+  <div class="opts">
+    <button data-k="a">$r_t + \gamma V(s_{t+1}) - V(s_t)$: low variance, but biased if the critic is wrong.</button>
+    <button data-k="b">$G_t - V(s_t)$: unbiased, but high variance.</button>
+    <button data-k="c">Always zero.</button>
+    <button data-k="d">$G_t$ with no baseline.</button>
+  </div>
+  <div class="explain">$(\gamma\lambda)^l = 0$ for $l\ge1$, so only $\delta_t$ survives. $\lambda=1$ is option (b).</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">During PPO's 4 epochs on one batch, a sample with $\hat A>0$ reaches $\rho = 1.35$ (ε = 0.2). What does that sample contribute to the next gradient step?</div>
+  <div class="opts">
+    <button data-k="a">A gradient pushing its probability back down to $1.2\times$ the old value.</button>
+    <button data-k="b">The normal policy-gradient push, scaled by 1.35.</button>
+    <button data-k="c">A gradient of size ε.</button>
+    <button data-k="d">Nothing: the clipped branch is active, so its gradient is zero.</button>
+  </div>
+  <div class="explain">For $\hat A>0$ the objective is flat beyond $1+\varepsilon$. PPO doesn't actively pull the ratio back; it just stops pushing. That's why it's a "soft" trust region, and why implementations also monitor KL and stop epochs early if it drifts too far.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Idea</th><th>Formula</th><th>Why</th></tr>
+  <tr><td>Score function</td><td>$\nabla_z\log\pi(a) = \mathbf e_a - \boldsymbol\pi$</td><td>mean zero under $\pi$</td></tr>
+  <tr><td>Policy gradient</td><td>$\nabla J = \mathbb E[\sum_t\nabla\log\pi(a_t\mid s_t)\,G_t]$</td><td>dynamics and reward needn't be differentiable</td></tr>
+  <tr><td>Baseline</td><td>$G_t \to G_t - b(s_t)$</td><td>same mean, far less variance</td></tr>
+  <tr><td>Advantage / GAE</td><td>$\hat A_t = \sum_l(\gamma\lambda)^l\delta_{t+l}$</td><td>λ trades bias for variance</td></tr>
+  <tr><td>Ratio</td><td>$\rho = \pi_\theta/\pi_{\text{old}} = e^{\log\pi_\theta - \log\pi_{\text{old}}}$</td><td>reuse a batch (importance sampling)</td></tr>
+  <tr><td>PPO-clip</td><td>$\min(\rho\hat A, \operatorname{clip}(\rho,1\pm\varepsilon)\hat A)$</td><td>soft trust region, pessimistic</td></tr>
+  <tr><td>Entropy bonus</td><td>$-c_H\,\mathcal H(\pi)$ in the loss</td><td>keeps exploring</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 27: build it</h3>
+  <p>Open <code>workbooks/27_policy_gradients_ppo/exercises.py</code>. NumPy only, no autograd: you derive and code every gradient by hand. You'll implement the score function, measure the ~100× variance cut from a baseline, write REINFORCE for a corridor task, compute TD residuals and GAE, then implement the PPO clipped loss <em>with its exact gradient</em> (checked against finite differences) and a full PPO loop that solves the corridor in a handful of iterations.</p>
+  <pre><code>./course check 27</code></pre>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Sutton &amp; Barto, ch. 13 (policy gradient methods).</li>
+  <li>OpenAI <em>Spinning Up</em>: "Intro to Policy Optimization" and the PPO page. These are clear derivations with code.</li>
+  <li>Schulman et al., "High-Dimensional Continuous Control Using Generalized Advantage Estimation" (2016) and "Proximal Policy Optimization Algorithms" (2017).</li>
+  <li>Huang et al., "The 37 Implementation Details of Proximal Policy Optimization" (ICLR blog track, 2022).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt, LA } = Course;
+  const smax = z => LA.softmax(z);
+  const mono = "11px " + getComputedStyle(document.documentElement).getPropertyValue("--mono");
+
+  // ---------- fig: REINFORCE on the simplex ----------
+  {
+    const p = new Plot("#fig-simplex", { xmin: -0.15, xmax: 1.15, ymin: -0.12, ymax: 0.98, equal: true });
+    const MU = [0.2, 0.5, 0.9], V = [[0, 0], [1, 0], [0.5, Math.sqrt(3) / 2]];
+    const toXY = pi => [pi[0] * V[0][0] + pi[1] * V[1][0] + pi[2] * V[2][0], pi[0] * V[0][1] + pi[1] * V[1][1] + pi[2] * V[2][1]];
+    const exactGrad = th => { const pi = smax(th), mb = LA.dot(pi, MU); return pi.map((q, i) => q * (MU[i] - mb)); };
+    // velocity of pi under dθ = g: dπ = (diag π − ππᵀ) g
+    const dpi = (pi, g) => { const s = LA.dot(pi, g); return pi.map((q, i) => q * (g[i] - s)); };
+    const TH0 = [1.2, 0.6, -1.2];
+    let lr = 0.15, off = 0, base = "none", th, path, b, n, R = Course.rng(5), exact = [];
+    const reset = () => { th = TH0.slice(); path = [toXY(smax(th))]; b = 0; n = 0; R = Course.rng(5); };
+    { let t = TH0.slice(); for (let i = 0; i < 4000; i++) { exact.push(toXY(smax(t))); const g = exactGrad(t); t = t.map((v, k) => v + 0.15 * g[k]); } }
+    reset();
+    const ctl = document.getElementById("ctl-simplex"), out = document.getElementById("out-simplex");
+    function step() {
+      const pi = smax(th); let u = R.uniform(), a = 0; while (a < 2 && (u -= pi[a]) > 0) a++;
+      const r = R.normal(MU[a] + off, 1), bb = base === "mean" ? b : 0;
+      th = th.map((v, k) => v + lr * (r - bb) * ((k === a ? 1 : 0) - pi[k]));
+      n++; b += (r - b) / n; path.push(toXY(smax(th)));
+    }
+    const anim = Course.animator(() => { for (let i = 0; i < 3; i++) step(); p.render(); return n < 6000; });
+    const playB = button(ctl, "play", () => { anim.running ? anim.stop() : anim.start(); p.render(); });
+    button(ctl, "reset", () => { anim.stop(); reset(); p.render(); });
+    slider(ctl, { label: "learning rate ", min: 0.02, max: 0.5, step: 0.01, value: 0.15 }, v => { lr = v; });
+    slider(ctl, { label: "reward offset ", min: 0, max: 10, step: 0.5, value: 0 }, v => { off = v; });
+    select(ctl, "baseline: ", [["none", "none (b = 0)"], ["mean", "running mean reward"]], v => { base = v; });
+    p.render(p => {
+      p.polygon([...V], { color: "muted", fill: "c1", fillAlpha: .04, width: 1.5 });
+      // flow field
+      for (let i = 1; i < 14; i++) for (let j = 1; j < 14 - i; j++) {
+        const pi = [i / 14, j / 14, 1 - i / 14 - j / 14]; if (pi[2] < 0.03) continue;
+        const th0 = pi.map(Math.log), d = dpi(pi, exactGrad(th0)), [x, y] = toXY(pi), [x2, y2] = toXY(pi.map((q, k) => q + d[k]));
+        const L = Math.hypot(x2 - x, y2 - y); if (L < 1e-6) continue; const s = 0.035 / L * Math.min(1, L * 25);
+        p.arrow(x, y, x + (x2 - x) * s * 1.3, y + (y2 - y) * s * 1.3, { color: "muted", width: 1.2, head: 6, alpha: .8 });
+      }
+      p.path(exact, { color: "c3", width: 2, dash: [6, 4] });
+      p.path(path, { color: "c1", width: 1.8, alpha: .9 });
+      const cur = path[path.length - 1]; p.point(cur[0], cur[1], { r: 6, color: "c1", stroke: "bg" });
+      p.point(path[0][0], path[0][1], { r: 4, color: "muted" });
+      p.label(V[0][0], V[0][1], "arm 1 (μ=0.2)", { align: "left", dy: 16, color: "muted", font: "12px sans-serif" });
+      p.label(V[1][0], V[1][1], "arm 2 (μ=0.5)", { align: "right", dy: 16, color: "muted", font: "12px sans-serif" });
+      p.label(V[2][0], V[2][1], "arm 3 (μ=0.9) best", { align: "center", dy: -12, color: "ok", font: "600 12px sans-serif" });
+      playB.textContent = anim.running ? "pause" : "play";
+      const pi = smax(th);
+      out.textContent = `pulls: ${n}   π = (${pi.map(x => x.toFixed(3)).join(", ")})   expected reward J = ${(LA.dot(pi, MU) + off).toFixed(3)}   ` +
+        `baseline = ${base === "mean" ? b.toFixed(2) : "0"}   offset = ${off}`;
+    });
+  }
+
+  // ---------- fig: baseline variance ----------
+  {
+    const MU = [0.2, 0.5, 0.9], PI = [1 / 3, 1 / 3, 1 / 3], N = 4000;
+    let b = 0, off = 0;
+    const h = new Plot("#fig-var", { xmin: -1, xmax: 1, ymin: 0, ymax: 1 });
+    const c = new Plot("#fig-var-curve", { xmin: -2, xmax: 13, ymin: 0, ymax: 1 });
+    const ctl = document.getElementById("ctl-var"), out = document.getElementById("out-var");
+    const totvar = bb => { let m2 = 0; const g = PI.map((q, i) => q * (MU[i] + off - LA.dot(PI, MU) - off)); for (let a = 0; a < 3; a++) { const n2 = PI.reduce((s, q, k) => s + ((k === a ? 1 : 0) - q) ** 2, 0); m2 += PI[a] * ((MU[a] + off - bb) ** 2 + 1) * n2; } return m2 - LA.dot(g, g); };
+    let bS, offS;
+    const draw = () => { h.render(); c.render(); };
+    bS = slider(ctl, { label: "baseline b ", min: -1, max: 12, step: 0.05, value: 0, digits: 2 }, v => { b = v; draw(); });
+    offS = slider(ctl, { label: "reward offset ", min: 0, max: 10, step: 0.5, value: 0 }, v => { off = v; draw(); });
+    button(ctl, "b = mean reward", () => { b = LA.dot(PI, MU) + off; bS.set(b); draw(); });
+    h.render(h => {
+      const R = Course.rng(21), xs = [];
+      for (let i = 0; i < N; i++) { const u = R.uniform(), a = u < 1 / 3 ? 0 : u < 2 / 3 ? 1 : 2, r = R.normal(MU[a] + off, 1); xs.push((r - b) * ((a === 2 ? 1 : 0) - PI[2])); }
+      const mean = xs.reduce((s, x) => s + x, 0) / N, sd = Math.sqrt(xs.reduce((s, x) => s + (x - mean) ** 2, 0) / N);
+      const span = Math.max(1.5, 3.2 * sd + Math.abs(mean)), lo = -span, hi = span, nb = 50, w = (hi - lo) / nb, bins = new Array(nb).fill(0);
+      xs.forEach(x => { const k = Math.floor((x - lo) / w); if (k >= 0 && k < nb) bins[k]++; });
+      const ymax = Math.max(...bins) / N * 1.2;
+      h.setView(lo, hi, -ymax * 0.1, ymax);
+      bins.forEach((v, k) => h.rect(lo + k * w + w * .08, 0, lo + (k + 1) * w - w * .08, v / N, { fill: "c1", fillAlpha: .7, color: "c1", width: 1 }));
+      h.line(lo, 0, hi, 0, { color: "axis", width: 1 });
+      const tg = PI[2] * (MU[2] - LA.dot(PI, MU));
+      h.line(tg, 0, tg, ymax * .95, { color: "c4", dash: [5, 4], width: 2 }); h.label(tg, ymax * .95, "true ∂J/∂θ₃ = " + tg.toFixed(3), { color: "c4", align: "left", dx: 4, font: "12px sans-serif" });
+      [lo / 2, 0, hi / 2].forEach(t => h.label(t, 0, t.toFixed(1), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      h.label(lo + w, ymax * .82, `sample mean ${mean.toFixed(3)}`, { color: "muted", font: "12px sans-serif" });
+      h.label(lo + w, ymax * .72, `sample sd ${sd.toFixed(3)}`, { color: "muted", font: "12px sans-serif" });
+      out.textContent = `b = ${b.toFixed(2)}, offset = ${off}:  total variance of the 3-d gradient estimate = ${totvar(b).toFixed(3)}  ` +
+        `(at b = mean reward ${(LA.dot(PI, MU) + off).toFixed(3)}: ${totvar(LA.dot(PI, MU) + off).toFixed(3)};  at b = 0: ${totvar(0).toFixed(3)})`;
+    });
+    c.render(c => {
+      // log10 scale on y so both the offset-0 and offset-10 parabolas are readable
+      const lv = x => Math.log10(Math.max(1e-3, totvar(x))), lo = -0.5, hi = 2.3;
+      c.setView(-2.6, 12.6, lo - 0.25, hi);
+      c.line(-1, lo, 12, lo, { color: "axis", width: 1 }); c.line(-1, lo, -1, hi, { color: "axis", width: 1 });
+      [0.5, 1, 10, 100].forEach(v => { const y = Math.log10(v); c.line(-1, y, 12, y, { color: "grid", width: 1 }); c.label(-1, y, String(v), { align: "right", dx: -4, color: "muted", font: "11px sans-serif" }); });
+      c.fn(lv, { xmin: -1, xmax: 12, color: "c2", width: 2.5 });
+      const bstar = LA.dot(PI, MU) + off;
+      c.line(bstar, lo, bstar, lv(bstar), { color: "ok", dash: [4, 3], width: 1.5 });
+      c.point(b, lv(b), { r: 6, color: "c1", stroke: "bg" });
+      [0, 4, 8, 12].forEach(t => c.label(t, lo, String(t), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      c.label(12, lo, "b", { align: "right", dy: -10, color: "muted", font: "12px sans-serif" });
+      c.label(-0.8, hi - 0.1, "total variance (log scale)", { color: "muted", font: "12px sans-serif" });
+      c.label(bstar, lv(bstar), "≈ mean reward", { color: "ok", align: "center", dy: 14, font: "11px sans-serif", bg: true });
+    });
+  }
+
+  // ---------- fig: GAE ----------
+  {
+    const T = 20, g = 0.97;
+    const R = Course.rng(8);
+    const r = new Array(T).fill(0); r[T - 1] = 1; r[8] = 0.3;
+    const trueV = new Array(T).fill(0); { let G = 0; for (let t = T - 1; t >= 0; t--) { G = r[t] + g * G; trueV[t] = G; } }
+    const V = trueV.map((v, t) => Math.max(0, v * 0.7 + R.normal(0, 0.08)));
+    const delta = r.map((x, t) => x + g * (t + 1 < T ? V[t + 1] : 0) - V[t]);
+    const mc = trueV.map((G, t) => G - V[t]);
+    let lam = 0.9, sel = 4;
+    const p = new Plot("#fig-gae", { xmin: -1.2, xmax: T + 0.3, ymin: -0.35, ymax: 0.75 });
+    const out = document.getElementById("out-gae");
+    slider("#ctl-gae", { label: "λ ", min: 0, max: 1, step: 0.01, value: 0.9 }, v => { lam = v; p.render(); });
+    p.onClick = x => { sel = Math.max(0, Math.min(T - 1, Math.floor(x))); p.render(); };
+    p.render(p => {
+      const A = new Array(T).fill(0); { let run = 0; for (let t = T - 1; t >= 0; t--) { run = delta[t] + g * lam * run; A[t] = run; } }
+      p.line(0, 0, T, 0, { color: "axis", width: 1 });
+      for (let t = 0; t < T; t++) {
+        const wgt = t >= sel ? Math.pow(g * lam, t - sel) : 0;
+        p.rect(t + .2, 0, t + .8, delta[t], { fill: "c3", fillAlpha: .25 + .6 * wgt, color: "c3", width: 1 });
+        if (r[t]) p.label(t + .5, -0.2, "r=" + r[t], { align: "center", color: "c5", font: "11px sans-serif" });
+      }
+      p.path(mc.map((v, t) => [t + .5, v]), { color: "muted", width: 2, dash: [6, 4] });
+      p.path(A.map((v, t) => [t + .5, v]), { color: "c1", width: 2.5 });
+      A.forEach((v, t) => p.point(t + .5, v, { r: t === sel ? 6 : 3, color: "c1" }));
+      [0, 5, 10, 15, 19].forEach(t => p.label(t + .5, -0.31, "t=" + t, { align: "center", color: "muted", font: "11px sans-serif" }));
+      [-0.2, 0.2, 0.4, 0.6].forEach(v => p.label(-0.1, v, v.toFixed(1), { align: "right", color: "muted", font: "11px sans-serif" }));
+      p.label(0.2, 0.7, "bars: δ_t (shaded by their weight in A at the selected step)    solid: GAE A_t    dashed: G_t − V(s_t)", { color: "muted", font: "12px sans-serif" });
+      const w = []; for (let l = 0; l < Math.min(5, T - sel); l++) w.push(`${Math.pow(g * lam, l).toFixed(3)}·δ${sel + l}`);
+      out.textContent = `λ = ${lam.toFixed(2)}, γ = ${g}:  A_${sel} = ${w.join(" + ")}${T - sel > 5 ? " + …" : ""} = ${A[sel].toFixed(3)}\n` +
+        `TD residual δ_${sel} = ${delta[sel].toFixed(3)}    Monte-Carlo G − V = ${mc[sel].toFixed(3)}    mean |GAE − MC| over the episode = ${(A.reduce((s, v, t) => s + Math.abs(v - mc[t]), 0) / T).toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: importance sampling ----------
+  {
+    const Z0 = [0.5, 1.2, 0.2, -0.3, 0.8, -1.0], D = [-1, -0.6, 0.2, 1.4, -0.2, 2.0], F = [0.1, 0.0, 0.3, 1.0, 0.2, 0.9];
+    const old = smax(Z0); let s = 0.8;
+    const p = new Plot("#fig-is", { xmin: -0.3, xmax: 6.1, ymin: -0.1, ymax: 1 });
+    const out = document.getElementById("out-is");
+    slider("#ctl-is", { label: "how far the new policy moved ", min: 0, max: 3, step: 0.05, value: 0.8 }, v => { s = v; p.render(); });
+    p.render(p => {
+      const nw = smax(Z0.map((z, i) => z + s * D[i])), rho = nw.map((q, i) => q / old[i]);
+      const top = Math.max(...old, ...nw) * 1.35; p.setView(-0.3, 6.1, -top * 0.14, top);
+      p.line(0, 0, 6, 0, { color: "axis", width: 1 });
+      for (let i = 0; i < 6; i++) {
+        p.rect(i + .12, 0, i + .48, old[i], { fill: "muted", fillAlpha: .6, color: "muted", width: 1 });
+        p.rect(i + .52, 0, i + .88, nw[i], { fill: "c1", fillAlpha: .75, color: "c1", width: 1 });
+        p.label(i + .5, Math.max(old[i], nw[i]), "ρ=" + rho[i].toFixed(2), { align: "center", dy: -10, font: mono, color: rho[i] > 3 || rho[i] < 1 / 3 ? "bad" : "fg" });
+        p.label(i + .5, 0, "a" + (i + 1) + "  f=" + F[i], { align: "center", dy: 11, color: "muted", font: "11px sans-serif" });
+      }
+      p.label(0.1, top * .93, "old π (grey)   new π (blue)", { color: "muted", font: "12px sans-serif" });
+      const kl = nw.reduce((t, q, i) => t + q * Math.log(q / old[i]), 0), chi = old.reduce((t, q, i) => t + q * rho[i] ** 2, 0) - 1;
+      const trueF = LA.dot(nw, F), m2 = old.reduce((t, q, i) => t + q * (rho[i] * F[i]) ** 2, 0), sdEst = Math.sqrt((m2 - trueF ** 2) / 100);
+      const sdOn = Math.sqrt((LA.dot(nw, F.map(x => x * x)) - trueF ** 2) / 100);
+      out.textContent = `KL(new‖old) = ${kl.toFixed(3)} nats    χ² = Var_old(ρ) = ${chi.toFixed(3)}    effective sample size of 100 old samples ≈ ${(100 / (1 + chi)).toFixed(1)}\n` +
+        `estimating the new policy's mean reward ${trueF.toFixed(3)} from 100 OLD samples: std ${sdEst.toFixed(3)}   (from 100 fresh samples: ${sdOn.toFixed(3)})`;
+    });
+  }
+
+  // ---------- fig: PPO clip ----------
+  {
+    let eps = 0.2, A = 1, rho = 1.3;
+    const p = new Plot("#fig-clip", { xmin: -0.35, xmax: 4.75, ymin: -2.6, ymax: 2.6 });
+    const ctl = document.getElementById("ctl-clip"), out = document.getElementById("out-clip");
+    slider(ctl, { label: "ρ ", min: 0, max: 2, step: 0.01, value: 1.3 }, v => { rho = v; p.render(); });
+    slider(ctl, { label: "ε ", min: 0.05, max: 0.5, step: 0.01, value: 0.2 }, v => { eps = v; p.render(); });
+    slider(ctl, { label: "|Â| ", min: 0.3, max: 1.2, step: 0.05, value: 1 }, v => { A = v; p.render(); });
+    const clip = x => Math.max(1 - eps, Math.min(1 + eps, x));
+    const L = (x, a) => Math.min(x * a, clip(x) * a);
+    const zeroGrad = (x, a) => (a > 0 && x > 1 + eps) || (a < 0 && x < 1 - eps);
+    p.render(p => {
+      const panels = [[0, A, "Â > 0"], [2.6, -A, "Â < 0"]];
+      let s = "";
+      for (const [ox, a, name] of panels) {
+        const zs = a > 0 ? [1 + eps, 2] : [0, 1 - eps];
+        p.rect(ox + zs[0], -2.4, ox + zs[1], 2.4, { fill: "muted", fillAlpha: .14, stroke: false });
+        p.line(ox, 0, ox + 2.05, 0, { color: "axis", width: 1 }); p.line(ox, -2.4, ox, 2.4, { color: "axis", width: 1 });
+        p.line(ox + 1, -2.4, ox + 1, 2.4, { color: "grid", width: 1 });
+        p.fn(x => (x - ox) * a, { xmin: ox, xmax: ox + 2, color: "muted", dash: [6, 4], width: 1.5 });
+        p.fn(x => L(x - ox, a), { xmin: ox, xmax: ox + 2, color: a > 0 ? "c1" : "c4", width: 3, samples: 600 });
+        [0.5, 1, 1.5, 2].forEach(t => p.label(ox + t, 0, String(t), { align: "center", dy: a > 0 ? 10 : -10, color: "muted", font: "11px sans-serif" }));
+        p.label(ox + 1 - eps, 2.3, "1−ε", { align: "center", color: "muted", font: "11px sans-serif" }); p.line(ox + 1 - eps, -2.4, ox + 1 - eps, 2.2, { color: "muted", dash: [2, 3], width: 1 });
+        p.label(ox + 1 + eps, 2.3, "1+ε", { align: "center", color: "muted", font: "11px sans-serif" }); p.line(ox + 1 + eps, -2.4, ox + 1 + eps, 2.2, { color: "muted", dash: [2, 3], width: 1 });
+        p.label(ox + .05, a > 0 ? -2.1 : 2.0, name + "   (gradient 0 in grey zone)", { color: a > 0 ? "c1" : "c4", font: "600 12px sans-serif" });
+        p.label(ox + 2.05, 0, "ρ", { align: "left", dy: -8, color: "muted", font: "12px sans-serif" });
+        const y = L(rho, a), zg = zeroGrad(rho, a);
+        p.point(ox + rho, y, { r: 6, color: zg ? "muted" : (a > 0 ? "c1" : "c4"), stroke: "bg" });
+        s += `${name}: ρ·Â = ${(rho * a).toFixed(3)}, clip(ρ)·Â = ${(clip(rho) * a).toFixed(3)} → L = ${y.toFixed(3)},  dL/dρ = ${zg ? "0 (clipped)" : a.toFixed(2)}\n`;
+      }
+      out.textContent = s.trim();
+    });
+  }
+});
+</script>
+</body>
+</html>

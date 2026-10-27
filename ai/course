@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""AI from Scratch — course CLI.
+
+  ./course setup          create .venv and install numpy, torch, pytest
+  ./course list           list lessons and workbooks
+  ./course open NN        open lesson NN in your browser
+  ./course check NN       grade your workbook NN (runs its tests against exercises.py)
+  ./course check NN -k t  pass extra args to pytest (e.g. one test)
+  ./course solution NN    run the tests against the reference solutions.py
+  ./course validate [NN]  author check: solutions pass AND untouched stubs fail
+  ./course pages          author check: every lesson loads in headless Chrome with no JS/KaTeX errors
+"""
+import os, re, subprocess, sys, glob, json, html
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+VENV_PY = os.path.join(ROOT, ".venv", "bin", "python")
+WB = os.path.join(ROOT, "workbooks")
+LESSONS = os.path.join(ROOT, "lessons")
+CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+def py():
+    if not os.path.exists(VENV_PY):
+        sys.exit("No .venv yet — run:  ./course setup")
+    return VENV_PY
+
+
+def workbook_dir(n):
+    n = n.zfill(2)
+    hits = sorted(glob.glob(os.path.join(WB, n + "_*")))
+    if not hits:
+        sys.exit(f"No workbook for lesson {n} (lessons without code: theory-only). See ./course list")
+    return hits[0]
+
+
+def run_tests(d, impl, extra=(), quiet=False):
+    env = dict(os.environ, COURSE_IMPL=impl, PYTHONDONTWRITEBYTECODE="1")
+    cmd = [py(), "-m", "pytest", d, "-p", "no:cacheprovider", "--import-mode=importlib",
+           "-q", "--no-header", "-rN" if quiet else "-rf", "--tb=short" if not quiet else "--tb=no"] + list(extra)
+    r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=quiet, text=True)
+    return r
+
+
+def cmd_setup():
+    vdir = os.path.join(ROOT, ".venv")
+    if not os.path.exists(VENV_PY):
+        subprocess.check_call([sys.executable, "-m", "venv", vdir])
+    subprocess.check_call([VENV_PY, "-m", "pip", "install", "-q", "--upgrade", "pip"])
+    subprocess.check_call([VENV_PY, "-m", "pip", "install", "-q", "-r", os.path.join(ROOT, "requirements.txt")])
+    subprocess.check_call([VENV_PY, "-c", "import numpy, torch, pytest; print('ready: numpy', numpy.__version__, '| torch', torch.__version__)"])
+
+
+def lessons():
+    src = open(os.path.join(ROOT, "assets", "manifest.js")).read()
+    return re.findall(r'n: "(\d+)", slug: "([^"]+)", title: "([^"]+)"', src)
+
+
+def cmd_list():
+    for n, slug, title in lessons():
+        wb = glob.glob(os.path.join(WB, n + "_*"))
+        have = os.path.exists(os.path.join(LESSONS, f"{n}-{slug}.html"))
+        print(f"{n}  {title:<50} {'lesson' if have else '(missing)':<10} {'workbook: ' + os.path.basename(wb[0]) if wb else ''}")
+
+
+def cmd_open(n):
+    for ln, slug, _ in lessons():
+        if ln == n.zfill(2):
+            subprocess.call(["open", os.path.join(LESSONS, f"{ln}-{slug}.html")])
+            return
+    sys.exit("unknown lesson " + n)
+
+
+def cmd_check(n, extra, impl="exercises"):
+    d = workbook_dir(n)
+    print(f"Grading {os.path.relpath(d, ROOT)}/{impl}.py\n")
+    r = run_tests(d, impl, extra)
+    if r.returncode == 0:
+        print("\nAll tests pass. Nice work — mark the lesson complete and move on.")
+    sys.exit(r.returncode)
+
+
+def cmd_validate(only=None):
+    dirs = sorted(d for d in glob.glob(os.path.join(WB, "[0-9][0-9]_*")) if os.path.isdir(d))
+    if only:
+        dirs = [workbook_dir(only)]
+    bad = 0
+    for d in dirs:
+        name = os.path.basename(d)
+        sol = run_tests(d, "solutions", quiet=True)
+        stub = run_tests(d, "exercises", quiet=True)
+        sol_ok, stub_fails = sol.returncode == 0, stub.returncode != 0
+        # every test must fail on stubs (a test that passes on an empty stub teaches nothing)
+        m = re.search(r"(\d+) passed", stub.stdout)
+        stub_passed = int(m.group(1)) if m else 0
+        ok = sol_ok and stub_fails and stub_passed == 0
+        bad += not ok
+        tail = (sol.stdout.strip().splitlines() or ["?"])[-1]
+        print(f"{'ok  ' if ok else 'FAIL'} {name:<36} solutions: {tail:<40} stubs: {'fail' if stub_fails else 'PASS?!'}"
+              + (f" ({stub_passed} tests pass on stubs)" if stub_passed else ""))
+        if not sol_ok:
+            print(sol.stdout[-3000:])
+    print(f"\n{len(dirs) - bad}/{len(dirs)} workbooks valid")
+    sys.exit(1 if bad else 0)
+
+
+def cmd_pages(only=None):
+    if not os.path.exists(CHROME):
+        sys.exit("Google Chrome not found at " + CHROME)
+    files = [os.path.join(ROOT, "index.html")] + sorted(glob.glob(os.path.join(LESSONS, "*.html")))
+    if only:
+        files = [f for f in files if os.path.basename(f).startswith(only.zfill(2) + "-")]
+    bad = 0
+    for f in files:
+        r = subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--no-first-run", "--allow-file-access-from-files",
+                            "--virtual-time-budget=4000", "--dump-dom", "file://" + f],
+                           capture_output=True, text=True, timeout=90)
+        dom = r.stdout
+        m = re.search(r'<body[^>]*data-errors="([^"]*)"', dom)
+        ready = re.search(r'<body[^>]*data-ready="1"', dom)
+        errs = json.loads(html.unescape(m.group(1))) if m else (["no data-errors attr (course.js not loaded?)"] if "lessons" in f else [])
+        if "lessons" in f and not ready:
+            errs.append("page never reached Course ready")
+        status = "ok  " if not errs else "FAIL"
+        bad += bool(errs)
+        print(f"{status} {os.path.relpath(f, ROOT)}" + ("".join("\n       " + e[:300] for e in errs) if errs else ""))
+    print(f"\n{len(files) - bad}/{len(files)} pages clean")
+    sys.exit(1 if bad else 0)
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__); return
+    c = a[0]
+    if c == "setup": cmd_setup()
+    elif c == "list": cmd_list()
+    elif c == "open" and len(a) > 1: cmd_open(a[1])
+    elif c == "check" and len(a) > 1: cmd_check(a[1], a[2:])
+    elif c == "solution" and len(a) > 1: cmd_check(a[1], a[2:], impl="solutions")
+    elif c == "validate": cmd_validate(a[1] if len(a) > 1 else None)
+    elif c == "pages": cmd_pages(a[1] if len(a) > 1 else None)
+    else: print(__doc__); sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

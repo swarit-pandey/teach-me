@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logistic & softmax classification</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="14">
+<main>
+
+<div class="kicker">Part 4 · Machine learning in code</div>
+<h1>Logistic &amp; softmax classification</h1>
+<p class="lede">Regression predicts a number. Classification predicts a <em>category</em>: spam or not, which digit, which next token. The recipe barely changes. Compute a linear score, squash it into a probability, and train by maximum likelihood. The result is the most important loss in deep learning, the cross-entropy, and a gradient with an almost suspiciously simple form: <em>(prediction − truth) × input</em>.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Explain the sigmoid, logits and log-odds, and read a 2-D logistic model as a weight vector perpendicular to its decision boundary.</li>
+    <li>Derive the log-loss from the Bernoulli likelihood, and compute it stably from logits.</li>
+    <li>Derive $\partial\ell/\partial z = p - y$, and so $\nabla_{\mathbf w} = (p-y)\mathbf x$, and train logistic regression with gradient descent.</li>
+    <li>Generalize to $K$ classes with softmax and cross-entropy, with gradient $P - Y$.</li>
+    <li>Say what a linear classifier can't do, and how feature maps (and, next, neural networks) fix it.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="sigmoid">1. From scores to probabilities: the sigmoid</h2>
+<p>Labels are now $y \in \{0, 1\}$. Why not just run linear regression on them? Because $\mathbf w\cdot\mathbf x + b$ ranges over all of $\mathbb R$: it predicts 1.7 or −0.4, which aren't probabilities. And a few points far from the boundary drag the least-squares line around even though they're already classified correctly. We want a model that outputs $P(y=1\mid\mathbf x) \in (0,1)$.</p>
+<p>Keep the linear <b>score</b> $z = \mathbf w\cdot\mathbf x + b$ (called the <b>logit</b>), and squash it with the <b>sigmoid</b> (logistic) function:</p>
+$$p = \sigma(z) = \frac{1}{1 + e^{-z}}.$$
+<p>It maps $-\infty \to 0$, $0 \to \tfrac12$ and $+\infty \to 1$, smoothly. Three identities do most of the work in this lesson (problem 3 asks you to prove them):</p>
+$$\sigma(-z) = 1 - \sigma(z), \qquad \sigma'(z) = \sigma(z)\,\big(1-\sigma(z)\big), \qquad z = \log\frac{p}{1-p}.$$
+<p>The last one says what the score <em>means</em>. $z$ is the <b>log-odds</b>. A logit of 0 means even odds, $+2$ means odds of $e^2 \approx 7.4$ to 1, and adding 1 to $z$ multiplies the odds by $e$. So logistic regression is a linear model of the log-odds. Each weight $w_j$ says how much one unit of feature $j$ shifts the log-odds.</p>
+
+<div class="figure">
+  <canvas id="fig-sig" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-sig"></div>
+  <div class="readout" id="out-sig"></div>
+  <div class="caption"><b>Try it:</b> 1-D data, with class 1 drawn at the top and class 0 at the bottom. Adjust $w$ and $b$ to fit the curve to them. The bars under the axis show each point's loss, $-\log(\text{probability given to its true class})$, which section 3 derives. Points far on the wrong side of the threshold $x = -b/w$ produce huge bars. Increase $w$: the curve gets steeper and more confident. That helps the correctly classified points and badly hurts the misclassified ones.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="geometry">2. Geometry: the decision boundary</h2>
+<p>To classify, predict 1 when $p \gt \tfrac12$, which is when $z \gt 0$. The <b>decision boundary</b> is the set $\{\mathbf x : \mathbf w\cdot\mathbf x + b = 0\}$: a line in 2-D, a plane in 3-D, a hyperplane in general. From lesson 01:</p>
+<ul>
+  <li>$\mathbf w$ is <b>perpendicular</b> to the boundary. Moving along the boundary doesn't change $\mathbf w\cdot\mathbf x$, so the score can't change either.</li>
+  <li>$z/\|\mathbf w\|$ is the <b>signed distance</b> from $\mathbf x$ to the boundary (a scalar projection onto $\hat{\mathbf w}$, shifted by $b$). Points far on the positive side get confident probabilities near 1.</li>
+  <li>Scaling $(\mathbf w, b)$ by $c \gt 0$ leaves the boundary unchanged but multiplies every logit by $c$. A longer $\mathbf w$ means a steeper, more confident sigmoid across the boundary.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-2d" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-2d"></div>
+  <div class="readout" id="out-2d"></div>
+  <div class="caption"><b>Try it:</b> drag the tip of the weight vector $\mathbf w$ (and slide $b$). The background shows $p = \sigma(\mathbf w\cdot\mathbf x + b)$, blue for class 1 and pink for class 0. The solid line is the boundary $p = \tfrac12$, always perpendicular to $\mathbf w$. The dashed lines are $z = \pm1$ ($p \approx 0.73$ and $0.27$). Make $\mathbf w$ longer without turning it: the boundary stays put, the dashed band narrows, and the loss changes.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="logloss">3. The loss: maximum likelihood gives log-loss</h2>
+<p>We don't invent a loss. We derive one, as in lesson 10. The model says $y\mid\mathbf x$ is a <b>Bernoulli</b> coin with heads-probability $p = \sigma(z)$. Its probability mass function, in one line, is</p>
+$$P(y\mid\mathbf x) = p^{\,y}(1-p)^{1-y} \qquad (\text{this equals } p \text{ if } y = 1, \text{ and } 1-p \text{ if } y = 0).$$
+<p>With independent examples, the likelihood is a product. Its negative log, averaged, is the <b>log-loss</b> or <b>binary cross-entropy</b>:</p>
+$$L(\mathbf w, b) = -\frac1n\sum_{i=1}^n \Big[y_i\log p_i + (1-y_i)\log(1-p_i)\Big].$$
+<p>This is exactly lesson 11's cross-entropy $H(q, p)$ between the true label distribution $q$ (all mass on $y_i$) and the model's $p$. Each term is $-\log(\text{probability assigned to the true class})$. A correct answer at 99% costs $0.01$, a coin flip costs $\log 2 \approx 0.69$, and a confident wrong answer at 1% costs $4.6$. The loss grows without bound as the model becomes certain of the wrong class.</p>
+
+<h3>Compute it from logits</h3>
+<p>If you compute <code>p = sigmoid(z)</code> and then <code>log(p)</code>, a logit of $-800$ makes $p$ round to exactly 0, and the loss becomes <code>inf</code>. Substitute $\log\sigma(z) = -\log(1+e^{-z})$ and $\log(1-\sigma(z)) = \log\sigma(-z) = -\log(1+e^{z})$ instead, and simplify:</p>
+$$\ell(z, y) = y\log(1+e^{-z}) + (1-y)\log(1+e^{z}) = \log(1 + e^{z}) - y\,z.$$
+<p>(Use $\log(1+e^{-z}) = \log(1+e^{z}) - z$.) Here $\log(1+e^z)$ is the <b>softplus</b>, computed stably by <code>np.logaddexp(0, z)</code>. Every framework's <code>BCEWithLogits</code> / <code>binary_cross_entropy_with_logits</code> is this formula. That's why models output logits and leave the sigmoid to the loss.</p>
+
+<div class="figure">
+  <canvas id="fig-loss" width="680" height="320"></canvas>
+  <div class="controls" id="ctl-loss"></div>
+  <div class="readout" id="out-loss"></div>
+  <div class="caption"><b>Try it:</b> the blue curve is the log-loss for a positive example ($y=1$) as a function of its logit $z$, and the pink curve is the same for a negative example. Grey dashed is the squared error $(\sigma(z) - 1)^2$, the "obvious" alternative. Slide $z$ far to the left (confidently wrong). The log-loss slope stays near −1, a strong corrective push. The squared error goes flat: its gradient vanishes exactly when the model is most wrong.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gradient">4. The gradient: (p − y) x</h2>
+<p>Differentiate the logit form, $\ell = \log(1+e^z) - yz$, with respect to $z$:</p>
+$$\frac{\partial\ell}{\partial z} = \frac{e^z}{1+e^z} - y = \sigma(z) - y = p - y.$$
+<p>That's the whole derivation. The error signal is "predicted probability minus truth". Then the chain rule through $z = \mathbf w\cdot\mathbf x + b$ (where $\partial z/\partial\mathbf w = \mathbf x$ and $\partial z/\partial b = 1$) gives, averaged over the data,</p>
+$$\boxed{\;\nabla_{\mathbf w}L = \frac1n\sum_i (p_i - y_i)\,\mathbf x_i = \frac1n X^\top(\mathbf p - \mathbf y),\qquad \frac{\partial L}{\partial b} = \frac1n\sum_i (p_i - y_i)\;}$$
+<p>Compare linear regression (lesson 13): $\frac2n X^\top(\hat{\mathbf y} - \mathbf y)$. It's the same shape, error × input. This is no coincidence. Both are <em>generalized linear models</em> trained with their natural likelihood, and that pairing always gives this form. Problem 9 shows why sigmoid + squared error does <em>not</em>.</p>
+
+<div class="example">
+  <div class="label">Worked example: one gradient step by hand</div>
+  <p>One example $\mathbf x = (1, 2)$ with $y = 1$. Start at $\mathbf w = (0,0)$, $b = 0$, learning rate $\eta = 1$.</p>
+  <p>Forward: $z = 0$, so $p = \sigma(0) = 0.5$ and $\ell = \log(1 + e^0) - 1\cdot0 = \log 2 \approx 0.693$.</p>
+  <p>Backward: $p - y = -0.5$. So $\nabla_{\mathbf w} = -0.5\,(1, 2) = (-0.5, -1)$ and $\partial_b = -0.5$.</p>
+  <p>Update: $\mathbf w = (0.5, 1)$ and $b = 0.5$. Now $z = 0.5 + 2 + 0.5 = 3$, $p = \sigma(3) \approx 0.953$, and $\ell = \log(1 + e^{-3}) \approx 0.049$. The step moved $\mathbf w$ toward $\mathbf x$ (a positive example pulls $\mathbf w$ toward itself; a negative one pushes it away). Lesson 01's "dot product = alignment" is doing the classifying.</p>
+</div>
+
+<p><b>Convexity.</b> Differentiating again gives the Hessian $H = \frac1n X^\top S X$ with $S = \operatorname{diag}(p_i(1-p_i))$. It's positive semi-definite, since $\mathbf v^\top H\mathbf v = \frac1n\sum_i p_i(1-p_i)(\mathbf x_i\cdot\mathbf v)^2 \ge 0$. So the log-loss is convex, and gradient descent can't get stuck in a bad local minimum. Unlike lesson 13, though, $\nabla L = 0$ is now a <em>non-linear</em> equation in $\mathbf w$ (the $p_i$ depend on it). There is no closed form, so we iterate.</p>
+
+<div class="callout warning">
+<p><b>Separable data has no minimizer.</b> If a line separates the classes perfectly, scaling $\mathbf w$ up pushes every $p_i$ toward its label and the loss toward 0. It never reaches 0, though, and $\|\mathbf w\| \to \infty$ as GD runs. In the live demo below, watch the boundary sharpen forever on separable blobs. The fix is to add a penalty $\frac\lambda2\|\mathbf w\|^2$ (L2 regularization, lesson 15). It gives a finite, well-behaved answer.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="softmax">5. K classes: softmax and cross-entropy</h2>
+<p>For $K$ classes, give each class its own weight vector and compute $K$ logits: $z_k = \mathbf w_k\cdot\mathbf x + b_k$, or $\mathbf z = W^\top\mathbf x + \mathbf b$ with $W \in \mathbb R^{d\times K}$. Turn them into a probability distribution with the <b>softmax</b> (stable version: lesson 12):</p>
+$$P(y = k\mid\mathbf x) = \operatorname{softmax}(\mathbf z)_k = \frac{e^{z_k}}{\sum_{j=1}^K e^{z_j}}.$$
+<p>The outputs are positive and sum to 1. Adding the same constant to every logit changes nothing, so only differences between logits matter. For $K = 2$, $\operatorname{softmax}(\mathbf z)_1 = \frac{1}{1+e^{-(z_1 - z_0)}} = \sigma(z_1 - z_0)$: logistic regression is the two-class special case (problem 7).</p>
+<p>The likelihood is now a <b>categorical</b> distribution, and the negative log-likelihood is the <b>cross-entropy</b>:</p>
+$$\ell(\mathbf z, y) = -\log\operatorname{softmax}(\mathbf z)_y = \underbrace{\log\sum_j e^{z_j}}_{\text{logsumexp}} - z_y.$$
+<p>Its gradient follows the same pattern. Writing $\mathbf e_y$ for the one-hot vector of the label,</p>
+$$\frac{\partial\ell}{\partial z_k} = \operatorname{softmax}(\mathbf z)_k - [k = y] \qquad\Longleftrightarrow\qquad \nabla_{\mathbf z}\ell = \mathbf p - \mathbf e_y,$$
+<p>because $\partial\,\text{logsumexp}/\partial z_k = e^{z_k}/\sum_j e^{z_j} = p_k$. Batched over the data matrix, this is $\nabla_W L = \frac1n X^\top(P - Y)$, with $Y$ the one-hot label matrix. The update raises the true class's logit by $1 - p_y$ and lowers every other logit in proportion to how much probability it stole.</p>
+
+<div class="figure">
+  <canvas id="fig-softmax" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-softmax"></div>
+  <div class="readout" id="out-softmax"></div>
+  <div class="caption"><b>Try it:</b> set three logits and choose the true class. Left: the probabilities. Right: the gradient $\mathbf p - \mathbf e_y$ that training would push back into the logits. The true class always gets a negative entry (its logit goes up), the others positive, and the entries always sum to zero. Lower the temperature $T$ (logits divided by $T$) to sharpen the softmax toward argmax. You'll meet $T$ again in sampling from language models (lesson 25).</div>
+</div>
+
+<div class="callout ml">
+<p>A GPT's final layer is exactly this: softmax regression over a vocabulary of ~50,000 tokens, applied to the feature vector the transformer computed. "Training a language model" means minimizing this cross-entropy for the next token, averaged over billions of positions (lesson 24). The gradient that starts backpropagation is $\mathbf p - \mathbf e_y$.</p>
+</div>
+
+<p>Geometrically, the predicted class is $\arg\max_k z_k$. Between classes $j$ and $k$ the boundary is $z_j = z_k$, i.e. $(\mathbf w_j - \mathbf w_k)\cdot\mathbf x + (b_j - b_k) = 0$, another hyperplane. The decision regions are convex polygons (intersections of half-spaces). That's both the strength and the limit of linear classifiers.</p>
+
+<!-- ============================================================ -->
+<h2 id="train">6. Training live, and the limits of linear</h2>
+<p>Here's the whole thing running in your browser: softmax regression trained by full-batch gradient descent, $\mathbf W \leftarrow \mathbf W - \eta\,\frac1n\Phi^\top(P - Y)$, where $\Phi$ holds the (standardized) features. The background is the decision region of the current model. Its color is the predicted class, and its intensity is the model's confidence.</p>
+
+<div class="figure">
+  <canvas id="fig-train" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-train"></div>
+  <div class="readout" id="out-train"></div>
+  <div class="caption"><b>Try it:</b> press <b>play</b> on the blobs and watch the boundary settle. On separable two-blob data, keep it running: the weights keep growing and the boundary keeps sharpening, which is the warning box above in action. Now pick <b>XOR</b> or <b>circles</b> with <b>linear</b> features: no straight line works, and accuracy stalls near chance. Switch to <b>quadratic</b> features and the same algorithm bends its boundary. Try <b>spirals</b>: even cubic features struggle. Hand-designing features doesn't scale. Lesson 16's neural networks <em>learn</em> the feature map $\phi$ instead.</div>
+</div>
+
+<p>"Quadratic features" means running the linear classifier on $\phi(\mathbf x) = (x_1, x_2, x_1^2, x_2^2, x_1x_2)$. The model is linear in $\phi$, so the gradient, convexity and code are unchanged, but its boundary in the original $(x_1,x_2)$ plane is a conic: a circle, an ellipse or a hyperbola. This is lesson 13's polynomial trick applied to classification.</p>
+
+<!-- ============================================================ -->
+<h2 id="eval">7. Evaluating a classifier</h2>
+<p><b>Accuracy</b> is the fraction predicted correctly. It can mislead. With 99% negatives, predicting "negative" always scores 99%. The <b>confusion matrix</b> $C_{ij}$ counts examples of true class $i$ predicted as $j$, so the diagonal holds the correct predictions and everything off it is a specific mistake. From it, per class:</p>
+$$\text{precision}_k = \frac{C_{kk}}{\sum_i C_{ik}}\;\;(\text{of predicted } k\text{, how many were } k), \qquad \text{recall}_k = \frac{C_{kk}}{\sum_j C_{kj}}\;\;(\text{of true } k\text{, how many we found}).$$
+
+<div class="example">
+  <div class="label">Worked example: a 3-class confusion matrix</div>
+  <p>Rows are true classes, columns predictions: $C = \begin{bmatrix} 5 & 1 & 0\\ 2 & 3 & 0 \\ 0 & 1 & 8\end{bmatrix}$, with $n = 20$.</p>
+  <p>Accuracy $= (5+3+8)/20 = 0.8$. Class 0: precision $= 5/(5+2+0) = 0.714$, recall $= 5/(5+1+0) = 0.833$. Class 1: precision $3/5 = 0.6$, recall $3/5 = 0.6$. Class 2: precision $8/8 = 1$, recall $8/9 = 0.889$. The matrix also shows <em>where</em> the errors are: classes 0 and 1 get confused with each other, and class 2 is well separated.</p>
+</div>
+<p>Remember too that log-loss and accuracy measure different things. Accuracy only looks at the argmax. Log-loss rewards <em>calibrated</em> probabilities. Two models with equal accuracy can differ a lot in log-loss, and you train on log-loss because it's smooth and accuracy isn't.</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>A logistic model outputs $p = 0.8$ for an email being spam. What is the logit $z$?</p>
+<div class="numcheck" data-answer="1.386294" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$z = \log\frac{p}{1-p} = \log\frac{0.8}{0.2} = \log 4 \approx 1.386$. Check: $\sigma(\log 4) = 1/(1 + 1/4) = 0.8$ ✓.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>An example has logit $z = 2$ but true label $y = 0$. What is its log-loss?</p>
+<div class="numcheck" data-answer="2.126928" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\ell = \log(1 + e^{2}) - 0\cdot 2 = \log(8.389) \approx 2.127$. Equivalently, $p = \sigma(2) \approx 0.881$ and $-\log(1 - 0.881) \approx 2.127$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core · proof</span>
+<p>Prove (a) $\sigma(-z) = 1 - \sigma(z)$, (b) $\sigma'(z) = \sigma(z)(1 - \sigma(z))$, and (c) that $\sigma^{-1}(p) = \log\frac{p}{1-p}$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $1 - \frac{1}{1+e^{-z}} = \frac{e^{-z}}{1+e^{-z}} = \frac{1}{e^{z} + 1} = \sigma(-z)$, multiplying top and bottom by $e^z$.</p>
+<p>(b) $\sigma'(z) = \frac{e^{-z}}{(1+e^{-z})^2} = \frac{1}{1+e^{-z}}\cdot\frac{e^{-z}}{1+e^{-z}} = \sigma(z)\,\sigma(-z) = \sigma(z)(1-\sigma(z))$. The maximum is $1/4$, at $z=0$.</p>
+<p>(c) $p = 1/(1 + e^{-z}) \Rightarrow e^{-z} = 1/p - 1 = (1-p)/p \Rightarrow z = \log\frac{p}{1-p}$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · derivation</span>
+<p>Derive $\partial\ell/\partial z = \sigma(z) - y$ directly from $\ell = -[y\log\sigma(z) + (1-y)\log(1-\sigma(z))]$ using problem 3(b), without first simplifying to the logit form.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\frac{\partial}{\partial z}\log\sigma = \frac{\sigma(1-\sigma)}{\sigma} = 1-\sigma$ and $\frac{\partial}{\partial z}\log(1-\sigma) = \frac{-\sigma(1-\sigma)}{1-\sigma} = -\sigma$. So $\partial\ell/\partial z = -[y(1-\sigma) - (1-y)\sigma] = -[y - y\sigma - \sigma + y\sigma] = \sigma - y$. The $\sigma(1-\sigma)$ from the chain rule cancels exactly against the $1/p$ from the log. That cancellation is why log-loss and sigmoid belong together.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Two examples: $\mathbf x_1 = (1, 2)$ with $y_1 = 1$, and $\mathbf x_2 = (-1, 0)$ with $y_2 = 0$. Starting at $\mathbf w = (0,0)$, $b = 0$, take one batch gradient-descent step with $\eta = 1$ on the <em>mean</em> log-loss. Enter $w_1, w_2, b$.</p>
+<div class="numcheck" data-answer="0.5,0.5,0" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Both $p_i = 0.5$, so $\mathbf p - \mathbf y = (-0.5, 0.5)$. $\nabla_{\mathbf w} = \frac12[(-0.5)(1,2) + (0.5)(-1,0)] = \frac12(-1, -1) = (-0.5, -0.5)$, and $\partial_b = \frac12(-0.5 + 0.5) = 0$. Step: $\mathbf w = (0.5, 0.5)$, $b = 0$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Logits $\mathbf z = (2, 1, 0)$ for three classes. Compute the softmax probabilities, then the cross-entropy if the true class is the <em>third</em> one ($y = 2$).</p>
+<div class="numcheck" data-answer="2.407606" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$e^{\mathbf z} = (7.389, 2.718, 1)$, summing to $11.107$. So $\mathbf p \approx (0.665, 0.245, 0.090)$. Cross-entropy is $-\log 0.090 \approx 2.408$. Via logsumexp: $\log 11.107 - 0 = 2.408$ ✓. If the true class were the first, the loss would be only $0.408$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core · proof</span>
+<p>Show that softmax regression with $K=2$ is equivalent to logistic regression. What do the two weight vectors $\mathbf w_0, \mathbf w_1$ map to? Why does this mean softmax parameters aren't unique?</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\operatorname{softmax}(z_0, z_1)_1 = \frac{e^{z_1}}{e^{z_0} + e^{z_1}} = \frac{1}{1 + e^{-(z_1 - z_0)}} = \sigma(z_1 - z_0)$. So it's logistic regression with $\mathbf w = \mathbf w_1 - \mathbf w_0$ and $b = b_1 - b_0$. Only the difference matters: adding any vector $\mathbf c$ to every $\mathbf w_k$ leaves all predictions unchanged. The parameterization has a redundant direction, which L2 regularization (lesson 15) pins down.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · conceptual</span>
+<p>The training data are linearly separable by $(\mathbf w^*, b^*)$. Show that $L(c\,\mathbf w^*, c\,b^*) \to 0$ as $c \to \infty$, and conclude that the unregularized log-loss has no minimizer. What does gradient descent do?</p>
+<details class="solution"><summary>Solution</summary>
+<p>Separable means $y_i = 1 \Rightarrow z_i^* \gt 0$ and $y_i = 0 \Rightarrow z_i^* \lt 0$. Scaling by $c$ sends positive logits to $+\infty$ and negative ones to $-\infty$, so every $\ell_i \to 0$. Since $\ell_i \gt 0$ for every finite logit, the infimum 0 is never attained, and there's no minimizer. GD keeps decreasing the loss by growing $\|\mathbf w\|$ indefinitely (its direction converges to the max-margin separator, a deep result). In practice, add $\frac\lambda2\|\mathbf w\|^2$ or stop early (lesson 15).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>Suppose you trained with squared error on probabilities, $\ell_{\text{sq}} = (\sigma(z) - y)^2$. Compute $\partial\ell_{\text{sq}}/\partial z$, and evaluate it and the log-loss gradient at $z = -5$, $y = 1$ (a confidently wrong prediction). Enter the squared-error gradient.</p>
+<div class="numcheck" data-answer="-0.013207" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\partial\ell_{\text{sq}}/\partial z = 2(\sigma - y)\,\sigma(1-\sigma)$. At $z=-5$: $\sigma \approx 0.00669$, so the gradient is $2(-0.99331)(0.00669)(0.99331) \approx -0.0132$. The log-loss gradient is $\sigma - 1 \approx -0.993$, 75× larger. The extra $\sigma(1-\sigma)$ factor kills the learning signal exactly when it's needed most. It also makes $\ell_{\text{sq}}$ non-convex in $z$. This "saturation" problem comes back with sigmoid activations inside deep networks (lesson 18).</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">You double both $\mathbf w$ and $b$ of a trained logistic model. What happens?</div>
+  <div class="opts">
+    <button data-k="a">The decision boundary moves twice as far from the origin.</button>
+    <button data-k="b">The boundary is unchanged, but every probability moves further from ½ (more confident).</button>
+    <button data-k="c">The boundary rotates by 90°.</button>
+    <button data-k="d">Nothing at all changes.</button>
+  </div>
+  <div class="explain">The boundary $\{\mathbf w\cdot\mathbf x + b = 0\}$ is the same set after scaling. Each logit doubles, so the sigmoid is steeper. Accuracy is unchanged, but the log-loss changes: it goes down for correct points and up for wrong ones.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Why compute the loss from logits with <code>logaddexp</code> instead of <code>-log(sigmoid(z))</code>?</div>
+  <div class="opts">
+    <button data-k="a">It's a different loss that trains faster.</button>
+    <button data-k="b">Because the sigmoid isn't differentiable.</button>
+    <button data-k="c">For large |z|, sigmoid rounds to exactly 0 or 1 and the log becomes −inf; the logit form never forms that probability.</button>
+    <button data-k="d">To make the loss convex.</button>
+  </div>
+  <div class="explain">Mathematically it's the same function. Numerically, $\log(1+e^{z}) - yz$ stays finite and accurate for any $z$. The loss is convex either way.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">For softmax + cross-entropy, the gradient with respect to the logits is…</div>
+  <div class="opts">
+    <button data-k="a">$\mathbf p - \mathbf e_y$: predicted distribution minus one-hot truth</button>
+    <button data-k="b">$-1/p_y$ in the true slot, 0 elsewhere</button>
+    <button data-k="c">$\mathbf p\,(1-\mathbf p)$</button>
+    <button data-k="d">$\mathbf e_y - \mathbf p$, so gradient descent lowers the true logit</button>
+  </div>
+  <div class="explain">(b) is the gradient with respect to the probabilities, before going back through the softmax. (d) has the sign flipped. With $\mathbf p - \mathbf e_y$, descent <em>raises</em> the true logit (its entry is negative) and lowers the others.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Linear logistic regression on XOR-shaped data gets ~50% accuracy. What's the most direct fix?</div>
+  <div class="opts">
+    <button data-k="a">Train for more steps.</button>
+    <button data-k="b">Use a smaller learning rate.</button>
+    <button data-k="c">Switch to squared-error loss.</button>
+    <button data-k="d">Add non-linear features such as $x_1x_2$ (or use a neural network that learns features).</button>
+  </div>
+  <div class="explain">No line separates XOR, so no amount of optimization helps a linear model in the raw features. With the product feature $x_1x_2$ the classes become linearly separable.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Piece</th><th>Binary</th><th>K classes</th></tr>
+  <tr><td>Scores</td><td>$z = \mathbf w\cdot\mathbf x + b$ (log-odds)</td><td>$\mathbf z = W^\top\mathbf x + \mathbf b$</td></tr>
+  <tr><td>Probabilities</td><td>$p = \sigma(z)$</td><td>$\mathbf p = \operatorname{softmax}(\mathbf z)$</td></tr>
+  <tr><td>Likelihood</td><td>Bernoulli</td><td>Categorical</td></tr>
+  <tr><td>Loss (stable)</td><td>$\log(1+e^z) - yz$</td><td>$\operatorname{logsumexp}(\mathbf z) - z_y$</td></tr>
+  <tr><td>Gradient w.r.t. logits</td><td>$p - y$</td><td>$\mathbf p - \mathbf e_y$</td></tr>
+  <tr><td>Gradient w.r.t. weights</td><td>$\frac1n X^\top(\mathbf p - \mathbf y)$</td><td>$\frac1n X^\top(P - Y)$</td></tr>
+  <tr><td>Boundary</td><td>hyperplane ⟂ $\mathbf w$</td><td>convex polygonal regions</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 14: build it</h3>
+  <p>Open <code>workbooks/14_logistic_softmax/exercises.py</code>. You'll write an overflow-proof <code>sigmoid</code>, log-loss from logits, its gradient, and a general <code>numerical_gradient</code> to check it. Then you'll write a training loop with optional L2, <code>accuracy</code>, and the multiclass versions: stable <code>softmax</code>, <code>cross_entropy</code>, <code>softmax_grad</code> (checked numerically) and <code>train_softmax</code> on three Gaussian blobs, finishing with a loop-free <code>confusion_matrix</code> and per-class precision/recall. Grade yourself with:</p>
+  <pre><code>./course check 14</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Andrew Ng, CS229 lecture notes 1, part II (logistic regression) and part III (generalized linear models).</li>
+  <li>Christopher Bishop, <em>Pattern Recognition and Machine Learning</em>, §4.3.</li>
+  <li>Kevin Murphy, <em>Probabilistic Machine Learning: An Introduction</em>, ch. 10.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt, LA } = Course;
+  const sig = z => z >= 0 ? 1 / (1 + Math.exp(-z)) : Math.exp(z) / (1 + Math.exp(z));
+  const softplus = z => z > 0 ? z + Math.log1p(Math.exp(-z)) : Math.log1p(Math.exp(z));
+  const ll = (z, y) => softplus(z) - y * z;
+
+  // ---------- fig: 1-D sigmoid ----------
+  {
+    const p = new Plot("#fig-sig", { xmin: -5, xmax: 5, ymin: -0.95, ymax: 1.2 });
+    const data = [[-3.6, 0], [-2.8, 0], [-2.1, 0], [-1.4, 0], [-0.6, 0], [0.9, 0], [-0.9, 1], [0.3, 1], [1.1, 1], [1.8, 1], [2.6, 1], [3.4, 1]];
+    let w = 1, b = 0; const out = document.getElementById("out-sig");
+    slider("#ctl-sig", { label: "w ", min: -4, max: 6, step: 0.1, value: w }, v => { w = v; p.render(); });
+    slider("#ctl-sig", { label: "b ", min: -4, max: 4, step: 0.1, value: b }, v => { b = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 1, stepY: 0.25 });
+      p.line(-5, 0, 5, 0, { color: "axis", width: 1.2 }); p.line(-5, 1, 5, 1, { color: "muted", width: 1, dash: [3, 4] });
+      [0, 0.5, 1].forEach(v => p.label(-4.95, v, String(v), { color: "muted", font: "11px sans-serif", dy: -8 }));
+      for (let x = -4; x <= 4; x++) p.label(x, 0, String(x), { align: "center", dy: 14, color: "muted", font: "11px sans-serif" });
+      if (Math.abs(w) > 1e-6) { const t = -b / w; if (t > -5 && t < 5) { p.line(t, -0.05, t, 1.15, { color: "c5", width: 1.5, dash: [5, 4] }); p.label(t, 1.15, "x = −b/w", { color: "c5", dx: 5, font: "12px sans-serif" }); } }
+      p.fn(x => sig(w * x + b), { color: "c3", width: 2.5 });
+      let tot = 0, acc = 0;
+      p.label(-4.95, -0.2, "loss per point", { color: "muted", font: "11px sans-serif" });
+      data.forEach(([x, y]) => {
+        const z = w * x + b, L = ll(z, y); tot += L; acc += ((z > 0 ? 1 : 0) === y);
+        const h = Math.min(0.62, 0.16 * L);
+        p.rect(x - 0.11, -0.28, x + 0.11, -0.28 - h, { fill: "c4", fillAlpha: .55, color: "c4", width: 1 });
+        p.point(x, y, { r: 6, color: y ? "c1" : "c2", stroke: "bg" });
+      });
+      p.label(4.95, 0.5, "p = σ(wx + b)", { align: "right", color: "c3", font: "600 13px sans-serif", dy: -40 });
+      out.textContent = `mean log-loss = ${(tot / data.length).toFixed(4)}    accuracy = ${acc}/${data.length}    threshold x = ${Math.abs(w) > 1e-6 ? (-b / w).toFixed(2) : "—"}`;
+    });
+  }
+
+  // ---------- fig: 2-D boundary with draggable w ----------
+  {
+    const p = new Plot("#fig-2d", { xmin: -5, xmax: 5, ymin: -3.5, ymax: 3.5, equal: true });
+    const R = Course.rng(5), pts = [];
+    for (let i = 0; i < 40; i++) pts.push([R.normal(1.3, 0.9), R.normal(0.9, 0.9), 1]);
+    for (let i = 0; i < 40; i++) pts.push([R.normal(-1.3, 0.9), R.normal(-0.9, 0.9), 0]);
+    const wh = { x: 1, y: 0.3, color: "c3" }; let b = 0; const out = document.getElementById("out-2d");
+    slider("#ctl-2d", { label: "b ", min: -4, max: 4, step: 0.1, value: 0 }, v => { b = v; p.render(); });
+    p.draggable([wh]).render(p => {
+      const w = [wh.x, wh.y], nw = LA.norm(w) || 1e-9;
+      p.field((x, y) => sig(w[0] * x + w[1] * y + b), { cmap: "div", vmin: 0, vmax: 1, alpha: .5, res: 5 });
+      p.grid({ step: 1 }).axes({ step: 1 });
+      const dir = [-w[1], w[0]], base = z => LA.scale(w, (z - b) / (nw * nw));
+      [-1, 1].forEach(z => { const q = base(z); p.ray(q[0], q[1], dir[0], dir[1], { color: "fg", width: 1, dash: [5, 5], alpha: .6 }); });
+      const q0 = base(0); p.ray(q0[0], q0[1], dir[0], dir[1], { color: "fg", width: 2.5 });
+      let L = 0, acc = 0;
+      pts.forEach(([x, y, c]) => { const z = w[0] * x + w[1] * y + b; L += ll(z, c); acc += ((z > 0 ? 1 : 0) === c); p.point(x, y, { r: 4.5, color: c ? "c1" : "c4", stroke: "bg" }); });
+      p.arrow(0, 0, w[0], w[1], { color: "c3", width: 3.5, label: "w" });
+      p.drawHandles();
+      out.textContent = `w = (${fmt(w[0])}, ${fmt(w[1])})   ‖w‖ = ${nw.toFixed(2)}   b = ${b.toFixed(1)}   boundary distance from origin = ${(-b / nw).toFixed(2)}\n` +
+        `mean log-loss = ${(L / pts.length).toFixed(4)}    accuracy = ${acc}/${pts.length}    width of the z∈[−1,1] band = ${(2 / nw).toFixed(2)}`;
+    });
+  }
+
+  // ---------- fig: loss curves ----------
+  {
+    const p = new Plot("#fig-loss", { xmin: -6.5, xmax: 6.5, ymin: -0.4, ymax: 6.6 });
+    let z0 = -3; const out = document.getElementById("out-loss");
+    slider("#ctl-loss", { label: "logit z ", min: -6, max: 6, step: 0.1, value: z0 }, v => { z0 = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1, xlabel: "z", ylabel: "loss" });
+      p.fn(z => softplus(-z), { color: "c1", width: 2.5 }); p.fn(z => softplus(z), { color: "c4", width: 2.5 });
+      p.fn(z => (sig(z) - 1) ** 2, { color: "muted", width: 2, dash: [6, 4] });
+      p.label(-6.3, 3.4, "y = 1: −log σ(z)", { color: "c1", font: "600 12px sans-serif" });
+      p.label(3.3, 6.1, "y = 0: −log(1−σ(z))", { color: "c4", font: "600 12px sans-serif" });
+      p.label(-6.3, 1.4, "(σ(z) − 1)²", { color: "muted", font: "600 12px sans-serif" });
+      const L = softplus(-z0), g = sig(z0) - 1, Ls = (sig(z0) - 1) ** 2, gs = 2 * (sig(z0) - 1) * sig(z0) * (1 - sig(z0));
+      p.line(z0 - 1.2, L - 1.2 * g, z0 + 1.2, L + 1.2 * g, { color: "c1", width: 1.5, alpha: .7 });
+      p.line(z0 - 1.2, Ls - 1.2 * gs, z0 + 1.2, Ls + 1.2 * gs, { color: "muted", width: 1.5, alpha: .9 });
+      p.point(z0, L, { r: 5, color: "c1" }); p.point(z0, Ls, { r: 5, color: "muted" });
+      out.textContent = `for y = 1 at z = ${z0.toFixed(1)}:  p = ${sig(z0).toFixed(4)}\n` +
+        `log-loss ${L.toFixed(3)}, slope dℓ/dz = p − 1 = ${g.toFixed(4)}      squared error ${Ls.toFixed(3)}, slope = ${gs.toFixed(4)}`;
+    });
+  }
+
+  // ---------- fig: softmax & its gradient ----------
+  {
+    const p = new Plot("#fig-softmax", { xmin: 0, xmax: 10, ymin: -1.25, ymax: 1.25 });
+    let z = [2, 1, 0], T = 1, y = 0; const out = document.getElementById("out-softmax"), cols = ["c1", "c2", "c3"];
+    [0, 1, 2].forEach(k => slider("#ctl-softmax", { label: `z${"₀₁₂"[k]} `, min: -4, max: 4, step: 0.1, value: z[k] }, v => { z[k] = v; p.render(); }));
+    slider("#ctl-softmax", { label: "temperature T ", min: 0.1, max: 4, step: 0.05, value: 1 }, v => { T = v; p.render(); });
+    select("#ctl-softmax", "true class ", [[0, "0"], [1, "1"], [2, "2"]], v => { y = +v; p.render(); });
+    p.render(p => {
+      const P = LA.softmax(z, T), g = P.map((v, k) => v - (k === y ? 1 : 0));
+      p.line(0.3, 0, 4.7, 0, { color: "axis", width: 1 }); p.line(5.3, 0, 9.7, 0, { color: "axis", width: 1 });
+      p.label(0.4, 1.15, "p = softmax(z / T)", { color: "muted", font: "12px sans-serif" });
+      p.label(5.4, 1.15, "gradient ∂ℓ/∂z = p − e_y", { color: "muted", font: "12px sans-serif" });
+      P.forEach((v, k) => {
+        const x0 = 0.6 + k * 1.4; p.rect(x0, 0, x0 + 1, v, { fill: cols[k], fillAlpha: k === y ? .8 : .45, color: cols[k], width: k === y ? 2.5 : 1 });
+        p.label(x0 + .5, v, v.toFixed(3), { align: "center", dy: -10, font: "12px ui-monospace, Menlo, monospace" });
+        p.label(x0 + .5, 0, "class " + k + (k === y ? " ✓" : ""), { align: "center", dy: 12, font: "12px sans-serif", color: cols[k] });
+        const x1 = 5.6 + k * 1.4; p.rect(x1, 0, x1 + 1, g[k], { fill: cols[k], fillAlpha: .6, color: cols[k], width: 1 });
+        p.label(x1 + .5, g[k], (g[k] >= 0 ? "+" : "") + g[k].toFixed(3), { align: "center", dy: g[k] >= 0 ? -10 : 12, font: "12px ui-monospace, Menlo, monospace" });
+      });
+      out.textContent = `cross-entropy = −log p_${y} = ${(-Math.log(P[y])).toFixed(4)}    sum of gradient entries = ${g.reduce((a, b) => a + b, 0).toFixed(6)}`;
+    });
+  }
+
+  // ---------- fig: live training ----------
+  {
+    const p = new Plot("#fig-train", { xmin: -4, xmax: 4, ymin: -3.3, ymax: 3.3, equal: true });
+    const out = document.getElementById("out-train"), cols = ["c4", "c1", "c3"];
+    const gen = {
+      blobs2: R => { const D = []; for (let i = 0; i < 80; i++) { D.push([R.normal(-1.4, .8), R.normal(-.8, .8), 0]); D.push([R.normal(1.4, .8), R.normal(.8, .8), 1]); } return D; },
+      blobs3: R => { const C = [[0, 2], [-2, -1.2], [2, -1.2]], D = []; for (let i = 0; i < 60; i++) C.forEach((c, k) => D.push([R.normal(c[0], .75), R.normal(c[1], .75), k])); return D; },
+      xor: R => { const D = []; for (let i = 0; i < 50; i++) [[1, 1, 0], [-1, -1, 0], [1, -1, 1], [-1, 1, 1]].forEach(([a, b, k]) => D.push([R.normal(1.4 * a, .55), R.normal(1.4 * b, .55), k])); return D; },
+      circles: R => { const D = []; for (let i = 0; i < 100; i++) { const t = R.uniform(0, 2 * Math.PI), r0 = R.normal(0.9, .25), r1 = R.normal(2.3, .25); D.push([r0 * Math.cos(t), r0 * Math.sin(t), 0]); const u = R.uniform(0, 2 * Math.PI); D.push([r1 * Math.cos(u), r1 * Math.sin(u), 1]); } return D; },
+      spirals: R => { const D = []; for (let i = 0; i < 100; i++) { const t = 0.4 + 3.2 * i / 100 * Math.PI / 1.6, r = 0.3 + 0.42 * t; [0, 1].forEach(k => { const a = t + k * Math.PI; D.push([r * Math.cos(a) + R.normal(0, .1), r * Math.sin(a) + R.normal(0, .1), k]); }); } return D; },
+    };
+    const feats = {
+      linear: (x, y) => [x, y],
+      quadratic: (x, y) => [x, y, x * x, y * y, x * y],
+      cubic: (x, y) => [x, y, x * x, y * y, x * y, x * x * x, y * y * y, x * x * y, x * y * y],
+    };
+    let ds = "blobs2", ft = "linear", lr = 0.5, D, K, Phi, mu, sd, W, B, t, hist;
+    const phi = (x, y) => feats[ft](x, y).map((v, j) => (v - mu[j]) / sd[j]);
+    function setup() {
+      D = gen[ds](Course.rng(17)); K = Math.max(...D.map(d => d[2])) + 1;
+      const raw = D.map(([x, y]) => feats[ft](x, y)), F = raw[0].length;
+      mu = [...Array(F)].map((_, j) => raw.reduce((s, r) => s + r[j], 0) / raw.length);
+      sd = [...Array(F)].map((_, j) => Math.sqrt(raw.reduce((s, r) => s + (r[j] - mu[j]) ** 2, 0) / raw.length) || 1);
+      Phi = raw.map(r => r.map((v, j) => (v - mu[j]) / sd[j]));
+      W = [...Array(F)].map(() => new Array(K).fill(0)); B = new Array(K).fill(0); t = 0; hist = [];
+      anim.stop(); render();
+    }
+    const logits = f => B.map((bk, k) => f.reduce((s, v, j) => s + v * W[j][k], bk));
+    function step() {
+      const n = D.length, F = W.length, gW = W.map(r => r.map(() => 0)), gB = new Array(K).fill(0);
+      let L = 0;
+      Phi.forEach((f, i) => {
+        const z = logits(f), m = Math.max(...z), e = z.map(v => Math.exp(v - m)), s = e.reduce((a, b) => a + b, 0), yk = D[i][2];
+        L += Math.log(s) + m - z[yk];
+        for (let k = 0; k < K; k++) { const g = (e[k] / s - (k === yk ? 1 : 0)) / n; gB[k] += g; for (let j = 0; j < F; j++) gW[j][k] += f[j] * g; }
+      });
+      for (let k = 0; k < K; k++) { B[k] -= lr * gB[k]; for (let j = 0; j < F; j++) W[j][k] -= lr * gW[j][k]; }
+      hist.push(L / n); t++;
+    }
+    const anim = Course.animator(() => { for (let s = 0; s < 4; s++) step(); render(); return t < 6000; });
+    select("#ctl-train", "data ", [["blobs2", "two blobs"], ["blobs3", "three blobs"], ["xor", "XOR"], ["circles", "circles"], ["spirals", "spirals"]], v => { ds = v; setup(); });
+    select("#ctl-train", "features ", [["linear", "linear (x₁, x₂)"], ["quadratic", "quadratic (+x₁², x₂², x₁x₂)"], ["cubic", "cubic (all ≤ 3)"]], v => { ft = v; setup(); });
+    slider("#ctl-train", { label: "log₁₀ lr ", min: -2, max: 1, step: 0.05, value: Math.log10(lr), digits: 2 }, v => { lr = 10 ** v; });
+    button("#ctl-train", "▶ play", () => anim.start()); button("#ctl-train", "pause", () => anim.stop()); button("#ctl-train", "reset", setup);
+    function render() {
+      p.render(p => {
+        const c = p.ctx, res = 7, ccol = cols.map(k => Course.color(k));
+        for (let py = 0; py < p.H; py += res) for (let px = 0; px < p.W; px += res) {
+          const [x, y] = p.toWorld(px + res / 2, py + res / 2), z = logits(phi(x, y)), P = LA.softmax(z);
+          let k = 0; for (let j = 1; j < K; j++) if (P[j] > P[k]) k = j;
+          c.fillStyle = Course.withAlpha(ccol[k], 0.08 + 0.42 * (P[k] - 1 / K) / (1 - 1 / K)); c.fillRect(px, py, res, res);
+        }
+        p.grid({ step: 1 });
+        let acc = 0;
+        D.forEach(([x, y, k], i) => { const z = logits(Phi[i]); acc += z.indexOf(Math.max(...z)) === k; p.point(x, y, { r: 3.6, color: cols[k], stroke: "bg" }); });
+        // loss inset (pixel coords)
+        const ix = p.W - 170, iy = 12, iw = 156, ih = 70, toW = (u, v) => p.toWorld(u, v);
+        p.polygon([toW(ix, iy), toW(ix + iw, iy), toW(ix + iw, iy + ih), toW(ix, iy + ih)], { fill: "bg", fillAlpha: .85, color: "line", width: 1 });
+        p.label(ix + 6, iy + 10, "training loss", { px: true, color: "muted", font: "11px sans-serif" });
+        if (hist.length > 1) {
+          const top = Math.max(hist[0], 1e-9), N = hist.length;
+          p.path(hist.map((v, i) => toW(ix + 4 + (iw - 8) * i / (N - 1), iy + ih - 4 - (ih - 22) * Math.min(1, v / top))), { color: "c5", width: 1.5 });
+        }
+        const wn = Math.sqrt(W.flat().reduce((s, v) => s + v * v, 0));
+        out.textContent = `step ${t}   loss ${hist.length ? hist[hist.length - 1].toFixed(4) : Math.log(K).toFixed(4)}   train accuracy ${(acc / D.length * 100).toFixed(1)}%   ‖W‖ = ${wn.toFixed(2)}   (${K} classes, ${W.length} features)`;
+      });
+    }
+    setup();
+  }
+});
+</script>
+</body>
+</html>

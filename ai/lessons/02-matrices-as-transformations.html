@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matrices as transformations</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="02">
+<main>
+
+<div class="kicker">Part 1 · Linear algebra</div>
+<h1>Matrices as transformations</h1>
+<p class="lede">A matrix is usually introduced as a grid of numbers with a strange multiplication rule. That framing hides what it is: a <em>function that moves space</em>, keeping grid lines straight, parallel and evenly spaced. Once you see a matrix as "where the basis vectors go", the multiplication rule becomes obvious. You will also see what the determinant measures and why every neural-network layer begins with one of these.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Say what makes a function <em>linear</em>, and recognise non-linear ones from a picture.</li>
+    <li>Read a matrix column by column as "where $\hat{\imath}$ and $\hat{\jmath}$ land", and build the matrix of a transformation from that.</li>
+    <li>Write down rotation, scaling, shear, reflection and projection matrices by deriving them, not by memorizing them.</li>
+    <li>Compute $A\mathbf{x}$ two ways, as a combination of columns and as row dot products, and say what each view means.</li>
+    <li>Interpret the determinant as signed area scaling: the sign is orientation, and zero means space collapsed.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="linear">1. Functions that move space</h2>
+<p>In lesson 01 a vector was an arrow, and we could add arrows and scale them. Now consider a <b>function</b> $f$ that takes a vector in and returns a vector out. Picture it as moving every point of the plane somewhere else. Most such functions twist the plane into something unrecognisable. A special family respects the two operations we care about:</p>
+$$f(\mathbf{u} + \mathbf{v}) = f(\mathbf{u}) + f(\mathbf{v}), \qquad f(c\,\mathbf{v}) = c\,f(\mathbf{v}).$$
+<p>Such an $f$ is called <b>linear</b>. In words: it doesn't matter whether you combine first and transform second, or transform first and combine second. Two geometric consequences follow at once:</p>
+<ul>
+  <li><b>The origin stays put.</b> Take $c = 0$: $f(\mathbf{0}) = f(0\cdot\mathbf{v}) = 0\cdot f(\mathbf{v}) = \mathbf{0}$.</li>
+  <li><b>Grid lines stay straight, parallel and evenly spaced.</b> The line $\{\mathbf{p} + t\,\mathbf{d}\}$ maps to $\{f(\mathbf{p}) + t\,f(\mathbf{d})\}$, which is again a line, traversed at a constant rate. Parallel lines share the direction $\mathbf{d}$, so their images share $f(\mathbf{d})$ and stay parallel.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-lin" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-lin"></div>
+  <div class="readout" id="out-lin"></div>
+  <div class="caption"><b>Try it:</b> pick different functions and watch what happens to the grid (faint background = before, colored = after) and to the purple "F". Only the first one keeps lines straight, parallel and evenly spaced <em>and</em> keeps the origin fixed. The readout tests the definition numerically. Notice that "shift" fails even though its lines stay straight, and that ReLU, the most common neuron in deep learning, is not linear.</div>
+</div>
+
+<div class="callout ml">
+<p>A neural-network layer computes $\sigma(W\mathbf{x} + \mathbf{b})$: a linear map $W$, then a shift $\mathbf{b}$, then a non-linearity $\sigma$ such as ReLU. The figure above shows every piece. Why the non-linearity is essential (stacking linear layers buys you nothing) is the subject of section 6 and lesson 16.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="columns">2. A matrix is where the basis vectors land</h2>
+<p>Here is the key idea of the lesson. Every vector in the plane is a combination of the two <b>standard basis vectors</b> $\hat{\imath} = (1, 0)$ and $\hat{\jmath} = (0, 1)$:</p>
+$$\mathbf{x} = \begin{bmatrix} x_1 \\ x_2 \end{bmatrix} = x_1\,\hat{\imath} + x_2\,\hat{\jmath}.$$
+<p>Apply a linear $f$ and use the two rules from section 1:</p>
+$$f(\mathbf{x}) = f(x_1\hat{\imath} + x_2\hat{\jmath}) = x_1\, f(\hat{\imath}) + x_2\, f(\hat{\jmath}).$$
+<p>So <b>a linear map is completely determined by where it sends $\hat{\imath}$ and $\hat{\jmath}$</b>. Four numbers describe everything it does to the infinitely many points of the plane. Write those two landing spots side by side as columns, and that is the <b>matrix</b> of $f$:</p>
+$$A = \begin{bmatrix} | & | \\ f(\hat{\imath}) & f(\hat{\jmath}) \\ | & | \end{bmatrix} = \begin{bmatrix} a & b \\ c & d \end{bmatrix} \quad\text{means}\quad \hat{\imath} \mapsto \begin{bmatrix} a \\ c\end{bmatrix},\;\; \hat{\jmath} \mapsto \begin{bmatrix} b \\ d\end{bmatrix}.$$
+<p>The matrix–vector product is then <em>defined</em> to be the formula we just derived:</p>
+$$A\mathbf{x} = x_1 \begin{bmatrix} a \\ c\end{bmatrix} + x_2 \begin{bmatrix} b \\ d\end{bmatrix} = \begin{bmatrix} a x_1 + b x_2 \\ c x_1 + d x_2 \end{bmatrix}.$$
+<p>Nothing about this rule is arbitrary. It is the only rule consistent with "the columns are where the basis vectors go".</p>
+
+<div class="figure">
+  <canvas id="fig-basis" width="680" height="440"></canvas>
+  <div class="controls" id="ctl-basis"></div>
+  <div class="readout" id="out-basis"></div>
+  <div class="caption"><b>Try it:</b> drag the tips of the transformed <span style="color:var(--c1)">î</span> (blue) and <span style="color:var(--c2)">ĵ</span> (orange). The whole grid, the shaded unit square and the "F" follow, and the matrix in the readout is just the two tip positions written as columns. Try the presets, then press <em>play</em> to watch space morph from the identity into the transformation. In "reflect" the F is mirrored. In "project" and "collapse" the whole plane is flattened onto a line.</div>
+</div>
+
+<div class="callout intuition">
+<p>Think of the transformed grid as a new pair of rulers. The point with coordinates $(x_1, x_2)$ in the <em>old</em> grid lands at "go $x_1$ steps along the new $\hat{\imath}$, then $x_2$ steps along the new $\hat{\jmath}$". The F sits at the same place <em>relative to the grid</em> before and after.</p>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: from a description to a matrix</div>
+  <p>Find the matrix that sends $\hat{\imath}$ to $(1, 2)$ and $\hat{\jmath}$ to $(-3, 1)$, then find where it sends $\mathbf{x} = (2, -1)$.</p>
+  <p>The columns are the landing spots: $A = \begin{bmatrix} 1 & -3 \\ 2 & 1\end{bmatrix}$.</p>
+  <p>$A\mathbf{x} = 2\begin{bmatrix}1\\2\end{bmatrix} + (-1)\begin{bmatrix}-3\\1\end{bmatrix} = \begin{bmatrix}2\\4\end{bmatrix} + \begin{bmatrix}3\\-1\end{bmatrix} = \begin{bmatrix}5\\3\end{bmatrix}$.</p>
+  <p>Read it as "2 steps along the new $\hat{\imath}$, then 1 step backwards along the new $\hat{\jmath}$".</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gallery">3. A gallery of transformations, derived</h2>
+<p>With the column rule you never need to memorize a transformation matrix. Ask where $\hat{\imath}$ and $\hat{\jmath}$ go, and write down the answers.</p>
+
+<h3>Scaling</h3>
+<p>Stretch $x$ by $s_x$ and $y$ by $s_y$: $\hat{\imath}\mapsto(s_x, 0)$ and $\hat{\jmath}\mapsto(0, s_y)$, so $S = \begin{bmatrix} s_x & 0 \\ 0 & s_y\end{bmatrix}$. A <b>diagonal</b> matrix only scales along the axes. A negative entry also flips that axis.</p>
+
+<h3>Rotation</h3>
+<p>Rotate counter-clockwise by $\theta$. The unit vector $\hat{\imath}$ goes to the point at angle $\theta$ on the unit circle, $(\cos\theta, \sin\theta)$. The vector $\hat{\jmath}$ starts $90°$ ahead of $\hat{\imath}$ and stays $90°$ ahead, so it lands at angle $\theta + 90°$: $(\cos(\theta+90°), \sin(\theta+90°)) = (-\sin\theta, \cos\theta)$. Therefore</p>
+$$R_\theta = \begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{bmatrix}.$$
+
+<h3>Shear</h3>
+<p>Keep $\hat{\imath}$ where it is and tilt $\hat{\jmath}$ sideways to $(k, 1)$: $H = \begin{bmatrix} 1 & k \\ 0 & 1\end{bmatrix}$. Each horizontal line slides sideways by an amount proportional to its height, like pushing the top of a deck of cards.</p>
+
+<h3>Reflection</h3>
+<p>Reflect across the line through the origin with unit direction $\mathbf{u} = (\cos\theta, \sin\theta)$. From lesson 01, any $\mathbf{v}$ splits into a part along $\mathbf{u}$, $\operatorname{proj}_{\mathbf{u}}\mathbf{v} = (\mathbf{u}\cdot\mathbf{v})\,\mathbf{u}$, plus a perpendicular rest. A mirror keeps the first part and negates the second:</p>
+$$\operatorname{refl}(\mathbf{v}) = \operatorname{proj}_{\mathbf{u}}\mathbf{v} - (\mathbf{v} - \operatorname{proj}_{\mathbf{u}}\mathbf{v}) = 2(\mathbf{u}\cdot\mathbf{v})\,\mathbf{u} - \mathbf{v}.$$
+<p>For $\mathbf{v} = \hat{\imath}$: $\mathbf{u}\cdot\hat{\imath} = \cos\theta$, so $\hat{\imath}\mapsto (2\cos^2\theta - 1,\; 2\cos\theta\sin\theta) = (\cos 2\theta, \sin 2\theta)$. Similarly $\hat{\jmath}\mapsto(2\sin\theta\cos\theta,\; 2\sin^2\theta - 1) = (\sin 2\theta, -\cos 2\theta)$:</p>
+$$F_\theta = \begin{bmatrix} \cos 2\theta & \sin 2\theta \\ \sin 2\theta & -\cos 2\theta \end{bmatrix}.$$
+
+<h3>Projection</h3>
+<p>Squash everything onto that same line: $\mathbf{v}\mapsto(\mathbf{u}\cdot\mathbf{v})\,\mathbf{u}$. Then $\hat{\imath}\mapsto \cos\theta\,\mathbf{u}$ and $\hat{\jmath}\mapsto\sin\theta\,\mathbf{u}$:</p>
+$$P_\theta = \begin{bmatrix} \cos^2\theta & \cos\theta\sin\theta \\ \cos\theta\sin\theta & \sin^2\theta \end{bmatrix}.$$
+<p>Both columns are multiples of $\mathbf{u}$, so the whole plane lands on one line. Information is destroyed: every point on a perpendicular line maps to the same spot, and no function can undo that. Keep this in mind for section 5 and for inverses in lesson 03.</p>
+
+<div class="example">
+  <div class="label">Worked example: rotate a point</div>
+  <p>Rotate $\mathbf{x} = (2, 0)$ by $30°$. Here $\cos 30° = \tfrac{\sqrt3}{2} \approx 0.866$ and $\sin 30° = \tfrac12$.</p>
+  <p>$R_{30°}\mathbf{x} = 2\begin{bmatrix}\cos30°\\ \sin30°\end{bmatrix} + 0\begin{bmatrix}-\sin30°\\ \cos30°\end{bmatrix} = \begin{bmatrix}\sqrt3\\ 1\end{bmatrix} \approx \begin{bmatrix}1.732\\1\end{bmatrix}$.</p>
+  <p>Check: the length is $\sqrt{3 + 1} = 2$, unchanged, as it should be for a rotation.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="matvec">4. The matrix–vector product, two ways</h2>
+<p>There are two ways to read the same arithmetic. Write $A$ by columns $\mathbf{a}_1, \mathbf{a}_2$ or by rows $\mathbf{r}_1^\top, \mathbf{r}_2^\top$:</p>
+$$\underbrace{A\mathbf{x} = x_1\mathbf{a}_1 + x_2\mathbf{a}_2}_{\text{column view: mix the columns}} \qquad\qquad \underbrace{A\mathbf{x} = \begin{bmatrix} \mathbf{r}_1\cdot\mathbf{x} \\ \mathbf{r}_2\cdot\mathbf{x}\end{bmatrix}}_{\text{row view: one dot product per output}}$$
+<p>Both compute exactly the same numbers, $a x_1 + b x_2$ and $c x_1 + d x_2$. They just group the multiply-adds differently. The difference is in what they tell you:</p>
+<ul>
+  <li><b>Column view</b>: the output is a <em>weighted mix of the columns</em>, with weights given by $\mathbf{x}$. So every possible output lies in the span of the columns. Lesson 03 names this the <em>column space</em>.</li>
+  <li><b>Row view</b>: output coordinate $i$ is a <em>measurement</em> of $\mathbf{x}$: how much $\mathbf{x}$ points along $\mathbf{r}_i$ (lesson 01's dot product). Every point on a line perpendicular to $\mathbf{r}_i$ gets the same measurement.</li>
+</ul>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-mv-col" width="420" height="400"></canvas></div>
+    <div><canvas id="fig-mv-row" width="420" height="400"></canvas></div>
+  </div>
+  <div class="readout" id="out-mv"></div>
+  <div class="caption"><b>Try it:</b> left, the column view. Drag the columns <span style="color:var(--c1)">a₁</span>, <span style="color:var(--c2)">a₂</span> and the input <span style="color:var(--c3)">x</span>. The output <span style="color:var(--c4)">Ax</span> is reached by walking $x_1$ copies of $\mathbf{a}_1$ and then $x_2$ copies of $\mathbf{a}_2$. Right, the row view of the same matrix. Each row $\mathbf{r}_i$ defines a family of parallel "level lines" perpendicular to it, on which $\mathbf{r}_i\cdot\mathbf{x}$ is constant (a few are drawn faintly). The two output numbers are the labels of the level lines that pass through $\mathbf{x}$. Drag $\mathbf{x}$ in either panel.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: both views</div>
+  <p>$A = \begin{bmatrix} 2 & 1 \\ 1 & 3\end{bmatrix}$, $\mathbf{x} = (1, 2)$.</p>
+  <p><b>Columns:</b> $1\cdot\begin{bmatrix}2\\1\end{bmatrix} + 2\cdot\begin{bmatrix}1\\3\end{bmatrix} = \begin{bmatrix}2+2\\1+6\end{bmatrix} = \begin{bmatrix}4\\7\end{bmatrix}$.</p>
+  <p><b>Rows:</b> $(2, 1)\cdot(1, 2) = 4$ and $(1, 3)\cdot(1, 2) = 7$. Same answer, $(4, 7)$.</p>
+  <p>Cost: either way it is $m \times n$ multiply-adds for an $m\times n$ matrix, here 4. The two views differ only in the loop order. In lesson 12 you'll see that this order matters for speed in real code.</p>
+</div>
+
+<div class="callout ml">
+<p>A layer $\mathbf{y} = W\mathbf{x}$ in a neural network has both readings. <b>Row view</b>: each output neuron $y_i = \mathbf{w}_i\cdot\mathbf{x}$ is a <em>feature detector</em> that fires when the input aligns with its weight vector $\mathbf{w}_i$. <b>Column view</b>: the output is a mixture of $W$'s columns, with the input supplying the mixing weights. Attention (lesson 22) uses both: scores come from row-style dot products, and the output is a column-style mixture of value vectors.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="det">5. The determinant: how much area scales</h2>
+<p>Because a linear map keeps grid lines evenly spaced, <b>every grid cell is transformed into an identical parallelogram</b>. So every region's area gets multiplied by the same factor. That factor, with a sign attached, is the <b>determinant</b>. To find it, track a single cell: the unit square spanned by $\hat{\imath}, \hat{\jmath}$ (area 1). It lands on the parallelogram spanned by the columns $(a, c)$ and $(b, d)$.</p>
+
+<h3>Deriving $ad - bc$</h3>
+<p>Take the case where $a, b, c, d$ are all positive. The parallelogram fits inside a box of width $a + b$ and height $c + d$. The box minus the parallelogram is two copies each of three pieces: a triangle of area $\tfrac12 ac$, a triangle of area $\tfrac12 bd$, and a rectangle of area $bc$. So</p>
+$$\text{area} = (a+b)(c+d) - 2\cdot\tfrac12 ac - 2\cdot\tfrac12 bd - 2bc = ad - bc.$$
+<p>Draw it once on paper. It takes two minutes and you'll never forget the formula.</p>
+$$\boxed{\;\det\begin{bmatrix} a & b\\ c & d\end{bmatrix} = ad - bc\;}$$
+
+<h3>The sign is orientation</h3>
+<p>Going from $\hat{\imath}$ to $\hat{\jmath}$ is a counter-clockwise quarter turn. If the transformed $\hat{\jmath}$ is still counter-clockwise from the transformed $\hat{\imath}$, the determinant is positive. If the map flipped the plane over, like a mirror, the order becomes clockwise and the determinant is negative. Its absolute value is still the area factor.</p>
+
+<h3>Zero means collapse</h3>
+<p>$\det A = 0$ exactly when the parallelogram is flat: the two columns lie on one line (they are linearly dependent, lesson 01), and the whole plane is squashed onto a line or a point. A projection has determinant 0. In lesson 03 you'll see this is precisely when $A$ has no inverse.</p>
+
+<div class="figure">
+  <canvas id="fig-det" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-det"></div>
+  <div class="readout" id="out-det"></div>
+  <div class="caption"><b>Try it:</b> drag <span style="color:var(--c1)">î</span> and <span style="color:var(--c2)">ĵ</span>. The shaded parallelogram is the image of the unit square (dashed). Its area is $|\det A|$, and the two highlighted green cells both scale by the same factor. The curved arrow shows the turn from transformed î to transformed ĵ: counter-clockwise (blue) for positive det, clockwise (pink) for negative. Drag ĵ across the line through î and watch the determinant pass through 0 as it changes sign.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: area of a transformed triangle</div>
+  <p>The triangle with corners $(0,0), (2,0), (0,1)$ has area $1$. Transform it by $A = \begin{bmatrix} 3 & 1\\ 1 & 2\end{bmatrix}$.</p>
+  <p>$\det A = 3\cdot 2 - 1\cdot 1 = 5$, so the image has area $5 \times 1 = 5$, whatever its shape.</p>
+  <p>Check directly: the corners map to $(0,0)$, $A(2,0) = (6, 2)$, $A(0,1) = (1, 2)$. The triangle area formula $\tfrac12|x_1 y_2 - x_2 y_1| = \tfrac12|6\cdot 2 - 1\cdot 2| = 5$. ✓</p>
+</div>
+
+<div class="callout key">
+<p>One number tells you three things about a square matrix: $|\det A|$ is the volume scale factor, the sign of $\det A$ says whether orientation is flipped, and $\det A = 0$ means space was collapsed into a lower dimension. In $n$ dimensions "area" becomes $n$-dimensional volume, and everything else carries over.</p>
+</div>
+
+<div class="callout ml">
+<p>Determinants show up directly in <b>normalizing flows</b>, a class of generative models. When you push a probability density through an invertible transformation, the density must be divided by $|\det|$ of the Jacobian (lesson 07) so total probability stays 1. The Gaussian density (lesson 09) also contains $\det\Sigma$ for the same reason.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="compose">6. Doing one transformation after another</h2>
+<p>Apply $B$, then $A$: $\mathbf{x}\mapsto A(B\mathbf{x})$. The result is again linear (problem 8), so it has a matrix. By the column rule, its columns are where $\hat{\imath}$ and $\hat{\jmath}$ end up: $A(B\hat{\imath})$ and $A(B\hat{\jmath})$, which is $A$ applied to each column of $B$. That matrix is the <b>product</b> $AB$. It reads right to left, like function composition $f(g(x))$: <b>$AB$ means "first $B$, then $A$"</b>.</p>
+
+<div class="figure">
+  <canvas id="fig-comp" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-comp"></div>
+  <div class="readout" id="out-comp"></div>
+  <div class="caption"><b>Try it:</b> with A = rotate 90° and B = shear, switch the order between AB and BA. The final F (solid) lands in different places, so order matters. The dashed outline is the intermediate step. Find a pair that <em>does</em> commute (two rotations, or two axis scalings). Also compare the product's determinant with $\det A \cdot \det B$.</div>
+</div>
+
+<p>You've just seen the two most important facts about matrix multiplication without multiplying a single matrix by hand: <b>it is composition</b>, and <b>it is not commutative</b>. Lesson 03 develops the product properly, with shapes, four ways to compute it, and its cost. It also uses the determinant fact you can spot in the figure: $\det(AB) = \det A\,\det B$, because area factors multiply.</p>
+
+<div class="callout warning">
+<p>Stacking linear layers without a non-linearity gains nothing: $W_3 W_2 W_1\mathbf{x}$ is a single matrix $W = W_3W_2W_1$ applied to $\mathbf{x}$. A 100-layer purely linear network is a one-layer network in disguise. The ReLU from section 1 is what makes depth worthwhile (lesson 16).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="shapes">7. Beyond 2×2: matrices between different spaces</h2>
+<p>Nothing above depends on being in 2-D. A linear map $f:\mathbb{R}^n\to\mathbb{R}^m$ is determined by where it sends the $n$ basis vectors $\mathbf{e}_1,\dots,\mathbf{e}_n$. Each lands in $\mathbb{R}^m$, so the matrix has <b>$m$ rows and $n$ columns</b>:</p>
+$$A \in \mathbb{R}^{m\times n}, \qquad A\mathbf{x} = \sum_{j=1}^{n} x_j\,\mathbf{a}_j, \qquad (A\mathbf{x})_i = \sum_{j=1}^n A_{ij}\,x_j.$$
+<p>Shape rule: <b>(m × n) times (n) gives (m)</b>. The inner sizes must match because each column of $A$ needs exactly one entry of $\mathbf{x}$ as its weight. A $3\times 2$ matrix lays the plane into 3-D space as a tilted sheet. A $2\times 3$ matrix squashes 3-D space down onto a plane, as a camera does. The determinant is defined only for square matrices, where input and output have the same dimension, so "volume scaling" makes sense.</p>
+
+<div class="callout ml">
+<p><b>Embedding lookup is a matrix–vector product.</b> Put a vocabulary's $d$-dimensional word vectors as the columns of $E\in\mathbb{R}^{d\times V}$. Multiplying by the one-hot vector $\mathbf{e}_j$ (all zeros except a 1 in slot $j$) returns $E\mathbf{e}_j = $ column $j$: the embedding of word $j$. That's the column rule from section 2 again. Frameworks skip the multiply and index directly (lesson 20). In PyTorch, <code>nn.Linear(n, m)</code> stores a weight of shape <code>(m, n)</code>, exactly this convention.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+<p>Pencil and paper first. Sketch the grid before and after whenever you can.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Compute $A\mathbf{x}$ for $A = \begin{bmatrix} 2 & -1\\ 1 & 3\end{bmatrix}$ and $\mathbf{x} = (4, 2)$, once by columns and once by rows.</p>
+<div class="numcheck" data-answer="6,10"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Columns: $4(2,1) + 2(-1,3) = (8,4) + (-2,6) = (6, 10)$. Rows: $(2,-1)\cdot(4,2) = 6$ and $(1,3)\cdot(4,2) = 10$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>A linear map sends $\hat{\imath}\mapsto(1,2)$ and $\hat{\jmath}\mapsto(-3,1)$. By what factor does it scale areas? Does it flip orientation?</p>
+<div class="numcheck" data-answer="7"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$A = \begin{bmatrix}1 & -3\\ 2 & 1\end{bmatrix}$, $\det A = 1\cdot1 - (-3)\cdot 2 = 7 > 0$. Areas grow by 7 and orientation is preserved. Sketch it: $(-3,1)$ is counter-clockwise from $(1,2)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">warm-up</span>
+<p>Where does rotation by $30°$ send the point $(2, 0)$? Enter both coordinates.</p>
+<div class="numcheck" data-answer="1.7320508,1"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$2\,(\cos30°, \sin30°) = (\sqrt3, 1) \approx (1.732, 1)$. See the worked example in section 3.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Write the matrix $P$ that projects onto the line $y = x$. Compute $P(3, 1)$. Then verify $P^2 = P$ and explain geometrically why that must hold.</p>
+<div class="numcheck" data-answer="2,2"></div>
+<details class="hint"><summary>Hint</summary><p>Use $\theta = 45°$ in $P_\theta$, or project $\hat{\imath}$ and $\hat{\jmath}$ onto $\mathbf{u} = (1,1)/\sqrt2$ directly.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\hat{\imath}\mapsto(\mathbf{u}\cdot\hat{\imath})\mathbf{u} = \tfrac{1}{\sqrt2}\cdot\tfrac{1}{\sqrt2}(1,1) = (\tfrac12,\tfrac12)$ and likewise $\hat{\jmath}\mapsto(\tfrac12,\tfrac12)$, so $P = \begin{bmatrix}\tfrac12&\tfrac12\\\tfrac12&\tfrac12\end{bmatrix}$. $P(3,1) = 3(\tfrac12,\tfrac12) + 1(\tfrac12,\tfrac12) = (2,2)$. Squaring gives entries $\tfrac14+\tfrac14 = \tfrac12$, so $P^2 = P$. Geometrically, once a point is on the line, projecting it again leaves it where it is. Matrices with $P^2 = P$ are called <em>idempotent</em>. You'll meet them again in least squares (lesson 13).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · proof</span>
+<p>(a) Show that $\det R_\theta = 1$ for every rotation. (b) Show that rotations preserve length: $\|R_\theta\mathbf{x}\| = \|\mathbf{x}\|$. (c) Show that $\det F_\theta = -1$ for every reflection, and say what that means geometrically.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\cos^2\theta - (-\sin\theta)(\sin\theta) = \cos^2\theta + \sin^2\theta = 1$.</p>
+<p>(b) $R_\theta\mathbf{x} = (x_1\cos\theta - x_2\sin\theta,\; x_1\sin\theta + x_2\cos\theta)$. Squaring and adding, the cross terms $\mp 2x_1x_2\cos\theta\sin\theta$ cancel, leaving $(x_1^2 + x_2^2)(\cos^2\theta+\sin^2\theta) = \|\mathbf{x}\|^2$.</p>
+<p>(c) $-\cos^2 2\theta - \sin^2 2\theta = -1$. A mirror preserves area but turns the plane over, so a counter-clockwise loop becomes clockwise.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>The triangle with corners $(0,0), (2,0), (0,1)$ is transformed by $A = \begin{bmatrix}3&1\\1&2\end{bmatrix}$. What is the area of the image?</p>
+<div class="numcheck" data-answer="5"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Original area $\tfrac12\cdot2\cdot1 = 1$, $\det A = 6 - 1 = 5$, so the image has area 5. See the worked example in section 5 for a direct check.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>For which values of $k$ does $A = \begin{bmatrix}k & 2\\ 3 & k-1\end{bmatrix}$ collapse the plane onto a line? Enter both values, smaller first.</p>
+<div class="numcheck" data-answer="-2,3"></div>
+<details class="hint"><summary>Hint</summary><p>Collapse means $\det A = 0$. You'll get a quadratic.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\det A = k(k-1) - 6 = k^2 - k - 6 = (k-3)(k+2)$, which is zero at $k = -2$ and $k = 3$. Check $k = 3$: columns $(3,3)$ and $(2,2)$ are parallel. ✓</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · proof</span>
+<p>Prove that if $f$ and $g$ are linear, then $h(\mathbf{x}) = f(g(\mathbf{x}))$ is linear. Then explain why a "deep" network built from linear layers with no activation functions is no more expressive than a single linear layer.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$h(a\mathbf{u} + b\mathbf{v}) = f(g(a\mathbf{u}+b\mathbf{v})) = f(a\,g(\mathbf{u}) + b\,g(\mathbf{v})) = a\,f(g(\mathbf{u})) + b\,f(g(\mathbf{v})) = a\,h(\mathbf{u}) + b\,h(\mathbf{v})$. By induction a composition of any number of linear maps is linear, so it equals a single matrix by section 2. A stack of linear layers can only ever represent one linear map, and the depth adds nothing.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>(a) Is $f(\mathbf{x}) = \mathbf{x} + (1, 0)$ linear? (b) Show that a 2-D shift <em>can</em> be written as a $3\times3$ matrix if you represent the point $(x, y)$ as $(x, y, 1)$. This trick ("homogeneous coordinates") is used throughout computer graphics, and it is also why a bias $\mathbf{b}$ can be folded into $W$ by appending a constant-1 feature.</p>
+<details class="hint"><summary>Hint</summary><p>For (b), what $3\times3$ matrix sends $(x, y, 1)$ to $(x + t_1,\; y + t_2,\; 1)$? Read off the columns.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) No: $f(\mathbf{0}) = (1, 0) \ne \mathbf{0}$. It is <em>affine</em> (linear plus a shift). (b) $\begin{bmatrix}1&0&t_1\\0&1&t_2\\0&0&1\end{bmatrix}\begin{bmatrix}x\\y\\1\end{bmatrix} = \begin{bmatrix}x+t_1\\y+t_2\\1\end{bmatrix}$. The third column, the image of $\mathbf{e}_3$, carries the shift. The map is linear in 3-D, and on the plane $z = 1$ it acts as a shift. In the same way $W\mathbf{x} + \mathbf{b} = [W\;|\;\mathbf{b}]\begin{bmatrix}\mathbf{x}\\1\end{bmatrix}$.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">The second column of a matrix $A$ is $(4, -1)$. What does that tell you?</div>
+  <div class="opts">
+    <button data-k="a">$A$ sends $(4, -1)$ to $\hat{\jmath}$.</button>
+    <button data-k="b">$A$ sends $\hat{\jmath} = (0, 1)$ to $(4, -1)$.</button>
+    <button data-k="c">The second output coordinate is always $4x_1 - x_2$.</button>
+    <button data-k="d">Nothing on its own. You need the whole matrix to say anything.</button>
+  </div>
+  <div class="explain">Columns are images of basis vectors: $A\hat{\jmath}$ picks out column 2. Option (c) mixes up rows and columns: $(4,-1)$ would have to be the second <em>row</em> for that.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">A $2\times2$ matrix has $\det A = -2$. What does it do to the unit square?</div>
+  <div class="opts">
+    <button data-k="a">Shrinks it to area $-2$, which is impossible, so $A$ must be wrong.</button>
+    <button data-k="b">Halves its area.</button>
+    <button data-k="c">Doubles its area and flips its orientation (as a mirror would).</button>
+    <button data-k="d">Rotates it by 180° and doubles it.</button>
+  </div>
+  <div class="explain">$|\det| = 2$ is the area factor, and the minus sign means orientation reversed. A 180° rotation has det $+1$ (it is two reflections, and $(-1)(-1) = 1$).</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">You project 2-D points onto a line with a matrix $P$. Can some other matrix recover the original points from the projected ones?</div>
+  <div class="opts">
+    <button data-k="a">No. $\det P = 0$, so many points share each image and the information is gone.</button>
+    <button data-k="b">Yes, use $P$ itself, since projecting twice undoes it.</button>
+    <button data-k="c">Yes, use the transpose $P^\top$.</button>
+    <button data-k="d">Only if the line is one of the axes.</button>
+  </div>
+  <div class="explain">Every point on a line perpendicular to the target line maps to the same spot, so no function can tell them apart afterwards. Projecting twice gives $P^2 = P$, which changes nothing and undoes nothing. Lesson 03: a matrix is invertible exactly when its determinant is non-zero.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">$W$ has shape $(256, 784)$. Which is true?</div>
+  <div class="opts">
+    <button data-k="a">$W$ maps 256-dimensional vectors to 784-dimensional ones.</button>
+    <button data-k="b">$W\mathbf{x}$ requires $\mathbf{x}$ to have 256 entries.</button>
+    <button data-k="c">$\det W$ tells you how much $W$ scales volume.</button>
+    <button data-k="d">$W$ has 784 columns, one per input pixel, and outputs 256 numbers.</button>
+  </div>
+  <div class="explain">An $m\times n$ matrix maps $\mathbb{R}^n\to\mathbb{R}^m$: 784 inputs (one column each), 256 outputs (one row each). It isn't square, so it has no determinant.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Linear</td><td>$f(a\mathbf{u}+b\mathbf{v}) = af(\mathbf{u}) + bf(\mathbf{v})$</td><td>grid stays straight, parallel, even; origin fixed</td></tr>
+  <tr><td>Matrix</td><td>column $j$ = $f(\mathbf{e}_j)$</td><td>where the basis vectors land</td></tr>
+  <tr><td>Column view</td><td>$A\mathbf{x} = \sum_j x_j\mathbf{a}_j$</td><td>mix the columns</td></tr>
+  <tr><td>Row view</td><td>$(A\mathbf{x})_i = \mathbf{r}_i\cdot\mathbf{x}$</td><td>one measurement per output</td></tr>
+  <tr><td>Rotation</td><td>$\begin{bmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{bmatrix}$</td><td>det 1, preserves lengths</td></tr>
+  <tr><td>Determinant</td><td>$ad - bc$</td><td>signed area factor; 0 means collapse</td></tr>
+  <tr><td>Composition</td><td>$AB$ = first $B$, then $A$</td><td>order matters; $\det(AB) = \det A\det B$</td></tr>
+  <tr><td>Shape</td><td>$(m\times n)(n) \to (m)$</td><td>maps $\mathbb{R}^n \to \mathbb{R}^m$</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 02: build it</h3>
+  <p>Open <code>workbooks/02_matrices_as_transformations/exercises.py</code>. You'll implement the matrix–vector product both ways (columns and rows) in plain Python, constructors for rotation, scaling, shear, reflection and projection, and <code>det2</code>. Then in NumPy you'll transform a whole point cloud in one line, write a numeric linearity test (and watch ReLU fail it), and confirm that the transformed unit square's signed area equals $\det A$. Stretch: recover any linear function's matrix by feeding it the basis vectors. Grade yourself with:</p>
+  <pre><code>./course check 02</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>3Blue1Brown, <em>Essence of Linear Algebra</em>, ch. 3 (linear transformations), 4 (composition) and 6 (the determinant).</li>
+  <li>Gilbert Strang, <em>Introduction to Linear Algebra</em>, ch. 2.1 and 8.1 (linear transformations).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, LA, fmt } = Course;
+
+  // ---- shared helpers ----
+  const mv = (M, [x, y]) => [M[0][0] * x + M[0][1] * y, M[1][0] * x + M[1][1] * y];
+  const F0 = [[0, 0], [0.45, 0], [0.45, 0.9], [1.1, 0.9], [1.1, 1.3], [0.45, 1.3], [0.45, 1.75], [1.35, 1.75], [1.35, 2.15], [0, 2.15]].map(([x, y]) => [0.75 * x + 0.3, 0.75 * y + 0.25]);
+  // densify a closed polygon so non-linear maps bend its edges visibly
+  const dense = (P, k = 12) => P.flatMap((a, i) => { const b = P[(i + 1) % P.length]; return Array.from({ length: k }, (_, t) => [a[0] + (b[0] - a[0]) * t / k, a[1] + (b[1] - a[1]) * t / k]); });
+  const FD = dense(F0);
+  function warpGrid(p, f, o = {}) {
+    const n = o.n || 8, S = o.samples || 2;
+    for (let i = -n; i <= n; i++) {
+      const v = [], h = [];
+      for (let k = 0; k <= S; k++) { const s = -n + 2 * n * k / S; v.push(f([i, s])); h.push(f([s, i])); }
+      const w = i === 0 ? 2 : 1, al = i === 0 ? .9 : (o.alpha ?? .45);
+      p.path(v, { color: o.color || "c6", width: w, alpha: al });
+      p.path(h, { color: o.color || "c6", width: w, alpha: al });
+    }
+  }
+  const matStr = (M, d = 2, name = "A") => {
+    const w = Math.max(...M.flat().map(v => v.toFixed(d).length));
+    const r = row => row.map(v => v.toFixed(d).padStart(w)).join("  ");
+    const pad = " ".repeat(name.length + 3);
+    return [`${name} = [ ${r(M[0])} ]`, `${pad}[ ${r(M[1])} ]`];
+  };
+  const c30 = Math.cos(Math.PI / 6), s30 = Math.sin(Math.PI / 6);
+
+  // ---------- fig: linear or not ----------
+  {
+    const p = new Plot("#fig-lin", { xmin: -5, xmax: 5, ymin: -3.5, ymax: 3.5, equal: true });
+    const A = [[1.1, 0.5], [-0.3, 0.9]], R35 = [[Math.cos(0.6), -Math.sin(0.6)], [Math.sin(0.6), Math.cos(0.6)]];
+    const fns = {
+      lin: x => mv(A, x),
+      shift: x => { const y = mv(A, x); return [y[0] + 1.2, y[1] + 0.6]; },
+      bend: x => [x[0], x[1] + 0.12 * x[0] * x[0]],
+      swirl: x => { const r = Math.hypot(x[0], x[1]), t = 0.22 * r, c = Math.cos(t), s = Math.sin(t); return [c * x[0] - s * x[1], s * x[0] + c * x[1]]; },
+      relu: x => { const y = mv(R35, x); return [Math.max(0, y[0]), Math.max(0, y[1])]; },
+    };
+    let which = "lin"; const out = document.getElementById("out-lin");
+    select("#ctl-lin", "function f: ", [["lin", "A x  (a matrix)"], ["shift", "A x + b  (shift)"], ["bend", "(x, y + 0.12x²)  (bend)"], ["swirl", "rotate by 0.22·|x|  (swirl)"], ["relu", "max(0, Rx)  (rotate, then ReLU)"]], v => { which = v; p.render(); });
+    p.render(p => {
+      const f = fns[which];
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      warpGrid(p, f, { samples: 60 });
+      p.path(FD, { color: "muted", width: 1, dash: [4, 4], close: true, alpha: .7 });
+      p.path(FD.map(f), { color: "c5", fill: "c5", fillAlpha: .3, width: 2, close: true });
+      const o = f([0, 0]); p.point(o[0], o[1], { r: 6, color: "c4", label: "f(0)" });
+      // numeric test of the definition on a fixed pair
+      const u = [1, 0.5], v = [-0.5, 1.5], fu = f(u), fv = f(v), fuv = f([u[0] + v[0], u[1] + v[1]]), f2u = f([-2 * u[0], -2 * u[1]]);
+      const addOK = Math.hypot(fuv[0] - fu[0] - fv[0], fuv[1] - fu[1] - fv[1]) < 1e-9, scOK = Math.hypot(f2u[0] + 2 * fu[0], f2u[1] + 2 * fu[1]) < 1e-9;
+      const P = q => `(${q[0].toFixed(2)}, ${q[1].toFixed(2)})`;
+      out.textContent =
+        `f(0) = ${P(o)}${Math.hypot(o[0], o[1]) < 1e-9 ? "  ✓ origin fixed" : "  ✗ origin moved"}\n` +
+        `u=(1, 0.5), v=(-0.5, 1.5):  f(u+v) = ${P(fuv)}   f(u)+f(v) = ${P([fu[0] + fv[0], fu[1] + fv[1]])}  ${addOK ? "✓" : "✗"}\n` +
+        `f(-2u) = ${P(f2u)}   -2 f(u) = ${P([-2 * fu[0], -2 * fu[1]])}  ${scOK ? "✓" : "✗"}\n` +
+        (addOK && scOK ? "→ consistent with linear" : "→ NOT linear");
+    });
+  }
+
+  // ---------- fig: basis vectors define the matrix ----------
+  {
+    const p = new Plot("#fig-basis", { xmin: -5, xmax: 5, ymin: -3.6, ymax: 3.6, equal: true });
+    const I = { x: 1, y: 0, color: "c1", snap: 0.1 }, J = { x: 0, y: 1, color: "c2", snap: 0.1 };
+    let t = 1; const out = document.getElementById("out-basis");
+    const presets = {
+      identity: [[1, 0], [0, 1]], rotate: [[c30, -s30], [s30, c30]], scale: [[2, 0], [0, 0.5]], shear: [[1, 1], [0, 1]],
+      reflect: [[-1, 0], [0, 1]], project: [[c30 * c30, c30 * s30], [c30 * s30, s30 * s30]], collapse: [[1, -2], [0.5, -1]], custom: [[1.5, -0.5], [0.5, 1.2]],
+    };
+    const set = k => { const A = presets[k]; I.x = A[0][0]; I.y = A[1][0]; J.x = A[0][1]; J.y = A[1][1]; };
+    select("#ctl-basis", "preset: ", [["custom", "custom"], ["identity", "identity"], ["rotate", "rotate 30°"], ["scale", "scale (2, ½)"], ["shear", "shear k = 1"], ["reflect", "reflect (y-axis)"], ["project", "project onto 30° line"], ["collapse", "collapse (dependent cols)"]],
+      k => { set(k); t = 1; ts.set(1); p.render(); });
+    const ts = slider("#ctl-basis", { label: "morph t ", min: 0, max: 1, step: 0.01, value: 1 }, v => { t = v; p.render(); });
+    const anim = Course.animator(() => { t = Math.min(1, t + 0.012); ts.set(t); p.render(); return t < 1; });
+    button("#ctl-basis", "▶ play", () => { anim.stop(); t = 0; anim.start(); });
+    set("custom");
+    p.draggable([I, J], () => { if (t < 1) { anim.stop(); t = 1; ts.set(1); } }).render(p => {
+      const A = [[I.x, J.x], [I.y, J.y]], M = [[1 - t + t * A[0][0], t * A[0][1]], [t * A[1][0], 1 - t + t * A[1][1]]];
+      const d = LA.det2(M);
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      warpGrid(p, x => mv(M, x));
+      p.polygon([[0, 0], mv(M, [1, 0]), mv(M, [1, 1]), mv(M, [0, 1])], { fill: d >= 0 ? "c1" : "c4", fillAlpha: .18, stroke: false });
+      p.polygon(F0, { color: "muted", width: 1, dash: [4, 4], fill: "muted", fillAlpha: .04 });
+      p.polygon(F0.map(q => mv(M, q)), { color: "c5", fill: "c5", fillAlpha: .35, width: 2 });
+      const mi = mv(M, [1, 0]), mj = mv(M, [0, 1]);
+      p.arrow(0, 0, mi[0], mi[1], { color: "c1", width: 3.5, label: "î" });
+      p.arrow(0, 0, mj[0], mj[1], { color: "c2", width: 3.5, label: "ĵ" });
+      I.hidden = J.hidden = t < 1;
+      p.drawHandles();
+      p.label(8, 14, t < 1 ? `t = ${t.toFixed(2)}:  (1−t)·I + t·A` : "drag the tips of î and ĵ", { px: true, color: "muted", font: "12px sans-serif" });
+      const [r1, r2] = matStr(A);
+      const q = v => v.toFixed(2).padStart(5);
+      out.textContent = `${r1}    î lands at (${q(A[0][0])}, ${q(A[1][0])})  = column 1\n${r2}    ĵ lands at (${q(A[0][1])}, ${q(A[1][1])})  = column 2\n` +
+        `det A = ${LA.det2(A).toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig: matvec two ways ----------
+  {
+    const pc = new Plot("#fig-mv-col", { xmin: -3.5, xmax: 6, ymin: -1.5, ymax: 7.8, equal: true });
+    const pr = new Plot("#fig-mv-row", { xmin: -4.5, xmax: 4.5, ymin: -3.2, ymax: 5.4, equal: true });
+    const a1 = { x: 2, y: 1, color: "c1", snap: 0.25 }, a2 = { x: 1, y: 3, color: "c2", snap: 0.25 }, X = { x: 1, y: 2, color: "c3", snap: 0.25 };
+    const out = document.getElementById("out-mv");
+    const f1 = v => fmt(+v.toFixed(2));
+    pc.draggable([a1, a2, X], () => pr.render()).render(p => {
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      p.ray(0, 0, a1.x, a1.y, { color: "c1", width: 1, dash: [2, 5], alpha: .5 });
+      p.ray(0, 0, a2.x, a2.y, { color: "c2", width: 1, dash: [2, 5], alpha: .5 });
+      const s1 = [X.x * a1.x, X.x * a1.y], y = [s1[0] + X.y * a2.x, s1[1] + X.y * a2.y];
+      p.arrow(0, 0, X.x, X.y, { color: "c3", width: 2, dash: [5, 4], label: "x" });
+      p.arrow(0, 0, s1[0], s1[1], { color: "c1", width: 2.5, alpha: .65 });
+      p.arrow(s1[0], s1[1], y[0], y[1], { color: "c2", width: 2.5, alpha: .65 });
+      p.label((s1[0]) / 2, (s1[1]) / 2, `${f1(X.x)}·a₁`, { color: "c1", dx: 6, dy: 12, font: "12px sans-serif", bg: true });
+      p.label((s1[0] + y[0]) / 2, (s1[1] + y[1]) / 2, `${f1(X.y)}·a₂`, { color: "c2", dx: 8, dy: 0, font: "12px sans-serif", bg: true });
+      p.arrow(0, 0, y[0], y[1], { color: "c4", width: 3.5, label: "Ax" });
+      p.arrow(0, 0, a1.x, a1.y, { color: "c1", width: 3, label: "a₁" });
+      p.arrow(0, 0, a2.x, a2.y, { color: "c2", width: 3, label: "a₂" });
+      p.drawHandles();
+      p.label(8, 14, "column view", { px: true, color: "muted", font: "600 12px sans-serif" });
+      const r1 = [a1.x, a2.x], r2 = [a1.y, a2.y];
+      out.textContent =
+        `A = [a₁ a₂] = [[${f1(a1.x)}, ${f1(a2.x)}], [${f1(a1.y)}, ${f1(a2.y)}]]   x = (${f1(X.x)}, ${f1(X.y)})\n` +
+        `columns: Ax = ${f1(X.x)}·(${f1(a1.x)}, ${f1(a1.y)}) + ${f1(X.y)}·(${f1(a2.x)}, ${f1(a2.y)}) = (${f1(y[0])}, ${f1(y[1])})\n` +
+        `rows:    r₁·x = (${f1(r1[0])})(${f1(X.x)}) + (${f1(r1[1])})(${f1(X.y)}) = ${f1(LA.dot(r1, [X.x, X.y]))}    r₂·x = (${f1(r2[0])})(${f1(X.x)}) + (${f1(r2[1])})(${f1(X.y)}) = ${f1(LA.dot(r2, [X.x, X.y]))}`;
+    });
+    pr.draggable([X], () => pc.render()).render(p => {
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      const rows = [[[a1.x, a2.x], "c1", "r₁"], [[a1.y, a2.y], "c2", "r₂"]];
+      rows.forEach(([r, col, nm]) => {
+        const n2 = r[0] * r[0] + r[1] * r[1]; if (n2 < 1e-9) return;
+        const val = LA.dot(r, [X.x, X.y]);
+        const st = Math.max(1, Math.ceil(0.7 * Math.sqrt(n2)));  // keep level lines ~0.7 units apart
+        for (let k = -30; k <= 30; k += st) p.ray(k * r[0] / n2, k * r[1] / n2, -r[1], r[0], { color: col, width: 1, alpha: .3 });
+        p.ray(val * r[0] / n2, val * r[1] / n2, -r[1], r[0], { color: col, width: 2.2, alpha: .9 });
+        p.arrow(0, 0, r[0], r[1], { color: col, width: 3, label: nm });
+      });
+      p.point(X.x, X.y, { r: 5, color: "c3" });
+      p.arrow(0, 0, X.x, X.y, { color: "c3", width: 2, dash: [5, 4] });
+      p.drawHandles();
+      const v1 = LA.dot(rows[0][0], [X.x, X.y]), v2 = LA.dot(rows[1][0], [X.x, X.y]);
+      p.label(8, 14, "row view (input space)", { px: true, color: "muted", font: "600 12px sans-serif" });
+      p.label(8, 34, `on line r₁·x = ${f1(v1)}`, { px: true, color: "c1", font: "12px sans-serif", bg: true });
+      p.label(8, 54, `on line r₂·x = ${f1(v2)}`, { px: true, color: "c2", font: "12px sans-serif", bg: true });
+    });
+  }
+
+  // ---------- fig: determinant ----------
+  {
+    const p = new Plot("#fig-det", { xmin: -5, xmax: 5, ymin: -3.5, ymax: 3.5, equal: true });
+    const I = { x: 2, y: 0.5, color: "c1", snap: 0.1 }, J = { x: 0.5, y: 1.5, color: "c2", snap: 0.1 };
+    const out = document.getElementById("out-det");
+    button("#ctl-det", "reset", () => { I.x = 2; I.y = .5; J.x = .5; J.y = 1.5; p.render(); });
+    button("#ctl-det", "swap î ↔ ĵ (flip)", () => { [I.x, J.x] = [J.x, I.x]; [I.y, J.y] = [J.y, I.y]; p.render(); });
+    button("#ctl-det", "make ĵ parallel to î (collapse)", () => { J.x = +(-0.6 * I.x).toFixed(2); J.y = +(-0.6 * I.y).toFixed(2); p.render(); });
+    p.draggable([I, J]).render(p => {
+      const A = [[I.x, J.x], [I.y, J.y]], d = LA.det2(A), col = Math.abs(d) < 0.02 ? "muted" : d > 0 ? "c1" : "c4";
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      warpGrid(p, x => mv(A, x), { alpha: .3 });
+      // a 2x2 patch of cells elsewhere: each scales by the same |det|
+      for (const [cx, cy] of [[-2, -1], [-1, -1]]) {
+        p.rect(cx, cy, cx + 1, cy + 1, { color: "muted", width: 1, dash: [3, 3], fill: "muted", fillAlpha: .05 });
+        p.polygon([[cx, cy], [cx + 1, cy], [cx + 1, cy + 1], [cx, cy + 1]].map(q => mv(A, q)), { color: "c3", width: 1.5, fill: "c3", fillAlpha: .15 });
+      }
+      { const c = mv(A, [-1, -0.5]); p.label(c[0], c[1], `each ×${Math.abs(d).toFixed(2)}`, { color: "c3", align: "center", bg: true, font: "600 11px sans-serif" }); }
+      p.rect(0, 0, 1, 1, { color: "muted", width: 1.5, dash: [4, 4], fill: "muted", fillAlpha: .05 });
+      const sq = [[0, 0], [I.x, I.y], [I.x + J.x, I.y + J.y], [J.x, J.y]];
+      p.polygon(sq, { color: col, fill: col, fillAlpha: .3, width: 2 });
+      p.label((I.x + J.x) / 2, (I.y + J.y) / 2, `area ${Math.abs(d).toFixed(2)}`, { color: col, align: "center", bg: true, font: "600 12px sans-serif" });
+      // orientation arc from Aî to Aĵ (the short way)
+      if (Math.abs(d) >= 0.02) {
+        const a0 = Math.atan2(I.y, I.x); let da = Math.atan2(J.y, J.x) - a0; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+        const r = 0.55, arc = []; for (let k = 0; k <= 30; k++) { const tt = a0 + da * k / 30 * 0.85; arc.push([r * Math.cos(tt), r * Math.sin(tt)]); }
+        p.path(arc, { color: col, width: 2.5 });
+        const e = a0 + da * 0.85, tip = [r * Math.cos(e), r * Math.sin(e)], tang = [-Math.sin(e) * Math.sign(da), Math.cos(e) * Math.sign(da)];
+        p.arrow(tip[0] - 0.15 * tang[0], tip[1] - 0.15 * tang[1], tip[0] + 0.05 * tang[0], tip[1] + 0.05 * tang[1], { color: col, width: 2.5, head: 10 });
+      }
+      p.arrow(0, 0, I.x, I.y, { color: "c1", width: 3, label: "î" });
+      p.arrow(0, 0, J.x, J.y, { color: "c2", width: 3, label: "ĵ" });
+      p.drawHandles();
+      const verdict = Math.abs(d) < 0.02 ? "≈ 0 → plane collapsed onto a line (columns dependent)" : d > 0 ? "> 0 → orientation preserved (counter-clockwise)" : "< 0 → orientation flipped (clockwise)";
+      out.textContent = `det A = ad − bc = (${fmt(+I.x.toFixed(2))})(${fmt(+J.y.toFixed(2))}) − (${fmt(+J.x.toFixed(2))})(${fmt(+I.y.toFixed(2))}) = ${d.toFixed(3)}\n` +
+        `every area × ${Math.abs(d).toFixed(3)}    sign ${verdict}`;
+    });
+  }
+
+  // ---------- fig: composition ----------
+  {
+    const p = new Plot("#fig-comp", { xmin: -4, xmax: 4, ymin: -2.6, ymax: 3.4, equal: true });
+    const M = {
+      rot90: [[0, -1], [1, 0]], rot30: [[c30, -s30], [s30, c30]], shear: [[1, 1], [0, 1]], scalex: [[2, 0], [0, 1]], scaley: [[1, 0], [0, 0.5]],
+      flipx: [[1, 0], [0, -1]], projx: [[1, 0], [0, 0]],
+    };
+    const opts = [["rot90", "rotate 90°"], ["rot30", "rotate 30°"], ["shear", "shear k = 1"], ["scalex", "scale x by 2"], ["scaley", "scale y by ½"], ["flipx", "reflect (x-axis)"], ["projx", "project onto x-axis"]];
+    let a = "rot90", b = "shear", order = "AB"; const out = document.getElementById("out-comp");
+    const sa = select("#ctl-comp", "A: ", opts, v => { a = v; p.render(); });
+    const sb = select("#ctl-comp", "B: ", opts, v => { b = v; p.render(); }); sb.value = "shear";
+    select("#ctl-comp", "product: ", [["AB", "AB  (first B, then A)"], ["BA", "BA  (first A, then B)"]], v => { order = v; p.render(); });
+    p.render(p => {
+      const A = M[a], B = M[b], first = order === "AB" ? B : A, P = order === "AB" ? LA.matmul(A, B) : LA.matmul(B, A);
+      p.grid({ step: 1, stepY: 1 }).axes({ step: 1, stepY: 1 });
+      p.polygon(F0, { color: "muted", width: 1, fill: "muted", fillAlpha: .06 });
+      p.polygon(F0.map(q => mv(first, q)), { color: "c6", width: 1.8, dash: [5, 4], fill: "c6", fillAlpha: .06 });
+      p.polygon(F0.map(q => mv(P, q)), { color: "c5", width: 2, fill: "c5", fillAlpha: .35 });
+      const pi = mv(P, [1, 0]), pj = mv(P, [0, 1]);
+      p.arrow(0, 0, pi[0], pi[1], { color: "c1", width: 3, label: "î" });
+      p.arrow(0, 0, pj[0], pj[1], { color: "c2", width: 3, label: "ĵ" });
+      p.label(8, p.H - 14, "grey = start   dashed = after first step   purple = final", { px: true, color: "muted", font: "12px sans-serif" });
+      const L1 = matStr(A, 2, "A"), L2 = matStr(B, 2, "B"), L3 = matStr(P, 2, order);
+      const other = order === "AB" ? LA.matmul(B, A) : LA.matmul(A, B), same = other.flat().every((v, i) => Math.abs(v - P.flat()[i]) < 1e-9);
+      out.textContent = `${L1[0]}   ${L2[0]}   ${L3[0]}\n${L1[1]}   ${L2[1]}   ${L3[1]}\n` +
+        `det A · det B = ${(LA.det2(A) * LA.det2(B)).toFixed(3)}   det ${order} = ${LA.det2(P).toFixed(3)}    ` + (same ? "AB = BA here: these two commute" : "AB ≠ BA: order matters");
+    });
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partials, gradients & gradient descent</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="06">
+<main>
+
+<div class="kicker">Part 2 · Calculus</div>
+<h1>Partials, gradients &amp; gradient descent</h1>
+<p class="lede">A model's loss depends on all of its parameters at once: millions of knobs, one number out. The gradient packs every "how much does the loss change if I turn this knob?" into a single vector that points uphill. Step the other way and repeat. That loop is how essentially every neural network is trained.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Read a function of two variables from a heatmap with contour lines, and compute partial derivatives as slopes of slices.</li>
+    <li>Explain why the gradient is perpendicular to contours and points in the direction of steepest ascent, using $D_{\mathbf u}f = \nabla f\cdot\mathbf u$.</li>
+    <li>Run gradient descent and predict, from the learning rate and curvature, whether it converges, oscillates or diverges.</li>
+    <li>Use the second-order Taylor expansion and the Hessian to derive the stability bound $\eta \lt 2/\lambda_{\max}$ and explain zig-zagging via the condition number.</li>
+    <li>Recognise saddle points and local minima, and say why they matter (and don't) for deep learning.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="surfaces">1. Functions of several variables</h2>
+<p>In lesson 05 every function took one number and returned one number. A loss function takes many numbers (the parameters) and returns one (how bad the model is): $f:\mathbb{R}^n\to\mathbb{R}$. With $n = 2$ we can still draw it. Think of $f(x, y)$ as the <b>height of a landscape</b> above the point $(x, y)$.</p>
+<p>Two pictures of the same landscape will be used throughout this lesson:</p>
+<ul>
+  <li>a <b>heatmap</b>: colour each point by its height (darker = lower here);</li>
+  <li><b>contour lines</b> (level sets): curves along which $f$ is constant, like the lines on a hiking map. Where contours bunch together, the ground is steep. Where they spread apart, it's flat.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="partials">2. Partial derivatives: slice and differentiate</h2>
+<p>How does $f$ change if you move only in $x$? Freeze $y$ at some value $y_0$. Then $t\mapsto f(t, y_0)$ is an ordinary one-variable function: a <b>slice</b> through the landscape. Its derivative is the <b>partial derivative</b> with respect to $x$:</p>
+$$\frac{\partial f}{\partial x}(x_0, y_0) = \lim_{h\to0}\frac{f(x_0+h,\,y_0) - f(x_0, y_0)}{h}.$$
+<p>In practice: <b>treat every other variable as a constant</b> and differentiate as in lesson 05. For $f(x,y) = x^2y + \sin y$: $\;\partial f/\partial x = 2xy$ (the $\sin y$ is a constant, so it vanishes) and $\partial f/\partial y = x^2 + \cos y$.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-slice" width="420" height="380"></canvas></div>
+    <div><canvas id="fig-slice-x" width="380" height="185"></canvas><canvas id="fig-slice-y" width="380" height="185" style="margin-top:10px"></canvas></div>
+  </div>
+  <div class="readout" id="out-slice"></div>
+  <div class="caption"><b>Try it:</b> drag the point around the landscape. The <span style="color:var(--c1)">blue</span> line is the slice where $y$ is frozen. Its profile is drawn top-right, and the slope of its tangent is $\partial f/\partial x$. The <span style="color:var(--c2)">orange</span> line freezes $x$ instead (bottom-right, slope $\partial f/\partial y$). Find a spot where both slopes are zero: the bottom of the bowl.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gradient">3. The gradient: steepest ascent, perpendicular to contours</h2>
+<p>Stack all the partials into a vector. That vector is the <b>gradient</b>:</p>
+$$\nabla f(\mathbf x) = \begin{bmatrix} \partial f/\partial x_1 \\ \vdots \\ \partial f/\partial x_n\end{bmatrix}.$$
+<p>The gradient is to $f:\mathbb{R}^n\to\mathbb{R}$ what the derivative is to a one-variable function. Here's why. The linear approximation from lesson 05 becomes</p>
+$$f(\mathbf x + \mathbf d) \approx f(\mathbf x) + \nabla f(\mathbf x)\cdot\mathbf d.$$
+<p>Nudge $x_1$ by $d_1$ and $f$ moves by about $\frac{\partial f}{\partial x_1}d_1$. Nudge every coordinate and, to first order, the effects just add up. The sum of products is a dot product (lesson 01).</p>
+
+<h3>Directional derivatives</h3>
+<p>Walk from $\mathbf x$ in a unit direction $\mathbf u$. Set $\mathbf d = t\mathbf u$ above: the rate of change of $f$ along $\mathbf u$ is the <b>directional derivative</b></p>
+$$D_{\mathbf u}f(\mathbf x) = \nabla f(\mathbf x)\cdot\mathbf u = \|\nabla f\|\,\cos\theta,$$
+<p>where $\theta$ is the angle between $\mathbf u$ and the gradient. Everything now follows from $\cos\theta$:</p>
+<ul>
+  <li>$\theta = 0$: the largest possible rate, $\|\nabla f\|$. <b>The gradient points in the direction of steepest ascent</b>, and its length is that steepest slope.</li>
+  <li>$\theta = 180°$: steepest <em>descent</em>, along $-\nabla f$.</li>
+  <li>$\theta = 90°$: rate zero. You're walking along a contour. So <b>the gradient is perpendicular to the contour lines</b>.</li>
+</ul>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-grad" width="420" height="380"></canvas></div>
+    <div><canvas id="fig-dial" width="380" height="380"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-grad"></div>
+  <div class="readout" id="out-grad"></div>
+  <div class="caption"><b>Try it:</b> drag the big point to move, and drag the small <span style="color:var(--c5)">purple</span> handle around the circle to choose a direction $\mathbf u$. The right panel plots $D_{\mathbf u}f$ against the direction's angle: it's always a cosine wave. Its peak sits exactly at the <span style="color:var(--c4)">gradient</span>'s angle with height $\|\nabla f\|$, and its zeros are the two directions along the contour. Tick "gradient field" to see the arrows cross every contour at right angles.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>$f(x, y) = x^2 + 3y^2$ at $(1, 1)$. Partials: $\partial f/\partial x = 2x = 2$, $\partial f/\partial y = 6y = 6$, so $\nabla f = (2, 6)$.</p>
+  <p>Along $\mathbf u = (1,1)/\sqrt2$: $D_{\mathbf u}f = (2 + 6)/\sqrt2 \approx 5.657$.</p>
+  <p>Steepest: $\|\nabla f\| = \sqrt{4 + 36} = \sqrt{40}\approx 6.325$, in direction $(2,6)/\sqrt{40}$, which is not toward the origin $(-1,-1)$. Downhill on an elongated bowl doesn't point at the bottom. Hold on to that; it's the zig-zag of section 6.</p>
+  <p>Along the contour: $\mathbf u \propto (6, -2)$, the gradient rotated 90°. Check: $(2,6)\cdot(6,-2) = 0$.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="descent">4. Gradient descent</h2>
+<p>To minimise $f$, repeatedly step a little way downhill:</p>
+$$\boxed{\;\mathbf x_{k+1} = \mathbf x_k - \eta\,\nabla f(\mathbf x_k)\;}$$
+<p>The step size $\eta$ is the <b>learning rate</b>. Why does it work? By the linear approximation, $f(\mathbf x - \eta\nabla f) \approx f(\mathbf x) - \eta\|\nabla f\|^2$. That is a decrease, as long as $\eta$ is small enough for the linear approximation to be trustworthy. "Small enough" is the whole story of this section and the next two.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-gd" width="420" height="380"></canvas></div>
+    <div><canvas id="fig-gd-loss" width="380" height="380"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-gd"></div>
+  <div class="readout" id="out-gd"></div>
+  <div class="caption"><b>Try it:</b> click anywhere on the landscape to set a start, then press "play". The right panel shows $\log_{10} f$ per iteration. On the <b>round bowl</b>, lr = 1 jumps straight to the minimum, while lr = 1.9 overshoots back and forth and still converges. Above 2 it diverges. On the <b>ravine</b>, push lr past $2/\lambda_{\max} = 0.2$ and watch the steep direction blow up while the shallow one has barely moved. On <b>Rosenbrock</b>, the path drops into the curved valley fast and then crawls along it for thousands of steps.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: one dimension, three learning rates</div>
+  <p>$f(x) = 2x^2$, so $f'(x) = 4x$ and the update is $x_{k+1} = x_k - 4\eta x_k = (1 - 4\eta)\,x_k$. Start at $x_0 = 1$.</p>
+  <p>$\eta = 0.1$: factor $0.6$. $x$: $1, 0.6, 0.36, 0.216,\dots$ Smooth convergence.</p>
+  <p>$\eta = 0.4$: factor $-0.6$. $x$: $1, -0.6, 0.36, -0.216,\dots$ Oscillates across the minimum but converges.</p>
+  <p>$\eta = 0.6$: factor $-1.4$. $x$: $1, -1.4, 1.96, -2.744,\dots$ Diverges.</p>
+  <p>The dividing line is $|1 - 4\eta| \lt 1 \iff \eta \lt 0.5 = 2/f''$. The curvature $f'' = 4$ sets the speed limit.</p>
+</div>
+
+<div class="callout ml">
+<p>In deep learning the gradient is averaged over a random mini-batch of data instead of the whole dataset. That's <b>stochastic gradient descent</b> (lesson 13 onward), and every optimiser you'll meet (momentum, RMSProp, Adam in lesson 18) is a refinement of this one-line update. The gradient itself is computed by backpropagation, which is the chain rule applied to vectors and matrices: lesson 07, then lesson 17.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="hessian">5. Curvature: second-order Taylor and the Hessian</h2>
+<p>To understand <em>when</em> a step is too big we need the next term of the approximation. In one variable, $f(x+d) \approx f(x) + f'(x)d + \tfrac12 f''(x)d^2$. In many variables the second derivatives form a matrix, the <b>Hessian</b>:</p>
+$$H_{ij} = \frac{\partial^2 f}{\partial x_i\,\partial x_j}, \qquad f(\mathbf x+\mathbf d) \approx f(\mathbf x) + \nabla f\cdot\mathbf d + \tfrac12\,\mathbf d^\top H\,\mathbf d.$$
+<p>For smooth $f$ the mixed partials agree ($\partial^2 f/\partial x\partial y = \partial^2 f/\partial y\partial x$), so $H$ is <b>symmetric</b>. Lesson 04's spectral theorem then applies: $H$ has real eigenvalues and orthogonal eigenvectors. Each eigenvector is a direction, and its eigenvalue is the curvature of $f$ along that direction:</p>
+<ul>
+  <li>all eigenvalues $> 0$: locally a <b>bowl</b> (convex);</li>
+  <li>all $\lt 0$: a <b>dome</b>;</li>
+  <li>mixed signs: a <b>saddle</b>, curving up in some directions and down in others.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-taylor" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-taylor"></div>
+  <div class="readout" id="out-taylor"></div>
+  <div class="caption"><b>Try it:</b> drag the point. The solid grey curves are contours of the true $f(x,y) = \tfrac14x^4 - x^2 + y^2 + \tfrac12xy$. The <span style="color:var(--c2)">orange</span> curves are contours of its second-order Taylor model at the point, and the arrows are the Hessian's eigenvectors (length ∝ |eigenvalue|, <span style="color:var(--c3)">green</span> if positive, <span style="color:var(--c4)">pink</span> if negative). Near the point the two sets of contours agree. Out at $|x| > 1$ the model is an ellipse (a bowl). Drag toward $x = 0$ and one eigenvalue turns negative: the model becomes a saddle, with hyperbolic contours.</div>
+</div>
+
+<p>A quadratic is its own Taylor expansion, so for $f(\mathbf x) = \tfrac12\mathbf x^\top A\mathbf x - \mathbf b^\top\mathbf x$ (with $A$ symmetric), the Hessian is $A$ everywhere and the gradient is exactly $A\mathbf x - \mathbf b$ (problem 8 derives it). Every smooth function looks like such a quadratic near a minimum. That's why the next section studies quadratics in detail.</p>
+
+<!-- ============================================================ -->
+<h2 id="condition">6. Why learning rates diverge: $\eta \lt 2/\lambda_{\max}$, and the zig-zag</h2>
+<p>Take the quadratic above with $A$ symmetric positive definite and minimiser $\mathbf x^* = A^{-1}\mathbf b$. Track the error $\mathbf e_k = \mathbf x_k - \mathbf x^*$. Since $\nabla f(\mathbf x_k) = A\mathbf x_k - \mathbf b = A\mathbf e_k$,</p>
+$$\mathbf e_{k+1} = \mathbf e_k - \eta A\mathbf e_k = (I - \eta A)\,\mathbf e_k.$$
+<p>Write $\mathbf e_k$ in $A$'s eigenvector basis (lesson 04). Along eigenvector $\mathbf q_i$ with eigenvalue $\lambda_i$, the matrix $I - \eta A$ just multiplies by $1 - \eta\lambda_i$. So <b>each eigen-direction is an independent 1-D problem</b>, exactly the worked example of section 4:</p>
+$$\text{component } i \text{ after } k \text{ steps} = (1 - \eta\lambda_i)^k\times\text{(start)}.$$
+<p>Every component shrinks iff $|1 - \eta\lambda_i| \lt 1$ for all $i$, that is, $0 \lt \eta \lt 2/\lambda_i$. The tightest of these is set by the largest eigenvalue:</p>
+$$\boxed{\;0 \lt \eta \lt \frac{2}{\lambda_{\max}}\;}$$
+<p>The overall speed is set by the slowest factor $\max_i|1-\eta\lambda_i|$. Small $\eta$ makes the flat direction ($\lambda_{\min}$) crawl. Large $\eta$ makes the steep direction ($\lambda_{\max}$) bounce. The best compromise balances the two: $\eta^* = \frac{2}{\lambda_{\min}+\lambda_{\max}}$, which gives the rate</p>
+$$\max_i|1-\eta^*\lambda_i| = \frac{\kappa - 1}{\kappa + 1}, \qquad \kappa = \frac{\lambda_{\max}}{\lambda_{\min}} \text{ (the condition number).}$$
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-cond" width="420" height="340"></canvas></div>
+    <div><canvas id="fig-cond-rate" width="380" height="340"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-cond"></div>
+  <div class="readout" id="out-cond"></div>
+  <div class="caption"><b>Try it:</b> left, 40 steps of gradient descent on $\tfrac12(x^2 + \kappa y^2)$, so $\lambda_{\min} = 1$, $\lambda_{\max} = \kappa$. Right, the per-step shrink factor of each eigen-direction against the learning rate (as a fraction of $2/\lambda_{\max}$). The <span style="color:var(--c3)">green</span> line is the flat $x$-direction and the <span style="color:var(--c4)">pink</span> one the steep $y$-direction. The thick envelope is the overall rate. Raise $\kappa$: the envelope's lowest point creeps toward 1, and the path zig-zags across the ravine while inching along it. Push lr past 1.0 and the steep direction's factor exceeds 1: divergence.</div>
+</div>
+
+<div class="callout key">
+<p>Two facts to remember. <b>The steepest curvature sets the maximum learning rate. The ratio of steepest to flattest curvature sets how slow convergence is.</b> With $\kappa = 100$ the best rate is $99/101\approx0.98$: about 680 steps per factor of $10^{6}$. Ill-conditioning, not lack of steps, is what makes plain gradient descent slow.</p>
+</div>
+
+<div class="callout ml">
+<p>This is the theory behind a lot of deep-learning practice. Standardising input features (lesson 13) and normalisation layers (lesson 18) make the loss surface rounder, which lowers $\kappa$. Momentum and Adam (lesson 18) are ways to get around a large $\kappa$ without computing the Hessian. Learning-rate warm-up exists partly because early in training $\lambda_{\max}$ can be large.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="critical">7. Critical points: minima, maxima, saddles</h2>
+<p>Gradient descent stops wherever $\nabla f = \mathbf 0$, a <b>critical point</b>. The Hessian there tells you what kind of point it is (the second-derivative test): all eigenvalues positive means a local minimum, all negative a local maximum, and mixed signs a saddle. If some eigenvalue is zero the test is inconclusive.</p>
+<p>Two things can go wrong:</p>
+<ul>
+  <li><b>Local minima</b>: a valley that isn't the deepest one. Gradient descent only sees local slope, so which valley you end in depends on where you start.</li>
+  <li><b>Saddle points</b>: the gradient is zero but there's a way down. Exactly on the ridge, gradient descent stalls; a hair off it, the unstable direction grows like $(1 + \eta|\lambda|)^k$ and you eventually escape. But "eventually" can be slow, because the gradient is tiny near the saddle.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-crit" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-crit"></div>
+  <div class="readout" id="out-crit"></div>
+  <div class="caption"><b>Try it:</b> click to drop a ball, which then runs gradient descent (lr 0.05). On the <b>saddle</b> landscape $\tfrac12x^2 + \tfrac14y^4 - \tfrac12y^2$, drop a ball exactly on the $x$-axis ($y = 0$; tick "snap to y = 0"): it rolls to the saddle at the origin and stops. Drop it a hair off the axis and it lingers near the saddle, then escapes to a minimum at $y=\pm1$. On <b>two valleys</b>, press "drop 40 balls": each ball's colour shows which minimum it reached. The left valley is the global minimum, but many balls settle in the right one.</div>
+</div>
+
+<div class="callout ml">
+<p>In 2-D, local minima look like the main danger. In the millions of dimensions of a neural network, a random critical point needs <em>every</em> eigenvalue to be positive to be a minimum, which is very unlikely. Most critical points are saddles, and the noise of stochastic gradients pushes you off them. Empirically, the minima that large networks find tend to be about equally good. The practical difficulties are more often plateaus and bad conditioning than "getting stuck in a bad local minimum".</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Let $f(x,y) = x^2y + 3y^2$. Compute $\nabla f(1, 2)$. Enter the two components.</p>
+<div class="numcheck" data-answer="4,13"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\partial f/\partial x = 2xy = 4$. $\partial f/\partial y = x^2 + 6y = 1 + 12 = 13$. So $\nabla f(1,2) = (4, 13)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>For the same $f$ at $(1,2)$, find the directional derivative toward $(3, 4)$ (i.e. along the unit vector in that direction), and the largest directional derivative over all directions.</p>
+<div class="numcheck" data-answer="12.8,13.6015" data-tol="1e-4"></div>
+<details class="hint"><summary>Hint</summary><p>Normalise first: $\mathbf u = (3,4)/5$. The largest value is $\|\nabla f\|$. Enter both numbers separated by a comma.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$D_{\mathbf u}f = (4, 13)\cdot(0.6, 0.8) = 2.4 + 10.4 = 12.8$. The maximum is $\|\nabla f\| = \sqrt{16 + 169} = \sqrt{185}\approx13.60$, along $\nabla f$ itself. $(3,4)$ is a pretty good direction ($\cos\theta = 12.8/13.6 \approx 0.94$) but not the best.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">warm-up</span>
+<p>Take one gradient descent step on $f(x,y) = x^2 + 3y^2$ from $(2, 1)$ with $\eta = 0.1$. Enter the new point. By how much did $f$ drop?</p>
+<div class="numcheck" data-answer="1.6,0.4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\nabla f(2,1) = (4, 6)$. New point $(2,1) - 0.1(4,6) = (1.6, 0.4)$. $f$ goes from $4 + 3 = 7$ to $2.56 + 0.48 = 3.04$, a drop of $3.96$. The linear prediction was $\eta\|\nabla f\|^2 = 0.1\cdot52 = 5.2$. The real drop is smaller because the curvature term $\tfrac12\mathbf d^\top H\mathbf d$ eats into it.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>Prove that the gradient is perpendicular to the level set through a point. Let $\mathbf r(t)$ be any smooth curve lying in the level set $\{f = c\}$ with $\mathbf r(0) = \mathbf x$.</p>
+<details class="hint"><summary>Hint</summary><p>$f(\mathbf r(t)) = c$ for all $t$. Differentiate both sides at $t=0$ using the multivariable chain rule $\frac{d}{dt}f(\mathbf r(t)) = \nabla f(\mathbf r(t))\cdot\mathbf r'(t)$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Differentiating $f(\mathbf r(t)) = c$ gives $\nabla f(\mathbf x)\cdot\mathbf r'(0) = 0$. $\mathbf r'(0)$ is the velocity of a curve in the level set, i.e. a tangent direction to the contour. Since the curve was arbitrary, $\nabla f$ is orthogonal to every tangent direction of the level set. (The chain rule used here is $D_{\mathbf u}f = \nabla f\cdot\mathbf u$ applied along the curve. Lesson 07 generalises it to Jacobians.)</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Gradient descent on $f(x,y) = \tfrac12(x^2 + 10y^2)$. (a) What is the largest stable learning rate? (b) What is the optimal learning rate, and the resulting per-step error factor? (c) About how many steps does it take to shrink the error by a factor of $10^6$? Enter (a) and the factor from (b).</p>
+<div class="numcheck" data-answer="0.2,0.818182" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>The Hessian is $\operatorname{diag}(1, 10)$, so $\lambda_{\min} = 1$, $\lambda_{\max} = 10$, $\kappa = 10$. (a) $2/\lambda_{\max} = 0.2$. (b) $\eta^* = 2/(1+10) \approx 0.1818$, factor $(\kappa-1)/(\kappa+1) = 9/11 \approx 0.818$. (c) $\ln(10^{-6})/\ln(9/11) \approx 68.8$, so 69 steps. At $\eta^*$ both directions shrink by the same $9/11$ per step, the $y$ one with alternating sign.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Find and classify all critical points of $f(x, y) = x^3 - 3x + y^2$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\nabla f = (3x^2 - 3,\; 2y) = \mathbf 0 \Rightarrow x = \pm1,\ y = 0$. Hessian $H = \operatorname{diag}(6x, 2)$. At $(1,0)$: $\operatorname{diag}(6, 2)$, both positive: <b>local minimum</b>. At $(-1, 0)$: $\operatorname{diag}(-6, 2)$, mixed signs: <b>saddle</b>. There's no global minimum at all, since $f\to-\infty$ as $x\to-\infty$. A local minimum can be the only minimum and still not be the lowest point.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>The Rosenbrock function $f = (1-x)^2 + 100(y - x^2)^2$ has its minimum at $(1,1)$, where the Hessian is $\begin{bmatrix}802 & -400\\-400 & 200\end{bmatrix}$. Verify the Hessian, then find (approximately) its condition number and the largest stable learning rate near the minimum.</p>
+<div class="numcheck" data-answer="2508,0.0019968" data-tol="2e-3"></div>
+<details class="hint"><summary>Hint</summary><p>For a symmetric 2×2 matrix $\begin{bmatrix}a&b\\b&d\end{bmatrix}$ the eigenvalues are $\tfrac{a+d}{2}\pm\sqrt{\left(\tfrac{a-d}{2}\right)^2 + b^2}$. Enter $\kappa$ and the learning-rate bound.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$f_x = -2(1-x) - 400x(y - x^2)$, $f_y = 200(y-x^2)$. Then $f_{xx} = 2 - 400y + 1200x^2 = 802$, $f_{xy} = -400x = -400$, $f_{yy} = 200$ at $(1,1)$. Eigenvalues: $501 \pm \sqrt{301^2 + 400^2} = 501\pm500.6$, so $\lambda\approx 1001.6$ and $0.3994$. $\kappa\approx2508$, and the bound is $2/1001.6\approx0.0020$. That's why the figure in section 4 needs a tiny learning rate and thousands of steps for Rosenbrock.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core · derivation</span>
+<p>Let $A$ be a symmetric $n\times n$ matrix and $f(\mathbf x) = \tfrac12\mathbf x^\top A\mathbf x - \mathbf b^\top\mathbf x$. Show that $\nabla f = A\mathbf x - \mathbf b$ and that the Hessian is $A$. What changes if $A$ is not symmetric?</p>
+<details class="hint"><summary>Hint</summary><p>Write $\mathbf x^\top A\mathbf x = \sum_{i,j}A_{ij}x_ix_j$ and take $\partial/\partial x_k$. The variable $x_k$ appears when $i=k$ and when $j=k$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\frac{\partial}{\partial x_k}\sum_{ij}A_{ij}x_ix_j = \sum_j A_{kj}x_j + \sum_i A_{ik}x_i = (A\mathbf x)_k + (A^\top\mathbf x)_k$. So $\nabla(\mathbf x^\top A\mathbf x) = (A + A^\top)\mathbf x$, which is $2A\mathbf x$ for symmetric $A$. With the $\tfrac12$ and the linear term, $\nabla f = A\mathbf x - \mathbf b$. Differentiating once more, $\partial(A\mathbf x - \mathbf b)_k/\partial x_l = A_{kl}$, so $H = A$. For non-symmetric $A$, only the symmetric part $\tfrac12(A + A^\top)$ matters: $\mathbf x^\top A\mathbf x$ can't see the antisymmetric part. Lesson 07 redoes this with matrix-calculus rules.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>On a quadratic $f = \tfrac12\mathbf x^\top A\mathbf x$, instead of a fixed $\eta$ choose the step that minimises $f$ along the negative gradient ("exact line search"). Show that $\eta^* = \dfrac{\mathbf g^\top\mathbf g}{\mathbf g^\top A\mathbf g}$ where $\mathbf g = A\mathbf x$. Evaluate it for $A = \operatorname{diag}(1, 10)$ at $\mathbf x = (1, 1)$.</p>
+<div class="numcheck" data-answer="0.1008991" data-tol="1e-5"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\phi(\eta) = f(\mathbf x - \eta\mathbf g) = f(\mathbf x) - \eta\,\mathbf g^\top\mathbf g + \tfrac12\eta^2\,\mathbf g^\top A\mathbf g$ (second-order Taylor, exact for a quadratic). Then $\phi'(\eta) = 0$ gives $\eta^* = \mathbf g^\top\mathbf g / \mathbf g^\top A\mathbf g$. Here $\mathbf g = (1, 10)$, $\mathbf g^\top\mathbf g = 101$, $\mathbf g^\top A\mathbf g = 1 + 1000 = 1001$, so $\eta^* \approx 0.1009$. The denominator is the curvature along $\mathbf g$, and the gradient points mostly along the steep direction. So the "best" step is short, and the path still zig-zags: each line-search step ends exactly perpendicular to the previous one.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">At a point on a hiking map, the gradient of altitude points…</div>
+  <div class="opts">
+    <button data-k="a">along the contour line through that point.</button>
+    <button data-k="b">straight toward the summit.</button>
+    <button data-k="c">perpendicular to the contour line, uphill.</button>
+    <button data-k="d">perpendicular to the contour line, downhill.</button>
+  </div>
+  <div class="explain">Along a contour the altitude doesn't change, so $\nabla f\cdot\mathbf u = 0$ there. The gradient points uphill (steepest ascent). It does <em>not</em> generally point at the summit: on an elongated hill, steepest isn't the same as straight-to-the-top.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">Gradient descent on a quadratic whose Hessian has eigenvalues 1 and 10, with $\eta = 0.25$. What happens?</div>
+  <div class="opts">
+    <button data-k="a">It converges, just slowly.</button>
+    <button data-k="b">It diverges along the steep direction; $|1 - 0.25\cdot10| = 1.5 > 1$.</button>
+    <button data-k="c">It diverges along the flat direction.</button>
+    <button data-k="d">It converges in one step.</button>
+  </div>
+  <div class="explain">The bound is $\eta \lt 2/\lambda_{\max} = 0.2$. The flat direction's factor $|1 - 0.25| = 0.75$ is fine, but the steep one is multiplied by $-1.5$ every step and explodes.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Your loss curve shows rapid initial progress, then the loss decreases painfully slowly while the parameters oscillate back and forth. The most likely cause is…</div>
+  <div class="opts">
+    <button data-k="a">the learning rate is far above $2/\lambda_{\max}$.</button>
+    <button data-k="b">you're stuck in a local minimum.</button>
+    <button data-k="c">the gradient is computed wrong.</button>
+    <button data-k="d">an ill-conditioned (high $\kappa$) loss surface: zig-zag across a narrow ravine.</button>
+  </div>
+  <div class="explain">Bouncing across the steep direction while crawling along the flat one is the signature of a large condition number. (a) would diverge; (b) wouldn't keep decreasing. Fixes: feature scaling, normalisation, momentum, Adam (lessons 13, 18).</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">At a critical point the Hessian has eigenvalues $3$, $0.5$ and $-0.01$. This point is…</div>
+  <div class="opts">
+    <button data-k="a">a saddle point: there is a (gently) downhill direction.</button>
+    <button data-k="b">a local minimum, since most eigenvalues are positive.</button>
+    <button data-k="c">a local maximum.</button>
+    <button data-k="d">impossible to classify without more information.</button>
+  </div>
+  <div class="explain">One negative eigenvalue is enough: moving along its eigenvector decreases $f$. Its smallness means the escape is slow. That's typical of saddles in high-dimensional loss surfaces.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Partial derivative</td><td>$\partial f/\partial x_i$</td><td>slope of the slice along axis $i$</td></tr>
+  <tr><td>Gradient</td><td>$\nabla f = (\partial f/\partial x_1,\dots)$</td><td>steepest-ascent direction; $\perp$ contours</td></tr>
+  <tr><td>Directional derivative</td><td>$D_{\mathbf u}f = \nabla f\cdot\mathbf u$</td><td>slope when walking along $\mathbf u$</td></tr>
+  <tr><td>Gradient descent</td><td>$\mathbf x\leftarrow\mathbf x - \eta\nabla f$</td><td>step downhill, repeat</td></tr>
+  <tr><td>Hessian</td><td>$H_{ij} = \partial^2 f/\partial x_i\partial x_j$</td><td>curvature; eigenvalues classify critical points</td></tr>
+  <tr><td>Stability (quadratic)</td><td>$\eta \lt 2/\lambda_{\max}$</td><td>steepest curvature caps the learning rate</td></tr>
+  <tr><td>Convergence rate</td><td>$(\kappa-1)/(\kappa+1)$</td><td>ill-conditioning ⇒ slow zig-zag</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 06: build it</h3>
+  <p>Open <code>workbooks/06_gradients_descent/exercises.py</code>. You'll write a numerical gradient that works for arrays of any shape (you'll reuse it to check every gradient for the rest of the course), directional derivatives, the analytic gradient of $\mathbf x^\top A\mathbf x$ and of Rosenbrock, and gradient descent that returns its full history. Then you'll verify the $2/\lambda_{\max}$ bound and the optimal rate empirically on random quadratics, and (stretch) compute Hessians by finite differences and classify critical points. Grade yourself with:</p>
+  <pre><code>./course check 06</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Gabriel Goh, "Why Momentum Really Works", <em>Distill</em> (2017): interactive and precise about conditioning.</li>
+  <li>Boyd &amp; Vandenberghe, <em>Convex Optimization</em>, §9.3 (gradient descent and condition number).</li>
+  <li>Goodfellow, Bengio &amp; Courville, <em>Deep Learning</em>, §4.3 (gradient-based optimisation) and §8.2 (saddle points in neural nets).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, fmt, LA } = Course;
+  const ctl = id => document.getElementById(id);
+  const checkbox = (host, text, onChange) => { const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox"; cb.addEventListener("change", () => onChange(cb.checked)); lab.append(cb, " " + text); ctl(host).appendChild(lab); return cb; };
+  const surface = (p, f, levels, o = {}) => { p.field(o.tf ? (x, y) => o.tf(f(x, y)) : f, { cmap: "seq", res: 4, alpha: .75 }); p.contour(f, levels, { color: "muted", width: 1, res: 5 }); };
+
+  // shared landscape for sections 2-3
+  const f1 = (x, y) => 0.4 * x * x + 0.8 * y * y + 0.6 * Math.sin(1.4 * x + 0.5) + 0.3 * x * y;
+  const g1 = (x, y) => [0.8 * x + 0.84 * Math.cos(1.4 * x + 0.5) + 0.3 * y, 1.6 * y + 0.3 * x];
+  const lev1 = [-0.3, 0, 0.3, 0.7, 1.2, 2, 3, 4, 5.5, 7, 9, 11];
+
+  // ---------- fig: partial derivatives as slices ----------
+  {
+    const p = new Plot("#fig-slice", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const px = new Plot("#fig-slice-x", { xmin: -3.3, xmax: 3.3, ymin: -1.5, ymax: 13 });
+    const py = new Plot("#fig-slice-y", { xmin: -3.3, xmax: 3.3, ymin: -1.5, ymax: 13 });
+    const P = { x: 1.3, y: 1.1, color: "fg", constrain: (x, y) => [Math.max(-2.9, Math.min(2.9, x)), Math.max(-2.9, Math.min(2.9, y))] };
+    const out = ctl("out-slice");
+    const slicePlot = (q, fn, at, slope, col, name) => {
+      q.render(q => {
+        q.grid({ step: 1, stepY: 2 }).axes({ step: 1, stepY: 4 });
+        q.fn(fn, { color: col, width: 2.5 });
+        q.line(at - 1, fn(at) - slope, at + 1, fn(at) + slope, { color: "fg", width: 2 });
+        q.point(at, fn(at), { r: 5, color: col });
+        q.label(8, 14, name + " = " + slope.toFixed(3), { px: true, color: col });
+      });
+    };
+    p.draggable([P], () => {}).render(p => {
+      surface(p, f1, lev1);
+      p.line(-4, P.y, 4, P.y, { color: "c1", width: 2.5 }); p.line(P.x, -4, P.x, 4, { color: "c2", width: 2.5 });
+      p.axes({ step: 1 }); p.drawHandles();
+      const [gx, gy] = g1(P.x, P.y);
+      slicePlot(px, t => f1(t, P.y), P.x, gx, "c1", `slice y = ${P.y.toFixed(2)}: ∂f/∂x`);
+      slicePlot(py, t => f1(P.x, t), P.y, gy, "c2", `slice x = ${P.x.toFixed(2)}: ∂f/∂y`);
+      out.textContent = `(x, y) = (${P.x.toFixed(2)}, ${P.y.toFixed(2)})   f = ${f1(P.x, P.y).toFixed(3)}   ∂f/∂x = ${gx.toFixed(3)}   ∂f/∂y = ${gy.toFixed(3)}` + (Math.hypot(gx, gy) < 0.08 ? "   ← both ≈ 0: a critical point" : "");
+    });
+  }
+
+  // ---------- fig: gradient & directional derivative dial ----------
+  {
+    const p = new Plot("#fig-grad", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const d = new Plot("#fig-dial", { xmin: -30, xmax: 380, ymin: -7, ymax: 7 });
+    const R = 0.9; let ang = 0.6, field = false;
+    const P = { x: -1.2, y: 1.4, color: "fg", constrain: (x, y) => [Math.max(-2.6, Math.min(2.6, x)), Math.max(-2.6, Math.min(2.6, y))] };
+    const U = { x: 0, y: 0, color: "c5", r: 6, constrain: (x, y) => { ang = Math.atan2(y - P.y, x - P.x); return [P.x + R * Math.cos(ang), P.y + R * Math.sin(ang)]; } };
+    const sync = () => { U.x = P.x + R * Math.cos(ang); U.y = P.y + R * Math.sin(ang); };
+    sync();
+    const out = ctl("out-grad");
+    checkbox("ctl-grad", "gradient field", v => { field = v; p.render(); });
+    const deg = a => ((a * 180 / Math.PI) % 360 + 360) % 360;
+    p.draggable([P, U], h => { if (h === P) sync(); }).render(p => {
+      surface(p, f1, lev1); p.axes({ step: 1 });
+      if (field) for (let i = -2.75; i <= 2.8; i += 0.5) for (let j = -2.75; j <= 2.8; j += 0.5) { const [a, b] = g1(i, j), n = Math.hypot(a, b) || 1, s = 0.2; p.arrow(i - s * a / n, j - s * b / n, i + s * a / n, j + s * b / n, { color: "c4", width: 1.2, head: 5, alpha: .7 }); }
+      const [gx, gy] = g1(P.x, P.y), gn = Math.hypot(gx, gy), sc = 0.35;
+      p.circle(P.x, P.y, R, { color: "c5", width: 1, dash: [3, 4] });
+      // tangent to contour
+      p.line(P.x - 1.3 * gy / gn, P.y + 1.3 * gx / gn, P.x + 1.3 * gy / gn, P.y - 1.3 * gx / gn, { color: "fg", width: 1.5, dash: [6, 4], alpha: .8 });
+      p.arrow(P.x, P.y, P.x + sc * gx, P.y + sc * gy, { color: "c4", width: 3.5, label: "∇f" });
+      p.arrow(P.x, P.y, U.x, U.y, { color: "c5", width: 2.5, label: "u" });
+      p.drawHandles();
+      d.render();
+    });
+    d.render(d => {
+      const [gx, gy] = g1(P.x, P.y), gn = Math.hypot(gx, gy), tg = deg(Math.atan2(gy, gx)), tu = deg(ang);
+      const ymax = Math.max(2, gn * 1.25); d.setView(-30, 380, -ymax, ymax);
+      for (let t = 0; t <= 360; t += 90) { d.line(t, -ymax, t, ymax, { color: "grid", width: 1 }); d.label(t, -ymax, t + "°", { align: "center", dy: -10, color: "muted", font: "11px sans-serif" }); }
+      d.line(-30, 0, 380, 0, { color: "axis", width: 1.2 });
+      d.fn(t => gn * Math.cos((t - tg) * Math.PI / 180), { color: "c5", width: 2.5, xmin: 0, xmax: 360 });
+      d.line(0, gn, 360, gn, { color: "c4", width: 1, dash: [4, 4] }); d.label(4, gn, "‖∇f‖", { color: "c4", dy: -10, font: "12px sans-serif" });
+      d.line(tg, 0, tg, gn, { color: "c4", width: 1.5, dash: [3, 3] });
+      const du = gx * Math.cos(ang) + gy * Math.sin(ang);
+      d.point(tu, du, { r: 6, color: "c5" });
+      d.label(6, 14, "D_u f vs. angle of u", { px: true, color: "muted", font: "12px sans-serif" });
+      const th = Math.abs(((tu - tg + 540) % 360) - 180);
+      out.textContent = `∇f = (${gx.toFixed(3)}, ${gy.toFixed(3)})   ‖∇f‖ = ${gn.toFixed(3)}   u = (${Math.cos(ang).toFixed(3)}, ${Math.sin(ang).toFixed(3)})\n` +
+        `D_u f = ∇f·u = ${du.toFixed(3)}  =  ‖∇f‖ cos θ = ${gn.toFixed(3)} × cos ${th.toFixed(1)}°` + (th < 3 ? "   ← steepest ascent" : th > 177 ? "   ← steepest descent" : Math.abs(th - 90) < 3 ? "   ← along the contour" : "");
+    });
+  }
+
+  // ---------- fig: gradient descent playground ----------
+  {
+    const S = {
+      bowl: { f: (x, y) => 0.5 * (x * x + y * y), g: (x, y) => [x, y], view: [-3, 3, -3, 3], start: [-2.5, 2], lr: 0.3, lev: [0.05, 0.2, 0.5, 1, 1.75, 2.75, 4, 5.5, 7.5], spf: 1, lmax: 1, name: "round bowl ½(x²+y²)" },
+      ravine: { f: (x, y) => 0.5 * (x * x + 10 * y * y), g: (x, y) => [x, 10 * y], view: [-3, 3, -3, 3], start: [-2.6, 1.2], lr: 0.15, lev: [0.05, 0.2, 0.5, 1, 2, 3.5, 5.5, 8, 12, 18, 26], spf: 1, lmax: 10, name: "ravine ½(x²+10y²)" },
+      rosen: { f: (x, y) => (1 - x) ** 2 + 100 * (y - x * x) ** 2, g: (x, y) => [-2 * (1 - x) - 400 * x * (y - x * x), 200 * (y - x * x)], view: [-2, 2, -1, 3], start: [-1.2, 1], lr: 0.001, lev: [0.3, 1, 3, 10, 30, 100, 300, 1000], spf: 25, lmax: null, name: "Rosenbrock", tf: v => Math.log(1 + v) },
+    };
+    let key = "bowl", lr = 0.3, path = [[-2.5, 2]], status = "";
+    const p = new Plot("#fig-gd", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const L = new Plot("#fig-gd-loss", { xmin: 0, xmax: 50, ymin: -12, ymax: 3 });
+    const out = ctl("out-gd");
+    const reset = (st) => { anim.stop(); path = [st || path[0] || S[key].start]; status = "ready: press play"; p.render(); };
+    const step = () => {
+      const s = S[key];
+      for (let k = 0; k < s.spf; k++) {
+        const [x, y] = path[path.length - 1], [gx, gy] = s.g(x, y), n = [x - lr * gx, y - lr * gy], fv = s.f(n[0], n[1]);
+        path.push(n);
+        if (!isFinite(fv) || fv > 1e8) { status = "DIVERGED: the steps grew without bound"; p.render(); return false; }
+        if (Math.hypot(gx, gy) < 1e-9 || fv < 1e-14) { status = `converged in ${path.length - 1} steps`; p.render(); return false; }
+        if (path.length > 6000) { status = "stopped after 6000 steps"; p.render(); return false; }
+      }
+      const m = path.length; status = "running…";
+      if (m > 6) { const a = path[m - 1], b = path[m - 2], c = path[m - 3]; if ((a[0] - b[0]) * (b[0] - c[0]) + (a[1] - b[1]) * (b[1] - c[1]) < 0) status = "running… (oscillating: successive steps point in opposite directions)"; }
+      p.render(); return true;
+    };
+    let last = 0; const anim = animator(() => { const t = performance.now(); if (t - last < (S[key].spf > 1 ? 16 : 90)) return true; last = t; return step(); });
+    const lrIn = slider("#ctl-gd", { label: "log₁₀ lr ", min: -4, max: 0.5, step: 0.01, value: Math.log10(0.3), digits: 2 }, v => { lr = 10 ** v; reset(path[0]); });
+    select("#ctl-gd", "surface ", Object.keys(S).map(k => [k, S[k].name]), k => { key = k; const v = S[k].view; p.setView(v[0], v[1], v[2], v[3], true); lr = S[k].lr; lrIn.set(Math.log10(lr)); path = []; reset(S[k].start); });
+    button("#ctl-gd", "play", () => { if (status.startsWith("DIVERGED") || status.startsWith("converged")) reset(path[0]); anim.start(); });
+    button("#ctl-gd", "step", () => { anim.stop(); step(); });
+    button("#ctl-gd", "reset", () => reset(path[0]));
+    p.onClick = (x, y) => reset([x, y]);
+    p.render(p => {
+      const s = S[key];
+      surface(p, s.f, s.lev, { tf: s.tf }); p.axes({ step: 1 });
+      if (s === S.rosen) p.point(1, 1, { r: 5, color: "c3", label: "min (1,1)" }); else p.point(0, 0, { r: 5, color: "c3" });
+      const vis = path.filter(q => Math.abs(q[0]) < 50 && Math.abs(q[1]) < 50);
+      p.path(vis, { color: "c2", width: 2 });
+      if (path.length < 300) vis.forEach(q => p.point(q[0], q[1], { r: 2.5, color: "c2" }));
+      p.point(path[0][0], path[0][1], { r: 6, color: "c4", stroke: "bg" });
+      const q = path[path.length - 1];
+      if (Math.abs(q[0]) < 50 && Math.abs(q[1]) < 50) p.point(q[0], q[1], { r: 5, color: "c2", stroke: "bg" });
+      p.label(8, 14, "click to set the start", { px: true, color: "fg", bg: true, font: "12px sans-serif" });
+      L.render();
+      const fv = s.f(q[0], q[1]);
+      out.textContent = `lr = ${lr.toPrecision(3)}` + (s.lmax ? `   (2/λmax = ${fmt(2 / s.lmax)})` : "   (near the min, 2/λmax ≈ 0.002)") + `   step ${path.length - 1}   x = (${fmt(q[0], 4)}, ${fmt(q[1], 4)})   f = ${isFinite(fv) ? fv.toExponential(3) : "∞"}\n${status}`;
+    });
+    L.render(L => {
+      const s = S[key], n = path.length, N = Math.max(50, n);
+      L.setView(-N * 0.08, N * 1.02, -13.5, 4.5);
+      for (let k = -12; k <= 4; k += 2) { L.line(0, k, N, k, { color: "grid", width: 1 }); L.label(0, k, "1e" + k, { align: "right", dx: -3, color: "muted", font: "10px sans-serif" }); }
+      L.line(0, -13.5, 0, 4.5, { color: "axis", width: 1 });
+      L.path(path.map((q, i) => [i, Math.max(-13, Math.min(4.4, Math.log10(Math.max(1e-20, s.f(q[0], q[1])))))]), { color: "c2", width: 2 });
+      L.label(N, -13.5, "iteration " + (n - 1), { align: "right", dy: -10, color: "muted", font: "11px sans-serif" });
+      L.label(372, 14, "loss f (log scale)", { px: true, align: "right", color: "muted", font: "12px sans-serif" });
+    });
+    reset(S.bowl.start);
+  }
+
+  // ---------- fig: second-order Taylor model & Hessian ----------
+  {
+    const f = (x, y) => 0.25 * x ** 4 - x * x + y * y + 0.5 * x * y;
+    const g = (x, y) => [x ** 3 - 2 * x + 0.5 * y, 2 * y + 0.5 * x];
+    const Hm = (x) => [[3 * x * x - 2, 0.5], [0.5, 2]];
+    const p = new Plot("#fig-taylor", { xmin: -2.8, xmax: 2.8, ymin: -2, ymax: 2, equal: true });
+    const P = { x: 1.5, y: -0.4, color: "fg", constrain: (x, y) => [Math.max(-2.5, Math.min(2.5, x)), Math.max(-1.8, Math.min(1.8, y))] };
+    const out = ctl("out-taylor");
+    const lev = [-1.2, -0.9, -0.6, -0.3, 0, 0.4, 0.8, 1.5, 2.5, 4, 6];
+    p.draggable([P]).render(p => {
+      p.grid({ step: 0.5 }).axes({ step: 1 });
+      p.contour(f, lev, { color: "muted", width: 1.3, res: 4 });
+      const x0 = P.x, y0 = P.y, f0 = f(x0, y0), [gx, gy] = g(x0, y0), H = Hm(x0);
+      const q = (x, y) => { const dx = x - x0, dy = y - y0; return f0 + gx * dx + gy * dy + 0.5 * (H[0][0] * dx * dx + 2 * H[0][1] * dx * dy + H[1][1] * dy * dy); };
+      const ql = [-1.5, -1, -0.6, -0.3, -0.1, 0.1, 0.3, 0.6, 1, 1.5].map(t => f0 + t);
+      p.contour(q, ql, { color: "c2", width: 1.8, res: 4 });
+      const { vals, vecs } = LA.eigSym2(H);
+      vals.forEach((l, i) => { const s = 0.25 * Math.min(4, Math.abs(l)) + 0.15, v = vecs[i], c = l > 0 ? "c3" : "c4"; p.arrow(x0, y0, x0 + s * v[0], y0 + s * v[1], { color: c, width: 3, head: 9 }); p.arrow(x0, y0, x0 - s * v[0], y0 - s * v[1], { color: c, width: 3, head: 9 }); });
+      p.drawHandles();
+      const kind = vals[1] > 0 ? "bowl (both eigenvalues > 0)" : vals[0] < 0 ? "dome" : "saddle (eigenvalues of mixed sign)";
+      out.textContent = `point (${x0.toFixed(2)}, ${y0.toFixed(2)})   ∇f = (${gx.toFixed(2)}, ${gy.toFixed(2)})\n` +
+        `H = [[${H[0][0].toFixed(2)}, ${H[0][1]}], [${H[1][0]}, ${H[1][1]}]]   eigenvalues ${vals[0].toFixed(3)}, ${vals[1].toFixed(3)}   → local model is a ${kind}`;
+    });
+  }
+
+  // ---------- fig: condition number & learning-rate bound ----------
+  {
+    let kappa = 10, r = 0.85;
+    const p = new Plot("#fig-cond", { xmin: -3.2, xmax: 3.2, ymin: -1.6, ymax: 1.6, equal: true });
+    const q = new Plot("#fig-cond-rate", { xmin: -0.15, xmax: 1.25, ymin: -0.22, ymax: 1.75 });
+    const out = ctl("out-cond");
+    slider("#ctl-cond", { label: "κ = λmax/λmin ", min: 1, max: 50, step: 1, value: 10, digits: 0 }, v => { kappa = v; p.render(); });
+    slider("#ctl-cond", { label: "lr × λmax/2 ", min: 0.02, max: 1.15, step: 0.01, value: 0.85 }, v => { r = v; p.render(); });
+    p.render(p => {
+      const f = (x, y) => 0.5 * (x * x + kappa * y * y), eta = 2 * r / kappa;
+      p.field((x, y) => Math.log(1 + f(x, y)), { cmap: "seq", res: 4, alpha: .6 });
+      p.contour(f, [0.05, 0.2, 0.5, 1, 2, 3.5, 5], { color: "muted", width: 1, res: 4 });
+      p.axes({ step: 1 });
+      let x = -2.8, y = 1.0; const pts = [[x, y]];
+      for (let k = 0; k < 40; k++) { x -= eta * x; y -= eta * kappa * y; pts.push([x, y]); if (Math.abs(y) > 50) break; }
+      p.path(pts, { color: "c2", width: 2 }); pts.forEach(t => p.point(t[0], t[1], { r: 2.5, color: "c2" }));
+      p.point(-2.8, 1, { r: 5, color: "c4" });
+      q.render();
+      const fx = Math.abs(1 - eta), fy = Math.abs(1 - eta * kappa), rate = Math.max(fx, fy), opt = kappa / (kappa + 1);
+      out.textContent = `η = ${eta.toPrecision(3)}   factor along x (λ=1): ${fx.toFixed(3)}   along y (λ=${kappa}): ${fy.toFixed(3)}   → rate ${rate.toFixed(3)}` +
+        (rate >= 1 ? "   DIVERGES" : `   (${Math.ceil(Math.log(1e-6) / Math.log(rate))} steps per 10⁶)`) +
+        `\nbest: η* = 2/(λmin+λmax) = ${(2 / (1 + kappa)).toPrecision(3)}  (slider ${opt.toFixed(2)})   rate (κ−1)/(κ+1) = ${((kappa - 1) / (kappa + 1)).toFixed(3)}`;
+    });
+    q.render(q => {
+      q.grid({ step: 0.25, stepY: 0.25 });
+      q.line(0, 0, 1.25, 0, { color: "axis", width: 1 }); q.line(0, 0, 0, 1.6, { color: "axis", width: 1 });
+      [0, 0.25, 0.5, 0.75, 1].forEach(t => q.label(t, 0, String(t), { align: "center", dy: 10, color: "muted", font: "11px sans-serif" }));
+      [0.5, 1, 1.5].forEach(t => q.label(0, t, String(t), { align: "right", dx: -3, color: "muted", font: "11px sans-serif" }));
+      q.line(0, 1, 1.25, 1, { color: "bad", width: 1, dash: [4, 4] });
+      q.fn(s => Math.abs(1 - 2 * s / kappa), { color: "c3", width: 1.8, xmin: 0, xmax: 1.25 });
+      q.fn(s => Math.abs(1 - 2 * s), { color: "c4", width: 1.8, xmin: 0, xmax: 1.25 });
+      q.fn(s => Math.max(Math.abs(1 - 2 * s / kappa), Math.abs(1 - 2 * s)), { color: "fg", width: 3.5, alpha: .35, xmin: 0, xmax: 1.25 });
+      const opt = kappa / (kappa + 1);
+      q.line(opt, 0, opt, (kappa - 1) / (kappa + 1), { color: "c5", width: 1, dash: [3, 3] });
+      q.label(opt, (kappa - 1) / (kappa + 1), "best", { color: "c5", align: "center", dy: -12, font: "11px sans-serif" });
+      q.line(1, 0, 1, 1.75, { color: "bad", width: 1, dash: [2, 3] }); q.label(1.02, 1.42, "2/λmax", { color: "bad", font: "11px sans-serif" });
+      q.line(r, 0, r, 1.75, { color: "c2", width: 2 });
+      q.label(52, 14, "shrink factor |1 − ηλ| per step", { px: true, color: "muted", font: "12px sans-serif" });
+      q.label(52, 32, "λmin = 1", { px: true, color: "c3", font: "12px sans-serif" }); q.label(120, 32, "λmax = κ", { px: true, color: "c4", font: "12px sans-serif" });
+      q.label(1.23, 0, "lr × λmax/2", { align: "right", dy: 22, color: "muted", font: "11px sans-serif" });
+    });
+  }
+
+  // ---------- fig: saddles and local minima ----------
+  {
+    const S = {
+      saddle: { f: (x, y) => 0.5 * x * x + 0.25 * y ** 4 - 0.5 * y * y, g: (x, y) => [x, y ** 3 - y], H: (x, y) => [[1, 0], [0, 3 * y * y - 1]], lev: [-0.22, -0.15, -0.08, 0, 0.15, 0.4, 0.8, 1.4, 2.2, 3.2], name: "saddle ½x² + ¼y⁴ − ½y²" },
+      valleys: { f: (x, y) => (x * x - 1) ** 2 + 0.5 * y * y + 0.3 * x, g: (x, y) => [4 * x * (x * x - 1) + 0.3, y], H: (x, y) => [[12 * x * x - 4, 0], [0, 1]], lev: [-0.25, -0.1, 0.1, 0.3, 0.6, 1, 1.6, 2.4, 3.5, 5], name: "two valleys" },
+    };
+    let key = "saddle", balls = [], snap = false;
+    const p = new Plot("#fig-crit", { xmin: -2.4, xmax: 2.4, ymin: -1.8, ymax: 1.8, equal: true });
+    const out = ctl("out-crit"); const R = Course.rng(3);
+    const anim = animator(() => { let moving = false; const s = S[key]; for (const b of balls) { if (b.done) continue; for (let k = 0; k < 2; k++) { const q = b.path[b.path.length - 1], [gx, gy] = s.g(q[0], q[1]); b.path.push([q[0] - 0.05 * gx, q[1] - 0.05 * gy]); if (Math.hypot(gx, gy) < 1e-7 || b.path.length > 1500) { b.done = true; break; } } moving = moving || !b.done; } p.render(); return moving; });
+    const drop = (x, y) => { balls.push({ path: [[x, y]], done: false }); anim.start(); };
+    select("#ctl-crit", "landscape ", Object.keys(S).map(k => [k, S[k].name]), k => { key = k; balls = []; p.render(); });
+    checkbox("ctl-crit", "snap to y = 0", v => snap = v);
+    button("#ctl-crit", "drop 40 balls", () => { for (let i = 0; i < 40; i++) balls.push({ path: [[R.uniform(-2.2, 2.2), R.uniform(-1.6, 1.6)]], done: false }); anim.start(); });
+    button("#ctl-crit", "clear", () => { balls = []; p.render(); });
+    p.onClick = (x, y) => drop(x, snap ? 0 : y);
+    p.render(p => {
+      const s = S[key];
+      surface(p, s.f, s.lev); p.axes({ step: 1 });
+      if (key === "saddle") { p.point(0, 0, { r: 5, color: "c4", label: "saddle" }); p.point(0, 1, { r: 5, color: "c3", label: "min" }); p.point(0, -1, { r: 5, color: "c3", label: "min" }); }
+      else { p.point(-1.036, 0, { r: 5, color: "c3", label: "global min" }); p.point(0.96, 0, { r: 5, color: "c6", label: "local min" }); p.point(0.075, 0, { r: 5, color: "c4", label: "saddle" }); }
+      for (const b of balls) {
+        const q = b.path[b.path.length - 1];
+        const col = key === "valleys" ? (q[0] < 0 ? "c3" : "c6") : (Math.abs(q[1]) < 0.05 ? "c4" : "c2");
+        p.path(b.path, { color: col, width: 1.6, alpha: .8 });
+        p.point(b.path[0][0], b.path[0][1], { r: 3, color: col, alpha: .6 });
+        p.point(q[0], q[1], { r: 4.5, color: col, stroke: "bg" });
+      }
+      const last = balls[balls.length - 1];
+      if (last) {
+        const q = last.path[last.path.length - 1], [gx, gy] = s.g(q[0], q[1]), ev = LA.eigSym2(s.H(q[0], q[1])).vals;
+        out.textContent = `last ball: step ${last.path.length - 1}   at (${q[0].toFixed(4)}, ${q[1].toFixed(4)})   ‖∇f‖ = ${Math.hypot(gx, gy).toExponential(2)}   Hessian eigenvalues ${ev[0].toFixed(2)}, ${ev[1].toFixed(2)}` +
+          (Math.hypot(gx, gy) < 1e-4 ? (ev[1] > 0 ? "  → minimum" : "  → saddle!") : "") +
+          (key === "valleys" && balls.length > 1 ? `\n${balls.filter(b => b.path[b.path.length - 1][0] < 0).length} balls in the global-min basin, ${balls.filter(b => b.path[b.path.length - 1][0] >= 0).length} in the local one` : "");
+      } else out.textContent = "click on the landscape to drop a ball";
+    });
+  }
+});
+</script>
+</body>
+</html>

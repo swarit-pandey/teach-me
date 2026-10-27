@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probability & random variables</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="08">
+<main>
+
+<div class="kicker">Part 3 · Probability &amp; statistics</div>
+<h1>Probability &amp; random variables</h1>
+<p class="lede">A language model never says "the next word is <em>mat</em>". It says "<em>mat</em> with probability 0.48, <em>floor</em> with 0.21, …" and then rolls a die. To understand what a model outputs, how it is trained, and how it generates text, you need the language of probability. This lesson builds it from one picture: probability is area.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Describe an experiment by its sample space and events, and compute probabilities by counting area.</li>
+    <li>Explain conditional probability as "shrinking the world to B and renormalizing", and test events for independence.</li>
+    <li>Apply Bayes' rule with natural frequencies, and explain why a positive test for a rare disease usually means you are healthy.</li>
+    <li>Work with PMFs, CDFs and densities, including the Bernoulli, binomial and categorical distributions.</li>
+    <li>Sample from any discrete distribution with one uniform random number (exactly what an LLM does for every token).</li>
+    <li>State the law of large numbers and use it for Monte Carlo estimation.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="space">1. Sample spaces, events and probability as area</h2>
+<p>Every probability question starts with an <b>experiment</b>: roll two dice, flip a coin ten times, let a model pick the next token. The set of all possible outcomes is the <b>sample space</b> $\Omega$ (omega). For two dice,</p>
+$$\Omega = \{(1,1), (1,2), \dots, (6,6)\}, \qquad |\Omega| = 36.$$
+<p>An <b>event</b> is any subset of $\Omega$: a yes/no question about the outcome. "The sum is 7" is the event $\{(1,6),(2,5),(3,4),(4,3),(5,2),(6,1)\}$. A <b>probability</b> $P$ assigns each event a number, following three rules (Kolmogorov's axioms):</p>
+<ol>
+  <li>$P(A) \ge 0$ for every event $A$.</li>
+  <li>$P(\Omega) = 1$: something happens.</li>
+  <li>If $A$ and $B$ are <b>disjoint</b> (can't both happen), $P(A \cup B) = P(A) + P(B)$.</li>
+</ol>
+<p>That's all. Think of $\Omega$ as a square of total area 1, and $P(A)$ as the area of region $A$. The rules say area is non-negative, the whole square has area 1, and areas of non-overlapping regions add. When all outcomes are equally likely, as with fair dice, area is just counting:</p>
+$$P(A) = \frac{|A|}{|\Omega|}.$$
+<p>Two consequences fall straight out of the axioms. The <b>complement</b> "not $A$", written $A^c$, is disjoint from $A$ and together they make $\Omega$, so $P(A^c) = 1 - P(A)$. And for overlapping events, adding the two areas counts the overlap twice, so you subtract it once (<b>inclusion–exclusion</b>):</p>
+$$P(A \cup B) = P(A) + P(B) - P(A \cap B).$$
+
+<div class="figure">
+  <canvas id="fig-dice" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-dice"></div>
+  <div class="readout" id="out-dice"></div>
+  <div class="caption"><b>Try it:</b> each cell is one of the 36 outcomes (the number in it is the sum). Pick events <span style="color:var(--c1)">A</span> and <span style="color:var(--c2)">B</span>. Their overlap $A\cap B$ is shaded <span style="color:var(--c5)">purple</span>. Choose "custom" and click cells to build your own event. Then tick <b>condition on B</b>: everything outside B greys out, and $P(A\mid B)$ is the share of B that A covers (section 2). Finally, find a pair where the bars on the right have equal length. Those events are <em>independent</em> (section 3).</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="conditional">2. Conditional probability: shrinking the world</h2>
+<p>You roll two dice but only see the first one: it's a 6. What's the probability the sum is at least 9? Your knowledge changed, so the probability should change too.</p>
+<p>Here's the reasoning, step by step. Learning "B happened" (first die is 6) does two things:</p>
+<ol>
+  <li>Outcomes outside $B$ become impossible. Delete them.</li>
+  <li>Outcomes inside $B$ keep their <em>relative</em> likelihoods. Nothing you learned favours $(6,3)$ over $(6,1)$.</li>
+</ol>
+<p>So the new probability of an outcome inside $B$ is its old probability scaled up by a constant, chosen so that the total is 1 again. The surviving area is $P(B)$, so the constant is $1/P(B)$. The part of $A$ that survives is $A\cap B$. Therefore:</p>
+$$\boxed{\;P(A \mid B) = \frac{P(A \cap B)}{P(B)}\;}\qquad (P(B) > 0)$$
+<p>Read "$P(A\mid B)$" as "probability of $A$ given $B$". Geometrically it is <b>the fraction of B's area that A covers</b>. In the dice figure, condition on "first die is 6": B is the rightmost column of 6 cells, and 4 of them have sum $\ge 9$, so $P(A\mid B) = 4/6 \approx 0.667$, up from $P(A) = 10/36 \approx 0.278$.</p>
+<p>Rearranging gives the <b>product rule</b>, which is how you compute joint probabilities in practice:</p>
+$$P(A \cap B) = P(A \mid B)\,P(B) = P(B \mid A)\,P(A).$$
+<p>Apply it repeatedly and you get the <b>chain rule of probability</b>:</p>
+$$P(x_1, x_2, \dots, x_n) = P(x_1)\,P(x_2 \mid x_1)\,P(x_3 \mid x_1, x_2)\cdots P(x_n \mid x_1,\dots,x_{n-1}).$$
+
+<div class="callout ml">
+<p>The chain rule is the entire design of GPT-style language models. The probability of a sentence is a product of next-token probabilities, each conditioned on everything before it. A model that can output $P(\text{next token} \mid \text{previous tokens})$ therefore defines a probability for every possible text. You'll build one in lesson 24, and training it means making these conditional probabilities large on real text (lessons 10 and 11).</p>
+</div>
+
+<p>One more tool. If events $B_1, \dots, B_k$ split $\Omega$ into non-overlapping pieces, then $A$ is split into the pieces $A\cap B_i$, and the areas add. With the product rule, that gives the <b>law of total probability</b>:</p>
+$$P(A) = \sum_i P(A \mid B_i)\,P(B_i).$$
+<p>"Average the conditional probabilities, weighted by how likely each case is." You'll use it in Bayes' rule in a moment.</p>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Two dice. Let $A$ = "sum is 7", $B$ = "first die is 3". Then $A\cap B = \{(3,4)\}$, a single cell, so $P(A\cap B) = 1/36$. $B$ is one column: $P(B) = 6/36$. So</p>
+  $$P(A\mid B) = \frac{1/36}{6/36} = \frac16.$$
+  <p>Unconditionally, $P(A) = 6/36 = 1/6$ too. Knowing the first die is 3 told you <em>nothing</em> about whether the sum is 7, because whatever the first die shows, exactly one value of the second die makes 7. Hold that thought.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="independence">3. Independence</h2>
+<p>Events $A$ and $B$ are <b>independent</b> when learning one doesn't change the probability of the other: $P(A\mid B) = P(A)$. Substitute the definition of conditional probability and multiply through by $P(B)$ to get the symmetric form most people use:</p>
+$$A, B \text{ independent} \iff P(A\cap B) = P(A)\,P(B).$$
+<p>In the area picture: A occupies the same <em>fraction</em> of B as it does of the whole square. In the dice figure, "first die even" and "sum is 7" are independent: $P(A\cap B) = 3/36 = \tfrac12\cdot\tfrac16$. "Sum $\ge 9$" and "first die is 6" are not.</p>
+
+<div class="callout warning">
+<p><b>Disjoint is not independent.</b> In fact it's the opposite. If $A$ and $B$ can't both happen and each has positive probability, then learning $B$ happened tells you $A$ <em>definitely didn't</em>: $P(A\mid B) = 0 \ne P(A)$. Disjoint events with positive probability are always dependent.</p>
+</div>
+
+<p>Independence is what lets you multiply. Flip a fair coin 10 times and the probability of one specific sequence, like HHTHTTTHHT, is $(1/2)^{10}$, because the flips are independent. Machine learning leans on this hard. Training data is assumed to be <b>i.i.d.</b> (independent and identically distributed), so the probability of the whole dataset is a product of per-example probabilities. Take the log, and that product becomes the sum you minimize as a loss (lesson 10).</p>
+
+<!-- ============================================================ -->
+<h2 id="bayes">4. Bayes' rule with 1000 people</h2>
+<p>The product rule says $P(A\mid B)P(B) = P(B\mid A)P(A)$. Divide by $P(B)$ and you have <b>Bayes' rule</b>, the formula for flipping a conditional around:</p>
+$$\boxed{\;P(H \mid E) = \frac{P(E \mid H)\,P(H)}{P(E)}\;} \qquad P(E) = P(E\mid H)P(H) + P(E\mid H^c)P(H^c).$$
+<p>Read $H$ as a hypothesis and $E$ as evidence. The names matter, because you'll use them for the rest of the course:</p>
+<table>
+  <tr><th>Term</th><th>Symbol</th><th>Meaning</th></tr>
+  <tr><td>Prior</td><td>$P(H)$</td><td>how plausible $H$ was before the evidence</td></tr>
+  <tr><td>Likelihood</td><td>$P(E\mid H)$</td><td>how well $H$ predicts the evidence</td></tr>
+  <tr><td>Evidence</td><td>$P(E)$</td><td>total probability of the evidence, under every hypothesis (law of total probability)</td></tr>
+  <tr><td>Posterior</td><td>$P(H\mid E)$</td><td>how plausible $H$ is after the evidence</td></tr>
+</table>
+<p>The classic trap: a disease affects 1% of people. A test catches 90% of sick people (<b>sensitivity</b> $P(+\mid D) = 0.9$) and correctly clears 91% of healthy people (<b>specificity</b> $P(-\mid \text{healthy}) = 0.91$). You test positive. How worried should you be? Most people, including many doctors in published studies, answer "about 90%". The formula is easy to misapply, so don't start with it. Count people instead.</p>
+
+<div class="figure">
+  <canvas id="fig-bayes" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-bayes"></div>
+  <div class="readout" id="out-bayes"></div>
+  <div class="caption"><b>Try it:</b> each square is one of 1000 people. Tick <b>show only positive tests</b>: that's conditioning on the evidence. The bar at the bottom shows who is left: the posterior is the <span style="color:var(--c4)">pink</span> fraction. Now drag the prevalence up to 20% and watch the posterior climb, even though the test hasn't changed. Then put prevalence back to 1% and raise the specificity to 99.5%. Which slider matters most for a rare disease?</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: the medical test</div>
+  <p>Of 1000 people, $1000 \times 0.01 = 10$ are sick and 990 are healthy.</p>
+  <p>Sick and positive (true positives): $10 \times 0.9 = 9$. Healthy but positive (false positives): $990 \times (1-0.91) = 89.1$.</p>
+  <p>Among everyone who tests positive, the sick fraction is</p>
+  $$P(D\mid +) = \frac{9}{9 + 89.1} \approx 0.092.$$
+  <p>About 9%, not 90%. The test is good, but the healthy group is 99 times larger, so its 9% false-positive rate still produces ten times more positives than the sick group does. The same calculation in Bayes form is $\frac{0.9 \times 0.01}{0.9\times0.01 + 0.09\times0.99}$. It's identical, just with every count divided by 1000.</p>
+</div>
+
+<div class="callout intuition">
+<p>The base rate is evidence too. A posterior blends what you knew (the prior) with what you saw (the likelihood). When the prior is extreme, it takes strong evidence to overcome it. A second, independent positive test takes the posterior to about 50% (problem 8). Each test's posterior becomes the next test's prior. That is <b>Bayesian updating</b>, and you'll do it continuously for a coin's bias in lesson 10.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rv">5. Random variables, PMFs and CDFs</h2>
+<p>Events are yes/no questions. Usually you want a number: the sum of the dice, the number of heads, the index of the sampled token. A <b>random variable</b> $X$ is a function from outcomes to numbers, $X: \Omega \to \mathbb{R}$. "Sum of two dice" maps $(3,4) \mapsto 7$. Despite the name, nothing about $X$ is random. The randomness lives in which outcome occurs; $X$ just reads off a number.</p>
+<p>A <b>discrete</b> random variable takes countably many values. Its <b>probability mass function</b> (PMF) gives the probability of each value:</p>
+$$p_X(x) = P(X = x), \qquad p_X(x) \ge 0, \qquad \sum_x p_X(x) = 1.$$
+<p>Its <b>cumulative distribution function</b> (CDF) accumulates the PMF from the left:</p>
+$$F_X(x) = P(X \le x) = \sum_{x' \le x} p_X(x').$$
+<p>The CDF is a staircase that climbs from 0 to 1. It jumps at each possible value, by exactly that value's probability. It never decreases.</p>
+
+<h3>Three distributions to know</h3>
+<p><b>Bernoulli($p$)</b>: one yes/no trial. $X = 1$ with probability $p$, else $0$. A coin flip, a click/no-click, "is this email spam".</p>
+<p><b>Binomial($n, p$)</b>: the number of successes in $n$ independent Bernoulli($p$) trials. The PMF comes from two observations:</p>
+<ul>
+  <li>Any <em>specific</em> sequence with $k$ successes and $n-k$ failures (like SSFSF…) has probability $p^k (1-p)^{n-k}$, because the trials are independent and you multiply.</li>
+  <li>There are $\binom{n}{k} = \frac{n!}{k!\,(n-k)!}$ such sequences: choose which $k$ of the $n$ positions are successes. They are disjoint, so their probabilities add.</li>
+</ul>
+$$P(X = k) = \binom{n}{k}\, p^k (1-p)^{n-k}, \qquad k = 0, 1, \dots, n.$$
+<p><b>Categorical($\pi_1,\dots,\pi_K$)</b>: one draw from $K$ labelled outcomes with probabilities $\pi_i$ that sum to 1. Bernoulli is the $K=2$ case. This is the distribution an LLM outputs, so it gets its own section next.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-pmf" width="400" height="320"></canvas></div>
+    <div><canvas id="fig-cdf" width="400" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-pmf"></div>
+  <div class="readout" id="out-pmf"></div>
+  <div class="caption"><b>Try it:</b> left is the PMF, right is the CDF. Drag the <span style="color:var(--c2)">orange handle</span> along the CDF's x-axis. The PMF bars at or left of it turn orange, and their total is exactly the height of the CDF there. For the binomial, slide $p$ and $n$: the hump sits near $np$ and gets wider as $n$ grows. Note where the CDF jumps (at each value) and where it is flat (between values).</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Flip a fair coin 4 times. What's the probability of exactly 2 heads? $X\sim\text{Binomial}(4, \tfrac12)$:</p>
+  $$P(X=2) = \binom42 \left(\tfrac12\right)^2\left(\tfrac12\right)^2 = 6 \cdot \tfrac1{16} = 0.375.$$
+  <p>Check by listing: HHTT, HTHT, HTTH, THHT, THTH, TTHH. That's 6 of the 16 equally likely sequences. And $P(X \le 1) = F(1) = \binom40/16 + \binom41/16 = 5/16$.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="categorical">6. The categorical distribution: how an LLM picks a token</h2>
+<p>At every step, a language model's final layer outputs one number per vocabulary entry (50,257 of them for GPT-2), called <b>logits</b>. A softmax (lesson 14) turns logits into a categorical distribution $\pi$ over the vocabulary. Then the model <b>samples</b> from it. How do you sample from an arbitrary categorical using only a random number generator that gives uniform numbers in $[0, 1)$?</p>
+<p>Lay the probabilities end to end along $[0,1]$: token 1 gets $[0, \pi_1)$, token 2 gets $[\pi_1, \pi_1+\pi_2)$, and so on. The breakpoints are the CDF values $F_1, F_2, \dots, F_K = 1$. Draw $u \sim \text{Uniform}[0,1)$ and return the token whose segment $u$ lands in:</p>
+$$\text{return the smallest } i \text{ with } u \lt F_i.$$
+<p>Why it's correct: a uniform $u$ lands in an interval with probability equal to the interval's length, and token $i$'s interval has length $F_i - F_{i-1} = \pi_i$. This is <b>inverse-CDF sampling</b>. It works for any distribution whose CDF you can invert, including continuous ones (section 7).</p>
+
+<div class="figure">
+  <canvas id="fig-cat" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-cat"></div>
+  <div class="readout" id="out-cat"></div>
+  <div class="caption"><b>Try it:</b> press <b>sample 1</b> a few times. Watch $u$ land on the strip and pick the token whose segment it hits. Then press <b>sample 100</b> repeatedly: the solid bars (fraction of your samples) converge to the outlined bars (the model's probabilities). Now move the <b>temperature</b>, which divides the logits before the softmax. Low temperature makes the model nearly greedy; high temperature flattens the distribution toward uniform. Lesson 25 covers temperature, top-k and nucleus sampling.</div>
+</div>
+
+<div class="callout ml">
+<p>"Generating text" is just this loop: compute logits, softmax into a categorical, draw $u$, look up the token, append it, repeat. All of a model's creativity and variety comes from that one uniform random number per token. Set temperature to 0 (always take the most likely token, called <em>greedy decoding</em>) and the same prompt always gives the same output.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="continuous">7. Continuous random variables and densities</h2>
+<p>Some quantities vary continuously: a height, a model weight, the time until a server request arrives. For these, any <em>exact</em> value has probability zero. The chance a height is exactly 1.7500000… m is nil. So instead of a mass at each point, a continuous random variable has a <b>probability density function</b> (PDF) $f(x)$, and probabilities are <em>areas under it</em>:</p>
+$$P(a \le X \le b) = \int_a^b f(x)\,dx, \qquad f(x)\ge 0, \qquad \int_{-\infty}^{\infty} f(x)\,dx = 1.$$
+<p>The CDF is the same idea as before, with the sum replaced by an integral: $F(x) = P(X\le x) = \int_{-\infty}^x f(t)\,dt$. By the fundamental theorem of calculus (lesson 05), $f = F'$. <b>Density is the rate at which probability accumulates.</b></p>
+
+<div class="callout warning">
+<p><b>A density is not a probability</b> and can be larger than 1. Uniform on $[0, 0.5]$ has $f(x) = 2$ on that interval: the area is $0.5 \times 2 = 1$, as required. The units of $f$ are "probability per unit of $x$". Only $f(x)\,dx$, the area of a thin sliver, is a probability.</p>
+</div>
+
+<p>Two densities to know now (the Gaussian gets a full treatment in lesson 09):</p>
+<ul>
+  <li><b>Uniform$(a,b)$</b>: $f(x) = \frac{1}{b-a}$ on $[a,b]$. Every equal-width sub-interval is equally likely.</li>
+  <li><b>Exponential$(\lambda)$</b>: $f(x) = \lambda e^{-\lambda x}$ for $x\ge0$, the waiting time between random events. Its CDF is $F(x) = 1 - e^{-\lambda x}$, and inverting it gives a sampler: $X = -\ln(1-u)/\lambda$ with $u$ uniform. That is inverse-CDF sampling again, now in its continuous form.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-dens" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-dens"></div>
+  <div class="readout" id="out-dens"></div>
+  <div class="caption"><b>Try it:</b> drag the two <span style="color:var(--c2)">orange handles</span>. The shaded area is $P(a\le X\le b)$, and the readout compares it to the fraction of simulated samples that fell in $[a,b]$. Raise the number of samples and the number of bins together: the normalized histogram turns into the density curve. That's what a density <em>is</em>, the limit of a histogram. Switch to Uniform[0, 0.5] to see a density of 2.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Server requests arrive with exponential waiting times, $\lambda = 1$ per second. What's the probability the next one arrives between 1 and 2 seconds from now?</p>
+  $$P(1\le X\le 2) = F(2) - F(1) = (1-e^{-2}) - (1-e^{-1}) = e^{-1} - e^{-2} \approx 0.3679 - 0.1353 = 0.2325.$$
+  <p>Set the handles to 1 and 2 in the figure (with the exponential selected) to check.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="lln">8. The law of large numbers and Monte Carlo</h2>
+<p>What does "$P(\text{heads}) = 0.3$" even mean? The frequentist answer: flip many times, and the fraction of heads settles down to 0.3. The <b>law of large numbers</b> (LLN) makes this precise. If $X_1, X_2, \dots$ are i.i.d. with mean $\mu$ (the long-run average value, defined properly as the <em>expectation</em> in lesson 09), then the running average</p>
+$$\bar X_n = \frac{1}{n}\sum_{i=1}^n X_i \;\longrightarrow\; \mu \quad\text{as } n\to\infty.$$
+<p>Fluctuations don't disappear; they get <em>diluted</em>. A run of five sixes moves the average a lot after 10 rolls and barely at all after 10,000. The typical distance from $\mu$ shrinks like $\sigma/\sqrt{n}$, where $\sigma$ measures the spread of a single roll. Lesson 09 derives this. The square root is a hard law of nature: <b>10× more accuracy costs 100× more samples.</b></p>
+
+<div class="figure">
+  <canvas id="fig-lln" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-lln"></div>
+  <div class="readout" id="out-lln"></div>
+  <div class="caption"><b>Try it:</b> press <b>play</b>. Five independent experiments roll a fair die and track their running average (the x-axis is logarithmic: 1, 10, 100, 1000 rolls). Early on the paths swing wildly; later they all squeeze toward 3.5, staying mostly inside the dashed $\mu \pm \sigma/\sqrt{n}$ funnel. Switch to the biased coin: the running average of 0/1 outcomes is the <em>fraction</em> of heads, converging to $p = 0.3$.</div>
+</div>
+
+<p>Turned around, the LLN is a computational tool: <b>Monte Carlo estimation</b>. To find the probability of a complicated event, simulate the experiment many times and count. To compute an average, take samples and average them. Here's a famous example. Throw $n$ random points into the unit square. The fraction landing inside the quarter circle $x^2+y^2\lt 1$ estimates its area, $\pi/4$. You'll do exactly this in the workbook, and compare simulated dice probabilities with exact counts.</p>
+
+<div class="callout ml">
+<p>Every training step in deep learning is a Monte Carlo estimate. The true loss is an average over all possible data. You can't compute it, so you average over a random minibatch of 32 or 1024 examples. That average is noisy but unbiased, with noise shrinking like $1/\sqrt{\text{batch size}}$ (lesson 18). Policy gradients in RL (lesson 27) estimate expected reward from sampled rollouts in exactly the same way.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+<p>Pencil first. Every answer box accepts arithmetic, so you can type <code>5/36</code>.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Two fair dice. What is the probability that the sum is 8?</p>
+<div class="numcheck" data-answer="0.138889"></div>
+<details class="solution"><summary>Solution</summary>
+<p>The outcomes are $(2,6),(3,5),(4,4),(5,3),(6,2)$: 5 of 36. $P = 5/36 \approx 0.1389$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Roll one die 4 times. What is the probability of at least one six?</p>
+<div class="numcheck" data-answer="0.517747"></div>
+<details class="hint"><summary>Hint</summary><p>"At least one" is messy (one six, two sixes, …). Its complement "no sixes" is easy, and the rolls are independent.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$P(\text{no six}) = (5/6)^4 \approx 0.4823$, so $P(\text{at least one}) = 1 - (5/6)^4 \approx 0.5177$. This was the 17th-century gambling bet that started probability theory (the Chevalier de Méré's problem).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>A disease has prevalence 2%. The test has sensitivity 95% and specificity 90%. You test positive. What is $P(\text{disease}\mid +)$?</p>
+<div class="numcheck" data-answer="0.162393"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Out of 1000 people: 20 sick, and 19 of them test positive. 980 healthy, and 10% of them (98) test positive anyway. $P = 19/(19+98) = 19/117 \approx 0.1624$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>(a) Show that for two dice, $A$ = "first die is even" and $B$ = "sum is 7" are independent. (b) Prove that if $A$ and $B$ are independent, so are $A$ and $B^c$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $P(A) = 18/36 = 1/2$ and $P(B) = 6/36 = 1/6$. $A\cap B = \{(2,5),(4,3),(6,1)\}$, so $P(A\cap B) = 3/36 = 1/12 = P(A)P(B)$. ✓</p>
+<p>(b) $A$ splits into the disjoint pieces $A\cap B$ and $A\cap B^c$, so $P(A\cap B^c) = P(A) - P(A\cap B) = P(A) - P(A)P(B) = P(A)(1-P(B)) = P(A)P(B^c)$. $\blacksquare$ Knowing that B <em>didn't</em> happen tells you nothing either.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A model answers each question correctly with probability 0.3, independently. Out of 10 questions, what is the probability it gets exactly 3 right?</p>
+<div class="numcheck" data-answer="0.266828"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Binomial(10, 0.3): $\binom{10}{3}(0.3)^3(0.7)^7 = 120 \times 0.027 \times 0.0823543 \approx 0.2668$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>A model's next-token distribution over tokens 1–4 is $\pi = (0.5, 0.2, 0.2, 0.1)$. Using inverse-CDF sampling, which token does each of the uniforms $u = 0.12,\ 0.55,\ 0.71,\ 0.95$ produce? Enter four token numbers.</p>
+<div class="numcheck" data-answer="1,2,3,4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>The CDF breakpoints are $F = (0.5, 0.7, 0.9, 1.0)$. Return the first $i$ with $u\lt F_i$: $0.12\lt0.5 \to 1$; $0.55 \lt 0.7 \to 2$; $0.71\lt0.9 \to 3$; $0.95\lt1 \to 4$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>A random variable has density $f(x) = c\,x^2$ on $[0, 1]$ (and 0 elsewhere). Find $c$, and then $P(X \le 0.5)$. Enter both.</p>
+<div class="numcheck" data-answer="3,0.125"></div>
+<details class="solution"><summary>Solution</summary>
+<p>The total area must be 1: $\int_0^1 c x^2\,dx = c/3 = 1$, so $c = 3$. Then $F(x) = x^3$ on $[0,1]$, so $P(X\le 0.5) = 0.125$. Note $f(1) = 3 > 1$. Densities can exceed 1.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>Back to the worked example: prevalence 1%, sensitivity 90%, specificity 91%. You test positive, so your posterior is about 0.0917. You take a <em>second</em> test, whose result is independent of the first given your true disease status, and it's also positive. What is your posterior now?</p>
+<div class="numcheck" data-answer="0.502513"></div>
+<details class="hint"><summary>Hint</summary><p>Yesterday's posterior is today's prior. Apply Bayes again with prior $9/98.1$. Alternatively, apply Bayes once with likelihoods $0.9^2$ and $0.09^2$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Prior $q = 9/98.1 \approx 0.09174$. Then $P(D\mid ++) = \frac{0.9q}{0.9q + 0.09(1-q)} \approx 0.5025$. In one step: $\frac{0.81\times0.01}{0.81\times0.01 + 0.0081\times0.99} = \frac{0.0081}{0.0081+0.008019} \approx 0.5025$. Two positives get you to a coin flip. The order of the evidence doesn't matter, only the product of the likelihoods.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>Monte Carlo: you sample $(x, y)$ uniformly in the unit square and record whether $x^2 + y^2 \lt 1$. (a) What fraction of samples should land inside, in the limit? (b) Roughly how many more samples do you need to make the estimate of $\pi$ 10× more accurate?</p>
+<div class="numcheck" data-answer="0.785398"></div>
+<details class="solution"><summary>Solution</summary>
+<p>(a) The quarter disc has area $\pi/4 \approx 0.7854$, and for a uniform point in the unit square, probability equals area. So $4\times$(fraction inside) $\to \pi$. (b) The error shrinks like $1/\sqrt n$, so 10× accuracy needs 100× the samples. Monte Carlo is simple and works in any dimension, but it converges slowly.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">A spam filter flags 99% of spam. A defence lawyer argues: "so if an email is flagged, it's 99% likely to be spam." What's wrong?</div>
+  <div class="opts">
+    <button data-k="a">Nothing. That's what 99% sensitivity means.</button>
+    <button data-k="b">The figure should be 1%, the complement.</button>
+    <button data-k="c">It confuses $P(\text{flagged}\mid\text{spam})$ with $P(\text{spam}\mid\text{flagged})$. The second also depends on how common spam is and how often legitimate mail gets flagged.</button>
+    <button data-k="d">Probabilities about single emails are meaningless.</button>
+  </div>
+  <div class="explain">Bayes' rule: $P(S\mid F) = P(F\mid S)P(S)/P(F)$. Swapping a conditional is the most common probability error in the wild. It even has a name: the prosecutor's fallacy.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">A density function has $f(2) = 3.5$. What does this tell you?</div>
+  <div class="opts">
+    <button data-k="a">It's invalid: probabilities can't exceed 1.</button>
+    <button data-k="b">Near $x = 2$, probability is concentrated: $P(2 \le X \le 2+\delta) \approx 3.5\,\delta$ for small $\delta$.</button>
+    <button data-k="c">$P(X = 2) = 3.5$.</button>
+    <button data-k="d">$P(X \le 2) = 3.5$.</button>
+  </div>
+  <div class="explain">A density is probability per unit length. Only areas under it are probabilities, and the area of a thin sliver is height × width.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">$A$ and $B$ are disjoint events, each with probability 0.3. Are they independent?</div>
+  <div class="opts">
+    <button data-k="a">Yes: disjoint events never interact.</button>
+    <button data-k="b">Yes, because $P(A\cup B) = P(A)+P(B)$.</button>
+    <button data-k="c">You can't tell without more information.</button>
+    <button data-k="d">No: $P(A\cap B) = 0 \ne 0.09 = P(A)P(B)$.</button>
+  </div>
+  <div class="explain">If you learn $B$ happened, you know for certain that $A$ didn't. That's maximal dependence, not independence.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">A model's next-token probabilities are (0.6, 0.3, 0.1). It samples (not greedy) 1000 times from this same context. About how often does it emit the third token?</div>
+  <div class="opts">
+    <button data-k="a">About 100 times.</button>
+    <button data-k="b">Never: it always picks the most likely token.</button>
+    <button data-k="c">About 333 times, since each token gets a fair share.</button>
+    <button data-k="d">About 600 times.</button>
+  </div>
+  <div class="explain">Sampling from a categorical returns each token with its probability, and by the law of large numbers the fraction settles near 0.1. Only greedy decoding always picks token 1.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Picture</th></tr>
+  <tr><td>Probability</td><td>$P(A) = |A|/|\Omega|$ (equally likely)</td><td>area of a region in a unit square</td></tr>
+  <tr><td>Conditional</td><td>$P(A\mid B) = P(A\cap B)/P(B)$</td><td>fraction of B covered by A</td></tr>
+  <tr><td>Independence</td><td>$P(A\cap B) = P(A)P(B)$</td><td>A covers the same fraction of B as of everything</td></tr>
+  <tr><td>Bayes</td><td>$P(H\mid E) \propto P(E\mid H)P(H)$</td><td>keep only the people who match the evidence</td></tr>
+  <tr><td>PMF / CDF</td><td>$p(x) = P(X{=}x)$, $F(x) = P(X\le x)$</td><td>bars / staircase from 0 to 1</td></tr>
+  <tr><td>Binomial</td><td>$\binom nk p^k(1-p)^{n-k}$</td><td>count of successes in $n$ trials</td></tr>
+  <tr><td>Categorical sampling</td><td>smallest $i$ with $u \lt F_i$</td><td>drop $u$ on a strip of segments</td></tr>
+  <tr><td>Density</td><td>$P(a\le X\le b) = \int_a^b f$</td><td>area under a curve; $f$ can exceed 1</td></tr>
+  <tr><td>Law of large numbers</td><td>$\bar X_n \to \mu$, error $\sim \sigma/\sqrt n$</td><td>running averages squeezed into a funnel</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 08: build it</h3>
+  <p>Open <code>workbooks/08_probability_random_variables/exercises.py</code>. You'll compute exact dice probabilities by enumerating the sample space and check them against simulation. Then you'll write conditional probability and a Bayes posterior, the binomial PMF/CDF, and a categorical sampler that turns uniform random numbers into tokens via the inverse CDF (first with a loop, then vectorized with <code>np.searchsorted</code>). You'll finish with Monte Carlo estimates of π and running averages. Grade yourself with:</p>
+  <pre><code>./course check 08</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Joseph Blitzstein &amp; Jessica Hwang, <em>Introduction to Probability</em>, ch. 1–5 (free online; superb on conditioning).</li>
+  <li>Gerd Gigerenzer, <em>Calculated Risks</em>. The natural-frequency approach to Bayes, with the medical-test examples.</li>
+  <li>3Blue1Brown, <em>Bayes theorem, the geometry of changing beliefs</em> (video).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, LA, fmt } = Course;
+  const checkbox = (host, text, onChange) => {
+    const lab = document.createElement("label"), cb = document.createElement("input"); cb.type = "checkbox";
+    cb.addEventListener("change", () => onChange(cb.checked)); lab.append(cb, " " + text);
+    document.querySelector(host).appendChild(lab); return cb;
+  };
+  const SM = "12px -apple-system, Helvetica, sans-serif";
+
+  // ---------- fig: two dice, events, conditioning ----------
+  {
+    const custom = new Set([11, 22, 33, 44, 55, 66]);
+    const EV = {
+      sum7: ["sum is 7", (a, b) => a + b === 7],
+      sum9: ["sum ≥ 9", (a, b) => a + b >= 9],
+      even1: ["first die even", (a, b) => a % 2 === 0],
+      first6: ["first die is 6", (a, b) => a === 6],
+      first3: ["first die is 3", (a, b) => a === 3],
+      doubles: ["doubles", (a, b) => a === b],
+      second2: ["second die ≤ 2", (a, b) => b <= 2],
+      custom: ["custom (click cells)", (a, b) => custom.has(10 * a + b)],
+    };
+    const opts = Object.entries(EV).map(([k, v]) => [k, v[0]]);
+    let A = "sum9", B = "first6", cond = false;
+    const p = new Plot("#fig-dice", { xmin: -1.3, xmax: 13.2, ymin: -1.3, ymax: 7.1, equal: true });
+    const out = document.getElementById("out-dice");
+    const sA = select("#ctl-dice", "A: ", opts, v => { A = v; p.render(); }); sA.value = A;
+    const sB = select("#ctl-dice", "B: ", opts, v => { B = v; p.render(); }); sB.value = B;
+    checkbox("#ctl-dice", "condition on B", v => { cond = v; p.render(); });
+    p.onClick = (x, y) => {
+      const a = Math.floor(x) + 1, b = Math.floor(y) + 1; if (a < 1 || a > 6 || b < 1 || b > 6) return;
+      const k = 10 * a + b; custom.has(k) ? custom.delete(k) : custom.add(k);
+      if (A !== "custom" && B !== "custom") { A = "custom"; sA.value = "custom"; }
+      p.render();
+    };
+    const bar = (y, frac, num, den, text, col) => {
+      p.label(7.2, y + 0.75, text, { color: col, font: "600 13px -apple-system, Helvetica, sans-serif" });
+      p.rect(7.2, y, 12.2, y + 0.4, { fill: "muted", fillAlpha: .12, color: "muted", width: 1 });
+      if (frac > 0) p.rect(7.2, y, 7.2 + 5 * frac, y + 0.4, { fill: col, fillAlpha: .6, color: col, width: 1 });
+      p.label(12.2, y - 0.3, `${num}/${den} = ${frac.toFixed(3)}`, { align: "right", color: "muted", font: SM });
+    };
+    p.render(p => {
+      const fA = EV[A][1], fB = EV[B][1];
+      let nA = 0, nB = 0, nAB = 0;
+      for (let a = 1; a <= 6; a++) for (let b = 1; b <= 6; b++) {
+        const inA = fA(a, b), inB = fB(a, b); nA += inA; nB += inB; nAB += inA && inB;
+        const x0 = a - 1 + .04, y0 = b - 1 + .04, x1 = a - .04, y1 = b - .04;
+        p.rect(x0, y0, x1, y1, { fill: inA && inB ? "c5" : inA ? "c1" : "muted", fillAlpha: inA ? .6 : .07, color: "line", width: .5 });
+        if (inB && !cond) p.rect(x0 + .06, y0 + .06, x1 - .06, y1 - .06, { fill: false, stroke: true, color: "c2", width: 2.5 });
+        if (cond && !inB) p.rect(x0, y0, x1, y1, { fill: "bg", fillAlpha: .82, stroke: false });
+        p.label(a - .5, b - .5, String(a + b), { align: "center", color: cond && !inB ? "muted" : "fg", font: "12px -apple-system, Helvetica, sans-serif" });
+      }
+      if (cond) p.rect(-0.02, -0.02, 6.02, 6.02, { fill: false, color: "muted", width: 1, dash: [4, 4] });
+      for (let i = 1; i <= 6; i++) { p.label(i - .5, -.35, String(i), { align: "center", color: "muted", font: SM }); p.label(-.3, i - .5, String(i), { align: "center", color: "muted", font: SM }); }
+      p.label(3, -.9, "first die →", { align: "center", color: "muted", font: SM });
+      p.label(-.95, 6.6, "second die ↑", { color: "muted", font: SM });
+      const PA = nA / 36, PB = nB / 36, PAB = nAB / 36, PAgB = nB ? nAB / nB : NaN;
+      bar(5.0, PA, nA, 36, "P(A): share of everything", "c1");
+      bar(3.3, PB, nB, 36, "P(B)", "c2");
+      if (nB) bar(1.6, PAgB, nAB, nB, "P(A | B): share of B", "c5");
+      else p.label(7.2, 2.0, "P(A | B) undefined: B is empty", { color: "bad", font: SM });
+      const indep = nB > 0 && Math.abs(PAB - PA * PB) < 1e-12;
+      p.label(7.2, 0.45, indep ? "independent: P(A|B) = P(A)" : "dependent: P(A|B) ≠ P(A)", { color: indep ? "ok" : "muted", font: "600 13px -apple-system, Helvetica, sans-serif" });
+      out.textContent = `P(A) = ${nA}/36 = ${PA.toFixed(3)}   P(B) = ${nB}/36 = ${PB.toFixed(3)}   P(A∩B) = ${nAB}/36 = ${PAB.toFixed(3)}\n` +
+        `P(A|B) = P(A∩B)/P(B) = ${nB ? PAgB.toFixed(3) : "undefined"}    P(A)P(B) = ${(PA * PB).toFixed(4)} vs P(A∩B) = ${PAB.toFixed(4)}`;
+    });
+  }
+
+  // ---------- fig: Bayes, 1000 people ----------
+  {
+    const p = new Plot("#fig-bayes", { xmin: 0, xmax: 680, ymin: 0, ymax: 400 });
+    let prev = 1, sens = 90, spec = 91, onlyPos = false; const out = document.getElementById("out-bayes");
+    slider("#ctl-bayes", { label: "prevalence % ", min: 0.1, max: 30, step: 0.1, value: 1 }, v => { prev = v; p.render(); });
+    slider("#ctl-bayes", { label: "sensitivity % ", min: 50, max: 100, step: 0.5, value: 90 }, v => { sens = v; p.render(); });
+    slider("#ctl-bayes", { label: "specificity % ", min: 50, max: 100, step: 0.5, value: 91 }, v => { spec = v; p.render(); });
+    checkbox("#ctl-bayes", "show only positive tests", v => { onlyPos = v; p.render(); });
+    const COLS = 40, ROWS = 25, S = 11.5, X0 = 14, YT = 386; // top of grid in world y
+    p.render(p => {
+      const sick = Math.round(1000 * prev / 100), tp = Math.round(sick * sens / 100), fn = sick - tp;
+      const healthy = 1000 - sick, fp = Math.round(healthy * (1 - spec / 100)), tn = healthy - fp;
+      for (let i = 0; i < 1000; i++) {
+        const c = Math.floor(i / ROWS), r = i % ROWS, x = X0 + c * S, y = YT - r * S;
+        let col, fa;
+        if (i < tp) { col = "c4"; fa = .9; } else if (i < sick) { col = "c4"; fa = .22; }
+        else if (i < sick + fp) { col = "c2"; fa = .9; } else { col = "muted"; fa = .18; }
+        const pos = i < tp || (i >= sick && i < sick + fp);
+        if (onlyPos && !pos) fa = .05;
+        p.rect(x + 1, y - S + 1, x + S - 1, y - 1, { fill: col, fillAlpha: fa, stroke: false });
+        if (i >= tp && i < sick && !(onlyPos)) p.rect(x + 1.5, y - S + 1.5, x + S - 1.5, y - 1.5, { fill: false, color: "c4", width: 1 });
+      }
+      // legend
+      const LX = 490, items = [["c4", .9, "sick, test +", tp], ["c4", .22, "sick, test −", fn], ["c2", .9, "healthy, test +", fp], ["muted", .18, "healthy, test −", tn]];
+      items.forEach(([c, a, t, n], k) => {
+        const y = 370 - k * 26; p.rect(LX, y - 6, LX + 12, y + 6, { fill: c, fillAlpha: a, color: c, width: 1 });
+        p.label(LX + 20, y, `${t}: ${n}`, { font: SM, color: "fg" });
+      });
+      p.label(LX, 250, "positives: " + (tp + fp), { font: "600 13px -apple-system, Helvetica, sans-serif" });
+      const post = tp + fp ? tp / (tp + fp) : 0;
+      p.label(LX, 225, "P(sick | +) = " + tp + " / " + (tp + fp), { font: SM, color: "c4" });
+      p.label(LX, 205, "  = " + (100 * post).toFixed(1) + "%", { font: "600 15px -apple-system, Helvetica, sans-serif", color: "c4" });
+      // bar of positives
+      const BY = 48, BW = 460;
+      p.label(X0, BY + 24, "Everyone who tested positive:", { font: SM, color: "muted" });
+      if (tp + fp > 0) {
+        p.rect(X0, BY - 10, X0 + BW * post, BY + 10, { fill: "c4", fillAlpha: .85, stroke: false });
+        p.rect(X0 + BW * post, BY - 10, X0 + BW, BY + 10, { fill: "c2", fillAlpha: .85, stroke: false });
+        p.label(X0, BY - 22, `${tp} sick`, { font: SM, color: "c4" });
+        p.label(X0 + BW, BY - 22, `${fp} healthy`, { font: SM, color: "c2", align: "right" });
+      }
+      const pr = prev / 100, se = sens / 100, sp = spec / 100, exact = se * pr / (se * pr + (1 - sp) * (1 - pr));
+      out.textContent = `P(D|+) = P(+|D)P(D) / [P(+|D)P(D) + P(+|¬D)P(¬D)] \n       = ${se.toFixed(3)}×${pr.toFixed(3)} / (${se.toFixed(3)}×${pr.toFixed(3)} + ${(1 - sp).toFixed(3)}×${(1 - pr).toFixed(3)}) = ${exact.toFixed(4)}\n` +
+        `(the 1000-person grid rounds counts to whole people: ${(100 * post).toFixed(1)}%)`;
+    });
+  }
+
+  // ---------- fig: PMF & CDF ----------
+  {
+    const pm = new Plot("#fig-pmf", { xmin: -1, xmax: 11, ymin: -0.05, ymax: 0.5 });
+    const cd = new Plot("#fig-cdf", { xmin: -1, xmax: 11, ymin: -0.1, ymax: 1.12 });
+    let kind = "binom", n = 10, pr = 0.3; const out = document.getElementById("out-pmf");
+    const h = { x: 3.5, y: 0, color: "c2", constrain: (x, y) => [Math.max(cd.xmin + .2, Math.min(cd.xmax - .2, x)), 0] };
+    const comb = (n, k) => { let r = 1; for (let i = 1; i <= k; i++) r = r * (n - k + i) / i; return r; };
+    const dist = () => {
+      if (kind === "bern") return { xs: [0, 1], ps: [1 - pr, pr], name: `Bernoulli(${pr.toFixed(2)})` };
+      if (kind === "binom") { const xs = [...Array(n + 1).keys()]; return { xs, ps: xs.map(k => comb(n, k) * pr ** k * (1 - pr) ** (n - k)), name: `Binomial(${n}, ${pr.toFixed(2)})` }; }
+      if (kind === "cat") return { xs: [1, 2, 3, 4, 5], ps: [0.4, 0.25, 0.2, 0.1, 0.05], labels: ["the", "a", "my", "one", "his"], name: "Categorical over 5 tokens" };
+      const xs = [...Array(11).keys()].map(k => k + 2); return { xs, ps: xs.map(s => (6 - Math.abs(s - 7)) / 36), name: "Sum of two dice" };
+    };
+    let D = dist();
+    select("#ctl-pmf", "distribution: ", [["binom", "Binomial(n, p)"], ["bern", "Bernoulli(p)"], ["cat", "Categorical (5 tokens)"], ["dice", "Sum of two dice"]], v => { kind = v; upd(); });
+    slider("#ctl-pmf", { label: "n ", min: 1, max: 30, step: 1, value: 10 }, v => { n = v; upd(); });
+    slider("#ctl-pmf", { label: "p ", min: 0, max: 1, step: 0.01, value: 0.3 }, v => { pr = v; upd(); });
+    const upd = (keep) => {
+      D = dist(); const lo = D.xs[0], hi = D.xs[D.xs.length - 1], ymax = Math.max(...D.ps) * 1.22 || 1;
+      pm.setView(lo - 1, hi + 1, -ymax * 0.1, ymax); cd.setView(lo - 1.5, hi + 1.5, -0.12, 1.12);
+      if (!keep) h.x = Math.min(hi, Math.max(lo, (lo + hi) / 2)) + 0.5;
+      cd.render(); pm.render();
+    };
+    pm.render(p => {
+      { const st = niceY(p.ymax); for (let t = st; t < p.ymax; t += st) { if (p.Y(t) < 26) continue; p.line(p.xmin, t, p.xmax, t, { color: "grid", width: 1 }); p.label(p.xmin, t, t.toFixed(2), { dx: 4, color: "muted", font: "10px -apple-system, Helvetica, sans-serif" }); } }
+      p.line(p.xmin, 0, p.xmax, 0, { color: "axis", width: 1 });
+      const many = D.xs.length > 16;
+      D.xs.forEach((x, i) => {
+        const on = x <= h.x, col = on ? "c2" : "c1";
+        p.rect(x - .38, 0, x + .38, D.ps[i], { fill: col, fillAlpha: .7, color: col, width: 1 });
+        if (!many || x % 5 === 0) p.label(x, 0, D.labels ? D.labels[i] : String(x), { align: "center", dy: 10, color: "muted", font: "11px -apple-system, Helvetica, sans-serif" });
+        if (!many) p.label(x, D.ps[i], D.ps[i].toFixed(2), { align: "center", dy: -9, color: "muted", font: "10px -apple-system, Helvetica, sans-serif" });
+      });
+      p.label(8, 12, "PMF  p(x) = P(X = x)", { px: true, color: "fg", font: "600 12px -apple-system, Helvetica, sans-serif" });
+    });
+    cd.draggable([h], () => pm.render()).render(p => {
+      [0.25, 0.5, 0.75, 1].forEach(t => p.line(p.xmin, t, p.xmax, t, { color: "grid", width: 1 }));
+      p.line(p.xmin, 0, p.xmax, 0, { color: "axis", width: 1 });
+      [0.25, 0.5, 0.75, 1].forEach(t => p.label(p.xmin, t, t.toFixed(2), { dx: 4, color: "muted", font: "10px -apple-system, Helvetica, sans-serif" }));
+      let F = 0; const xs = D.xs, last = xs.length - 1;
+      p.line(p.xmin, 0, xs[0], 0, { color: "c1", width: 2.5 });
+      xs.forEach((x, i) => {
+        const F0 = F; F += D.ps[i]; const x1 = i < last ? xs[i + 1] : p.xmax;
+        p.line(x, F0, x, F, { color: "c1", width: 1, dash: [3, 3], alpha: .6 });
+        p.line(x, F, x1, F, { color: "c1", width: 2.5 });
+        p.point(x, F, { r: 3.5, color: "c1" });
+        if (xs.length <= 16 || x % 5 === 0) p.label(x, 0, D.labels ? D.labels[i] : String(x), { align: "center", dy: 10, color: "muted", font: "11px -apple-system, Helvetica, sans-serif" });
+      });
+      const Fx = D.xs.reduce((s, x, i) => s + (x <= h.x ? D.ps[i] : 0), 0);
+      p.line(h.x, 0, h.x, Fx, { color: "c2", width: 1.5, dash: [4, 3] });
+      p.line(p.xmin, Fx, h.x, Fx, { color: "c2", width: 1.5, dash: [4, 3] });
+      p.point(h.x, Fx, { r: 4, color: "c2" });
+      p.label(p.W - 10, p.Y(0) - 22, "CDF  F(x) = P(X ≤ x)", { px: true, align: "right", color: "fg", font: "600 12px -apple-system, Helvetica, sans-serif" });
+      p.drawHandles();
+      out.textContent = `${D.name}:  F(${h.x.toFixed(2)}) = P(X ≤ ${h.x.toFixed(2)}) = sum of orange bars = ${Fx.toFixed(4)}` +
+        (kind === "binom" ? `\npeak near np = ${(n * pr).toFixed(1)}` : "") + (kind === "dice" || kind === "cat" ? "      (n and p unused)" : kind === "bern" ? "      (n unused)" : "");
+    });
+    function niceY(m) { return m > 0.6 ? 0.2 : m > 0.25 ? 0.1 : m > 0.1 ? 0.05 : 0.02; }
+    upd();
+  }
+
+  // ---------- fig: categorical sampling ----------
+  {
+    const toks = ["mat", "floor", "sofa", "bed", "roof", "moon"], logits = [3.0, 2.2, 1.8, 1.5, 0.6, -0.5];
+    const cols = ["c1", "c2", "c3", "c4", "c5", "c6"];
+    const p = new Plot("#fig-cat", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const R = Course.rng(3); let T = 1, probs = LA.softmax(logits, 1), counts = Array(6).fill(0), N = 0, lastU = null, lastI = -1;
+    const out = document.getElementById("out-cat");
+    const sample = () => { const u = R.uniform(); let F = 0, i = 0; for (; i < 6; i++) { F += probs[i]; if (u < F) break; } i = Math.min(i, 5); counts[i]++; N++; lastU = u; lastI = i; };
+    button("#ctl-cat", "sample 1", () => { sample(); p.render(); });
+    button("#ctl-cat", "sample 100", () => { for (let k = 0; k < 100; k++) sample(); p.render(); });
+    button("#ctl-cat", "reset counts", () => { counts.fill(0); N = 0; lastU = null; p.render(); });
+    slider("#ctl-cat", { label: "temperature ", min: 0.1, max: 3, step: 0.05, value: 1 }, v => { T = v; probs = LA.softmax(logits, T); counts.fill(0); N = 0; lastU = null; p.render(); });
+    const SX0 = 0.04, SX1 = 0.96, sx = u => SX0 + (SX1 - SX0) * u;
+    p.render(p => {
+      p.label(0.04, 0.95, 'Context: "The cat sat on the ___"   →   next-token distribution', { font: "600 13px -apple-system, Helvetica, sans-serif" });
+      // strip
+      let F = 0;
+      probs.forEach((q, i) => {
+        const a = sx(F), b = sx(F + q);
+        p.rect(a, 0.78, b, 0.86, { fill: cols[i], fillAlpha: i === lastI && lastU !== null ? .95 : .55, color: "bg", width: 1.5 });
+        if (b - a > 0.055) p.label((a + b) / 2, 0.82, toks[i], { align: "center", color: "fg", font: SM });
+        F += q;
+      });
+      p.label(sx(0), 0.75, "0", { align: "center", color: "muted", font: SM, dy: 4 });
+      p.label(sx(1), 0.75, "1", { align: "center", color: "muted", font: SM, dy: 4 });
+      if (lastU !== null) {
+        const x = sx(lastU);
+        p.line(x, 0.765, x, 0.885, { color: "fg", width: 2 });
+        p.polygon([[x, 0.885], [x - 0.008, 0.91], [x + 0.008, 0.91]], { fill: "fg", fillAlpha: 1, stroke: false });
+        p.label(x, 0.725, `u = ${lastU.toFixed(3)} → "${toks[lastI]}"`, { align: x > 0.8 ? "right" : x < 0.2 ? "left" : "center", color: "fg", font: "600 12px -apple-system, Helvetica, sans-serif" });
+      }
+      // bars
+      const freqs = counts.map(c => N ? c / N : 0), m = Math.max(...probs, ...freqs), sc = 0.46 / m, gw = 0.92 / 6, B0 = 0.12;
+      p.line(0.04, B0, 0.96, B0, { color: "axis", width: 1 });
+      probs.forEach((q, i) => {
+        const cx = 0.04 + gw * (i + .5);
+        p.rect(cx - gw * .36, B0, cx + gw * .36, B0 + q * sc, { fill: cols[i], fillAlpha: .12, color: cols[i], width: 2 });
+        if (N) p.rect(cx - gw * .2, B0, cx + gw * .2, B0 + freqs[i] * sc, { fill: cols[i], fillAlpha: .85, stroke: false });
+        p.label(cx, B0 + Math.max(q, freqs[i]) * sc, `π = ${q.toFixed(3)}`, { align: "center", dy: -10, color: "muted", font: "11px -apple-system, Helvetica, sans-serif" });
+        p.label(cx, B0, toks[i], { align: "center", dy: 12, color: "fg", font: SM });
+      });
+      p.label(0.96, 0.66, N ? `outline = model probability π,  solid = your samples (N = ${N})` : "outline = model probability π  (press sample)", { align: "right", color: "muted", font: SM });
+      const cdf = []; probs.reduce((s, q) => (cdf.push(s + q), s + q), 0);
+      out.textContent = `logits/T = [${logits.map(l => (l / T).toFixed(2)).join(", ")}]\nCDF breakpoints F = [${cdf.map(v => v.toFixed(3)).join(", ")}]`;
+    });
+  }
+
+  // ---------- fig: continuous densities ----------
+  {
+    const erf = x => { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x); const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x); return s * y; };
+    const DISTS = {
+      exp: { name: "Exponential(λ = 1)", f: x => x < 0 ? 0 : Math.exp(-x), F: x => x < 0 ? 0 : 1 - Math.exp(-x), view: [-0.6, 6.25, -0.13, 1.2], ab: [1, 2], draw: R => -Math.log(1 - R.uniform()) },
+      norm: { name: "Normal(0, 1)", f: x => Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI), F: x => 0.5 * (1 + erf(x / Math.SQRT2)), view: [-4, 4, -0.055, 0.5], ab: [-1, 1], draw: R => R.normal() },
+      unif: { name: "Uniform[0, 0.5]", f: x => x >= 0 && x <= 0.5 ? 2 : 0, F: x => Math.max(0, Math.min(1, 2 * x)), view: [-0.35, 0.85, -0.26, 2.5], ab: [0.1, 0.3], draw: R => 0.5 * R.uniform() },
+    };
+    let kind = "exp", logN = 3, bins = 30, samples = [];
+    const p = new Plot("#fig-dens", { xmin: -0.6, xmax: 6, ymin: -0.13, ymax: 1.2 });
+    const cons = (x, y) => [Math.max(p.xmin, Math.min(p.xmax, x)), 0];
+    const a = { x: 1, y: 0, color: "c2", constrain: cons }, b = { x: 2, y: 0, color: "c2", constrain: cons };
+    const out = document.getElementById("out-dens");
+    const regen = () => { const R = Course.rng(11), D = DISTS[kind], n = Math.round(10 ** logN); samples = []; for (let i = 0; i < n; i++) samples.push(D.draw(R)); };
+    const setDist = () => { const D = DISTS[kind]; p.setView(...D.view); a.x = D.ab[0]; b.x = D.ab[1]; regen(); p.render(); };
+    select("#ctl-dens", "distribution: ", [["exp", "Exponential(λ = 1)"], ["norm", "Normal(0, 1)"], ["unif", "Uniform[0, 0.5]"]], v => { kind = v; setDist(); });
+    const nLab = slider("#ctl-dens", { label: "samples (log₁₀) ", min: 1, max: 5, step: 0.5, value: 3 }, v => { logN = v; regen(); p.render(); });
+    slider("#ctl-dens", { label: "bins ", min: 5, max: 120, step: 1, value: 30 }, v => { bins = v; p.render(); });
+    p.draggable([a, b]).render(p => {
+      const D = DISTS[kind], lo = Math.min(a.x, b.x), hi = Math.max(a.x, b.x);
+      p.grid().axes();
+      // histogram, normalized to a density
+      const w = (p.xmax - p.xmin) / bins, cnt = new Array(bins).fill(0);
+      samples.forEach(s => { const k = Math.floor((s - p.xmin) / w); if (k >= 0 && k < bins) cnt[k]++; });
+      cnt.forEach((c, k) => { if (c) p.rect(p.xmin + k * w, 0, p.xmin + (k + 1) * w, c / (samples.length * w), { fill: "c1", fillAlpha: .28, color: "c1", width: .7, alpha: .5 }); });
+      // shaded area
+      const pts = [[lo, 0]]; for (let i = 0; i <= 200; i++) { const x = lo + (hi - lo) * i / 200; pts.push([x, D.f(x)]); } pts.push([hi, 0]);
+      p.polygon(pts, { fill: "c2", fillAlpha: .35, stroke: false });
+      p.fn(D.f, { color: "c5", width: 2.5, samples: 600 });
+      p.line(lo, 0, lo, D.f(lo), { color: "c2", width: 1.5 }); p.line(hi, 0, hi, D.f(hi), { color: "c2", width: 1.5 });
+      p.label(p.W - 10, 14, D.name + "   density f(x)", { px: true, align: "right", bg: true, color: "c5", font: "600 13px -apple-system, Helvetica, sans-serif" });
+      p.drawHandles();
+      const exact = D.F(hi) - D.F(lo), frac = samples.filter(s => s >= lo && s <= hi).length / samples.length;
+      out.textContent = `P(${lo.toFixed(2)} ≤ X ≤ ${hi.toFixed(2)}) = F(${hi.toFixed(2)}) − F(${lo.toFixed(2)}) = ${exact.toFixed(4)}\n` +
+        `fraction of ${samples.length} samples in [a, b] = ${frac.toFixed(4)}`;
+    });
+    setDist();
+  }
+
+  // ---------- fig: law of large numbers ----------
+  {
+    const PROC = {
+      die: { name: "fair die", mu: 3.5, sd: Math.sqrt(35 / 12), draw: R => 1 + R.int(6), view: [0.5, 6.9] },
+      coin: { name: "biased coin, p = 0.3", mu: 0.3, sd: Math.sqrt(0.21), draw: R => (R.uniform() < 0.3 ? 1 : 0), view: [-0.05, 1.12] },
+    };
+    const NMAX = 3000, LX = Math.log10(NMAX), cols = ["c1", "c2", "c3", "c4", "c5"];
+    let kind = "die", paths = [], n = 0;
+    const p = new Plot("#fig-lln", { xmin: -0.15, xmax: LX + 0.05, ymin: 0.5, ymax: 6.5 });
+    const out = document.getElementById("out-lln");
+    const reset = (full) => {
+      const P = PROC[kind]; p.setView(-0.15, LX + 0.05, P.view[0], P.view[1]);
+      paths = cols.map((_, k) => ({ R: Course.rng(100 + k), sum: 0, means: [] })); n = 0; step(full ? NMAX : 1); p.render();
+    };
+    const step = (m) => { const P = PROC[kind]; for (let t = 0; t < m && n < NMAX; t++) { n++; paths.forEach(q => { q.sum += P.draw(q.R); q.means.push(q.sum / n); }); } };
+    const anim = Course.animator(() => { step(Math.max(1, Math.floor(n * 0.025))); p.render(); return n < NMAX; });
+    button("#ctl-lln", "▶ play", () => { if (n >= NMAX) reset(); anim.start(); });
+    button("#ctl-lln", "pause", () => anim.stop());
+    button("#ctl-lln", "reset", () => { anim.stop(); reset(); });
+    select("#ctl-lln", "process: ", [["die", "fair die (μ = 3.5)"], ["coin", "biased coin (p = 0.3)"]], v => { anim.stop(); kind = v; reset(true); });
+    p.render(p => {
+      const P = PROC[kind];
+      p.grid({ step: 1, stepY: kind === "die" ? 0.5 : 0.1 });
+      [1, 10, 100, 1000].forEach(t => p.label(Math.log10(t), p.ymin, String(t), { align: "center", dy: -10, color: "muted", font: "11px -apple-system, Helvetica, sans-serif" }));
+      p.label(LX, p.ymin, "n (rolls, log scale)", { align: "right", dy: -24, color: "muted", font: "11px -apple-system, Helvetica, sans-serif" });
+      const yt = kind === "die" ? [1, 2, 3, 4, 5, 6] : [0, 0.2, 0.4, 0.6, 0.8, 1];
+      yt.forEach(t => p.label(p.xmin, t, String(t), { dx: 4, color: "muted", font: "11px -apple-system, Helvetica, sans-serif" }));
+      const up = [], dn = []; for (let i = 0; i <= 200; i++) { const L = LX * i / 200, k = 10 ** L; up.push([L, P.mu + P.sd / Math.sqrt(k)]); dn.push([L, P.mu - P.sd / Math.sqrt(k)]); }
+      p.path(up, { color: "muted", dash: [5, 4], width: 1.5 }); p.path(dn, { color: "muted", dash: [5, 4], width: 1.5 });
+      p.line(p.xmin, P.mu, p.xmax, P.mu, { color: "fg", width: 1.2, alpha: .7 });
+      p.label(LX, P.mu, "μ = " + P.mu, { align: "right", dy: 16, bg: true, color: "fg", font: "600 12px -apple-system, Helvetica, sans-serif" });
+      paths.forEach((q, k) => p.path(q.means.map((m, i) => [Math.log10(i + 1), m]), { color: cols[k], width: 1.6 }));
+      p.label(8, 14, `running average of ${P.name}`, { px: true, color: "muted", font: "600 12px -apple-system, Helvetica, sans-serif" });
+      const last = paths.map(q => q.means[q.means.length - 1]);
+      out.textContent = `n = ${n}   running averages: ${last.map(v => v.toFixed(3)).join("  ")}   μ = ${P.mu}   σ/√n = ${(P.sd / Math.sqrt(n)).toFixed(3)}`;
+    });
+    reset(true);
+  }
+});
+</script>
+</body>
+</html>

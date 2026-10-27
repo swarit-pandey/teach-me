@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embeddings & sequence models</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="20">
+<main>
+
+<div class="kicker">Part 5 · Deep learning</div>
+<h1>Embeddings &amp; sequence models</h1>
+<p class="lede">Language models predict the next symbol. This lesson builds that idea up from nothing. First a table of counts, then the same table learned by gradient descent, then a network that looks at several previous characters through <b>learned embeddings</b>, and finally a recurrent network that can, in principle, look back forever. That "in principle" fails for a precise mathematical reason, and the failure is exactly why attention (lesson 22) was invented.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Explain why an embedding lookup is a matrix product with a one-hot vector.</li>
+    <li>Build a character bigram model from counts, sample from it, and score it by negative log-likelihood.</li>
+    <li>Explain why gradient descent on a "neural bigram" recovers the counting solution.</li>
+    <li>Describe Bengio et al.'s MLP language model and what its learned embeddings capture.</li>
+    <li>Write the RNN recurrence, unroll it, and derive why gradients vanish or explode through time.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="onehot">1. From symbols to vectors</h2>
+<p>A network needs numbers, but a character is a symbol. Step one is a <b>vocabulary</b>: list the $V$ distinct characters and give each an integer id. Shakespeare's text has $V = 65$: upper- and lowercase letters, punctuation, space, newline, and a stray digit. Step two: turn id $i$ into a vector the network can multiply.</p>
+<p>The neutral choice is the <b>one-hot</b> vector $\mathbf{e}_i \in \mathbb{R}^V$, with a 1 in position $i$ and zeros elsewhere. Every pair of one-hot vectors is orthogonal and equidistant (lesson 01). The encoding claims nothing about which characters are similar. Feed it to a linear layer $E \in \mathbb{R}^{V\times d}$ and watch what happens:</p>
+$$\mathbf{e}_i^\top E = \text{row } i \text{ of } E.$$
+<p>Multiplying by a one-hot vector just <b>selects a row</b>. So a "linear layer on one-hot inputs" is a lookup table of $V$ learned vectors, one per symbol: the symbol's <b>embedding</b>. Real code skips the multiply (it would be $V\cdot d$ multiplications, all but $d$ of them by zero) and indexes <code>E[i]</code> directly. That's <code>nn.Embedding</code>. The gradient is the same as for the matmul, too. Only the selected rows receive gradient, and a row used several times in a batch accumulates (lesson 17 §5).</p>
+
+<div class="figure">
+  <canvas id="fig-onehot" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-onehot"></div>
+  <div class="readout" id="out-onehot"></div>
+  <div class="caption"><b>Try it:</b> click a character (or a row of $E$). The one-hot row vector times the $8\times4$ embedding matrix lights up exactly one row, and the product equals that row. The embeddings here are random. Training will move them so that characters which behave alike end up close together (§5).</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bigram">2. The bigram model: just count</h2>
+<p>The simplest language model predicts the next character from the current one alone: $P(x_{t+1} \mid x_t)$. A <b>bigram</b> is a pair of adjacent characters. To estimate the probabilities, count every adjacent pair in the training text into a $V\times V$ table $C$, then normalize each row:</p>
+$$P(b \mid a) = \frac{C[a, b]}{\sum_{b'} C[a, b']}.$$
+<p>By lesson 10, this is exactly the <b>maximum-likelihood estimate</b>: among all tables of conditional probabilities, it's the one that makes the training text most probable. To <b>generate</b> text, start with a character, sample the next from row $P(\cdot\mid a)$, and repeat.</p>
+
+<div class="figure wide">
+  <div class="row">
+    <div style="flex:1.45 1 380px"><canvas id="fig-counts" width="460" height="460"></canvas></div>
+    <div><canvas id="fig-row" width="300" height="460"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-counts"></div>
+  <div class="readout" id="out-counts"></div>
+  <div class="caption"><b>Try it:</b> left, the bigram counts from the opening of <em>Coriolanus</em>, built live in your browser and log-scaled so rare pairs stay visible (rows: current character, columns: next; letters lowercased, all punctuation shown as ".", newline and space as "␣"). Click a row to see its normalized distribution on the right. Look at the row for "q", which always leads to "u", and the column for "␣", which follows letters that end words. Press <em>sample</em> to generate text from these probabilities. It has the right letter statistics and no words.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="nll">3. Scoring a model: negative log-likelihood</h2>
+<p>How good is a language model? Ask how probable it finds real text it hasn't seen. The probability of a whole sequence is a product of tiny numbers, so take logs and average over positions (lessons 10–11):</p>
+$$\mathrm{NLL} = -\frac{1}{T}\sum_{t=1}^{T}\log P(x_{t+1}\mid x_t).$$
+<p>Lower is better. This is the cross-entropy between the text and the model, measured in nats per character. Two reference points. A model that guesses uniformly scores $\log V = \log 65 \approx 4.17$. A perfect model that knew every next character would score 0. The bigram model gets about <b>2.45</b> on Shakespeare. <b>Perplexity</b> $e^{\mathrm{NLL}}$ translates this into an "effective number of choices": $e^{2.45}\approx 11.6$ equally likely next characters, down from 65.</p>
+
+<div class="example">
+  <div class="label">Worked example: counts, NLL and the zero problem</div>
+  <p>Train on the text <code>the cat sat on the mat</code>. The character <code>t</code> appears 4 times before another character. It's followed by <code>h</code> twice and by a space twice (the final <code>t</code> has no successor). So $P(\text{h}\mid\text{t}) = 2/4 = 0.5$. And <code>h</code> is always followed by <code>e</code>: $P(\text{e}\mid\text{h}) = 2/2 = 1$.</p>
+  <p>NLL of the string <code>the</code> (two predictions): $-\tfrac12(\log 0.5 + \log 1) = 0.347$ nats.</p>
+  <p>Now score <code>tat</code>. $P(\text{a}\mid\text{t}) = 0/4 = 0$, so $-\log 0 = \infty$. One unseen pair makes the loss infinite. The fix is <b>smoothing</b>: add a pseudo-count $\alpha$ to every cell before normalizing. With $\alpha = 1$ and the corpus's 10 distinct characters, $P(\text{a}\mid\text{t}) = (0+1)/(4+10) = 0.071$ and $P(\text{h}\mid\text{t}) = 3/14 = 0.214$. That is a Bayesian prior (lesson 10) in disguise.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="neural-bigram">4. The same model, learned by gradient descent</h2>
+<p>Now forget counting. Give the model a $V\times V$ matrix of parameters $W$ and define</p>
+$$\text{logits} = \mathbf{e}_{x_t}^\top W = W[x_t], \qquad P(\cdot\mid x_t) = \mathrm{softmax}(W[x_t]),$$
+<p>and minimize the average cross-entropy over all adjacent pairs with gradient descent. This is a one-layer neural network on one-hot inputs. What does it converge to? Take the gradient with respect to row $a$ (lesson 14's softmax gradient, summed over the $n_a$ positions where the current character is $a$):</p>
+$$\frac{\partial\,\mathrm{NLL}}{\partial W[a]} = \frac{1}{T}\sum_{t:\,x_t = a}\big(\mathrm{softmax}(W[a]) - \mathbf{e}_{x_{t+1}}\big) = \frac{n_a}{T}\Big(\mathrm{softmax}(W[a]) - \frac{C[a,\cdot]}{n_a}\Big).$$
+<p>It's zero exactly when $\mathrm{softmax}(W[a]) = C[a,\cdot]/n_a$: the counting solution, with $W[a] = \log C[a,\cdot] + \text{const}$. Gradient descent on the neural bigram rediscovers the count table. The point isn't to replace counting. The point is that the neural version is a framework you can <em>extend</em>: more context, shared structure, embeddings. Counting can't do any of that, because a table indexed by 10 previous characters would have $65^{10}$ rows.</p>
+
+<div class="figure">
+  <canvas id="fig-nbigram" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-nbigram"></div>
+  <div class="readout" id="out-nbigram"></div>
+  <div class="caption"><b>Try it:</b> press <em>train</em>. Left, the learned $\mathrm{softmax}(W)$, starting from $W = 0$ (every row uniform). Right, the training NLL falling toward the dashed line, the count model's NLL on the same text. It never goes below the dashed line: the counts are the optimum. Rare rows, the ones with small $n_a$, converge last, because their gradient is scaled by $n_a/T$. Adam's per-parameter scaling (lesson 18) fixes exactly that.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mlp">5. More context: the MLP language model</h2>
+<p>Bengio, Ducharme, Vincent and Jauvin (2003) proposed the model that started neural language modeling. To predict $x_{t+1}$ from the previous $k$ characters:</p>
+<ol>
+  <li><b>Embed</b> each of the $k$ context characters with a shared table $E\in\mathbb{R}^{V\times d}$, giving $k$ vectors of size $d$.</li>
+  <li><b>Concatenate</b> them into one vector of size $kd$.</li>
+  <li>A <b>hidden layer</b>: $\mathbf{h} = \tanh(W_1[\ldots] + \mathbf{b}_1)$.</li>
+  <li><b>Logits</b> $= W_2\mathbf{h} + \mathbf{b}_2$, then softmax and cross-entropy against the true next character.</li>
+</ol>
+<p>The parameter count grows only linearly with the context: $Vd + (kd\cdot H + H) + (H\cdot V + V)$. With $V = 65$, $k = 5$, $d = 10$, $H = 100$ that's 12,315 parameters, versus the $65^5\approx10^9$ cells a count table would need. Better still, the embedding table is <b>shared</b> across positions and across contexts. What the model learns about "e" in one context transfers to every other context containing "e". Characters that behave alike get pushed to nearby embeddings, because nearby embeddings produce similar predictions. Nobody tells the model which letters are vowels. It discovers that grouping because it helps predict.</p>
+
+<div class="figure wide">
+  <div class="row">
+    <div style="flex:1.3 1 360px"><canvas id="fig-emb" width="420" height="420"></canvas></div>
+    <div><canvas id="fig-emb-loss" width="320" height="420"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-emb"></div>
+  <div class="readout" id="out-emb"></div>
+  <div class="caption"><b>Try it:</b> press <em>train</em>. An MLP language model with context $k = 3$, <b>2-dimensional</b> embeddings (so we can plot them), 48 tanh hidden units and Adam trains on the same excerpt, live. Left, each character's embedding: vowels in <span style="color:var(--c4)">pink</span>, consonants in <span style="color:var(--c1)">blue</span>, space and punctuation in <span style="color:var(--c3)">green</span>. Watch them self-organize. Right, the training loss crosses below the bigram model's (dashed): three characters of context beat one. With only 2 dimensions the map is crowded. Real models use hundreds, and lesson 21's tokens get their own embeddings exactly like this.</div>
+</div>
+
+<div class="callout ml">
+<p>Every token entering GPT goes through exactly this first step: <code>nn.Embedding(vocab_size, d_model)</code>, a learned lookup table. The geometry you met in lesson 01, with cosine similarity between embedding vectors, is the geometry of these learned tables. Word2vec's famous "king − man + woman ≈ queen" is a property of embeddings trained to predict context.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rnn">6. Recurrent networks: a state that carries the past</h2>
+<p>The MLP sees a <em>fixed</em> window of $k$ characters. To use arbitrarily long history, keep a running <b>hidden state</b> $\mathbf{h}_t\in\mathbb{R}^H$ and update it once per character with the <em>same</em> weights:</p>
+$$\mathbf{h}_t = \tanh\big(\mathbf{x}_t W_{xh} + \mathbf{h}_{t-1}W_{hh} + \mathbf{b}\big), \qquad \text{logits}_t = \mathbf{h}_t W_{hy} + \mathbf{b}_y.$$
+<p>Here $\mathbf{x}_t$ is the embedding of character $t$. The hidden state is a compressed summary of everything read so far. To train, <b>unroll</b> the loop over a sequence of length $T$. You get a $T$-layer-deep network in which every layer shares the same weights. Run ordinary backprop through it ("backpropagation through time"). Because the weights are reused at every step, their gradient is the <em>sum</em> of contributions from every time step: the reuse rule of lesson 17 once again.</p>
+
+<!-- ============================================================ -->
+<h2 id="vanishing">7. Why RNNs forget: gradients through time</h2>
+<p>How much does the loss at step $T$ care about the state at an earlier step $t$? By the chain rule (lesson 07), with $\mathbf{z}_k$ the pre-activation at step $k$:</p>
+$$\frac{\partial \mathbf{h}_T}{\partial \mathbf{h}_t} = \prod_{k=t+1}^{T} \frac{\partial \mathbf{h}_k}{\partial \mathbf{h}_{k-1}} = \prod_{k=t+1}^{T} \mathrm{diag}\big(1 - \tanh^2(\mathbf{z}_k)\big)\,W_{hh}^\top .$$
+<p>This is lesson 18's product of Jacobians with one twist that makes it worse: it's the <b>same</b> matrix $W_{hh}$, multiplied $T - t$ times. Suppose $W_{hh}$ has largest singular value $\rho$ (lesson 04) and the tanh derivatives are at most 1. Then $\|\partial\mathbf{h}_T/\partial\mathbf{h}_t\| \le \rho^{\,T-t}$. If $\rho \lt 1$, the gradient from 50 steps back is crushed by a factor of $\rho^{50}$ ($0.9^{50}\approx 0.005$). If $\rho$ is large, the linear part blows up instead. Either way, the signal that should teach the network "this character matters 50 steps later" doesn't arrive intact. In practice vanilla RNNs remember about 10–20 steps.</p>
+
+<div class="example">
+  <div class="label">Worked example: a one-unit RNN by hand</div>
+  <p>Take $H = 1$: $h_t = \tanh(w\,h_{t-1} + x_t)$ with $w = 0.5$, $h_0 = 0$, and inputs $x = (1, 0, 0)$. Only the first input carries information.</p>
+  <p>Forward: $h_1 = \tanh(1) = 0.762$, $h_2 = \tanh(0.5\cdot0.762) = 0.363$, $h_3 = \tanh(0.5\cdot0.363) = 0.180$. The memory of $x_1$ fades a little more at every step.</p>
+  <p>Backward: each step's local derivative is $\partial h_t/\partial h_{t-1} = (1 - h_t^2)\,w$, giving $(1 - 0.363^2)(0.5) = 0.434$ for step 2 and $(1 - 0.180^2)(0.5) = 0.484$ for step 3. So $\partial h_3/\partial h_1 = 0.484\cdot0.434 = 0.210$. Each step multiplies by at most $|w| = 0.5$, so 20 steps back the factor is at most $0.5^{20}\approx 10^{-6}$. The loss at step 21 can barely tell $w$ or $x_1$ that they mattered.</p>
+</div>
+
+<div class="figure">
+  <canvas id="fig-bptt" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-bptt"></div>
+  <div class="readout" id="out-bptt"></div>
+  <div class="caption"><b>Try it:</b> a 32-unit RNN is unrolled for 40 steps in your browser, and we backpropagate from the last state. Top: each time step's box is shaded by $\|\partial L/\partial\mathbf{h}_t\|$. Bottom: $\log_{10}$ of that norm against the distance back in time. Slide the recurrent weight scale. Below about 1 the curve falls in a straight line, which on a log scale means exponential decay. With the <em>linear</em> activation and a large scale, it shoots up instead (exploding gradients). With tanh, saturation tames the explosion but still loses information.</div>
+</div>
+
+<p>The classic fixes treat the symptoms. <b>Gradient clipping</b> rescales the gradient when its norm exceeds a threshold, which stops explosions. <b>LSTMs and GRUs</b> add a gated, mostly additive memory cell, $\mathbf{c}_t = \mathbf{f}_t\odot\mathbf{c}_{t-1} + \dots$. That's a residual connection through time (lesson 18 §9), and it lets gradients survive hundreds of steps. But the deeper problem remains. Information from position $t$ must squeeze through every intermediate state to reach position $T$, and it's processed strictly one step at a time, which is slow on parallel hardware.</p>
+
+<div class="callout key">
+<p><b>The motivation for attention (lesson 22).</b> What if position $T$ could look <em>directly</em> at every earlier position and decide, from their contents, which ones matter? Then the path between any two positions is one step long: no product of $T - t$ Jacobians, no vanishing. All positions can also be computed in parallel. That's self-attention: a dot product between a query and every key (lesson 01's similarity), a softmax over positions (lesson 14), and a weighted sum. The transformer (lesson 23) is that mechanism plus the MLP, embeddings, LayerNorm and residual connections from this part of the course.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>What NLL (in nats per character) does a model that predicts uniformly over Shakespeare's $V = 65$ characters achieve? What's its perplexity?</p>
+<div class="numcheck" data-answer="4.17439" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Every prediction has probability $1/65$: $\mathrm{NLL} = \log 65 \approx 4.174$, and perplexity $= 65$. Perplexity of a uniform model is its vocabulary size.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>The bigram model scores NLL $= 2.45$ nats. What is its perplexity?</p>
+<div class="numcheck" data-answer="11.588" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$e^{2.45}\approx 11.59$. The model is "as uncertain as" a uniform choice among about 12 characters.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Count the parameters of an MLP language model with $V = 65$, context $k = 8$, embedding size $d = 16$ and $H = 200$ hidden units (biases included).</p>
+<div class="numcheck" data-answer="39905" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Embedding $65\cdot16 = 1{,}040$. Hidden: $(8\cdot16)\cdot200 + 200 = 25{,}800$. Output: $200\cdot65 + 65 = 13{,}065$. Total $39{,}905$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Using add-one smoothing on the corpus <code>the cat sat on the mat</code> (10 distinct characters), compute $P(\text{h}\mid\text{t})$ and the NLL of the string <code>tha</code> (two predictions). Enter the NLL.</p>
+<details class="hint"><summary>Hint</summary><p>Row <code>h</code>: <code>h</code> is followed by <code>e</code> twice, so the smoothed row is $(2+1)/(2+10)$ for <code>e</code> and $1/12$ for everything else.</p></details>
+<div class="numcheck" data-answer="2.01268" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$P(\text{h}\mid\text{t}) = 3/14 \approx 0.214$ and $P(\text{a}\mid\text{h}) = 1/12$. $\mathrm{NLL} = -\tfrac12(\log\tfrac{3}{14} + \log\tfrac1{12}) = \tfrac12(1.540 + 2.485) = 2.013$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · derivation</span>
+<p>Show that the minimizer of the neural-bigram loss satisfies $\mathrm{softmax}(W[a]) = C[a,\cdot]/n_a$ for every row $a$ with $n_a > 0$. Why is $W$ not unique? What happens to $W[a][b]$ when $C[a,b] = 0$?</p>
+<details class="solution"><summary>Solution</summary>
+<p>The loss separates into rows: $\mathrm{NLL} = \frac1T\sum_a\big(-\sum_b C[a,b]\log\mathrm{softmax}(W[a])_b\big)$. Each row's term is $n_a$ times the cross-entropy between $\hat p_a = C[a,\cdot]/n_a$ and $q = \mathrm{softmax}(W[a])$. That cross-entropy equals $H(\hat p_a) + \mathrm{KL}(\hat p_a\|q)$ (lesson 11), which is minimized exactly when $\mathrm{KL} = 0$, i.e. $q = \hat p_a$. Softmax is invariant to adding a constant to all logits in a row, so $W[a] + c\mathbf{1}$ is equally good. If $C[a,b] = 0$, the optimum wants $q_b = 0$, which needs $W[a][b]\to-\infty$. Gradient descent keeps pushing it down forever. Weight decay, or count smoothing, keeps it finite.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Suppose each backward step through an RNN multiplies the gradient norm by 0.9. After how many time steps has the gradient shrunk to 1% of its size?</p>
+<div class="numcheck" data-answer="43.7" data-tol="5e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$0.9^k = 0.01 \Rightarrow k = \ln 0.01/\ln 0.9 \approx 43.7$ steps. A per-step factor that looks harmless destroys the signal within a sentence or two.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>An RNN language model takes one-hot characters directly ($V = 65$), has $H = 128$ hidden units and an output layer to 65 logits. How many parameters, with biases on the hidden update and the output?</p>
+<div class="numcheck" data-answer="33217" data-tol="1e-9"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$W_{xh}$: $65\cdot128 = 8{,}320$. $W_{hh}$: $128^2 = 16{,}384$. $\mathbf{b}$: 128. $W_{hy}$: $128\cdot65 = 8{,}320$. $\mathbf{b}_y$: 65. Total $33{,}217$. Note that this count is independent of the sequence length: the same weights are reused at every step.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch</span>
+<p>For a <em>linear</em> RNN $\mathbf{h}_t = \mathbf{h}_{t-1}W$ with $W$ diagonalizable as $W = Q\Lambda Q^{-1}$, write $\partial\mathbf{h}_T/\partial\mathbf{h}_0$ in terms of the eigenvalues. Why does clipping the gradient norm fix exploding gradients but not vanishing ones?</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf{h}_T = \mathbf{h}_0W^T$, so the Jacobian is $(W^T)^\top$, and $W^T = Q\Lambda^TQ^{-1}$ (lesson 04). Each eigen-direction is scaled by $\lambda_i^T$. Directions with $|\lambda_i| \lt 1$ vanish, and those with $|\lambda_i| > 1$ explode, exponentially in $T$. Clipping shrinks a too-large gradient back to a sane length while keeping its direction, so a training step stays reasonable. But a vanished gradient has lost the information about long-range dependencies: it's $10^{-20}$ of the true signal, buried under the short-range terms. Scaling it up can't restore it. That needs an architectural change: gated or additive memory (LSTM), or direct connections (attention).</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">Why does nn.Embedding index a table instead of multiplying a one-hot vector by a matrix?</div>
+  <div class="opts">
+    <button data-k="a">Because the two give different results, and indexing is the correct one</button>
+    <button data-k="b">They compute the same thing, but the lookup skips V·d multiplications by zero</button>
+    <button data-k="c">Because one-hot vectors can't be differentiated</button>
+    <button data-k="d">To make the embeddings normalized</button>
+  </div>
+  <div class="explain">$\mathbf{e}_i^\top E$ is row $i$. Same value, same gradient (only row $i$ gets one), far less work.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">A neural bigram (W of shape V×V, softmax, cross-entropy) is trained to convergence. Compared with the count-based bigram on the training text, its NLL is…</div>
+  <div class="opts">
+    <button data-k="a">much lower, since neural nets are more expressive</button>
+    <button data-k="b">much higher, since gradient descent finds only local minima</button>
+    <button data-k="c">essentially the same: both are the maximum-likelihood bigram model</button>
+    <button data-k="d">undefined, because the loss has no minimum</button>
+  </div>
+  <div class="explain">Same model class, same objective. The counts are the global optimum (problem 5), and the convex per-row loss lets gradient descent approach them.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Why do vanilla RNNs struggle with dependencies 100 steps apart?</div>
+  <div class="opts">
+    <button data-k="a">They have too few parameters for long sequences</button>
+    <button data-k="b">Their hidden state is too small to store 100 characters</button>
+    <button data-k="c">Backprop through time is only run for 10 steps</button>
+    <button data-k="d">The gradient between those steps is a product of ~100 Jacobians with the same W_hh, so it shrinks or grows exponentially</button>
+  </div>
+  <div class="explain">Long-range learning signal vanishes (or explodes) geometrically. Attention removes the long product by connecting positions directly.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Model</th><th>Predicts $x_{t+1}$ from</th><th>Key idea</th><th>Shakespeare NLL (rough)</th></tr>
+  <tr><td>Uniform</td><td>nothing</td><td>baseline: $\log V$</td><td>4.17</td></tr>
+  <tr><td>Bigram (counts)</td><td>$x_t$</td><td>MLE = normalized counts; smooth zeros</td><td>≈ 2.45</td></tr>
+  <tr><td>Neural bigram</td><td>$x_t$ (one-hot)</td><td>softmax($W[x_t]$); GD → the counts</td><td>≈ 2.45</td></tr>
+  <tr><td>MLP LM (Bengio 2003)</td><td>last $k$ chars</td><td>shared learned embeddings</td><td>≈ 2.1 (workbook)</td></tr>
+  <tr><td>RNN</td><td>everything so far (in principle)</td><td>recurrent state; tied weights</td><td>better, but forgets</td></tr>
+  <tr><td>Transformer (lessons 22–24)</td><td>everything, directly</td><td>attention: one-step paths</td><td>you'll measure it</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 20: build it</h3>
+  <p>Open <code>workbooks/20_embeddings_sequences/exercises.py</code>. In numpy: the vocabulary, <code>encode</code>/<code>decode</code>, one-hot vs lookup, and the full counting bigram model (counts with <code>np.add.at</code>, smoothing, NLL, sampling) on the real corpus. In torch: the neural bigram, which must land within 0.05 nats of the counts; a sliding-window dataset; and the MLP language model, which must beat the bigram's validation loss by at least 0.15 nats. Then you write an RNN forward pass checked against <code>nn.RNN</code>, and measure gradient norms through 30 time steps to watch them vanish and explode. Grade yourself with:</p>
+  <pre><code>./course check 20</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Bengio, Ducharme, Vincent &amp; Jauvin, "A Neural Probabilistic Language Model" (JMLR 2003).</li>
+  <li>Andrej Karpathy, "makemore" video series (parts 1–2: bigrams and the MLP LM), and "The Unreasonable Effectiveness of Recurrent Neural Networks" (blog post).</li>
+  <li>Bengio, Simard &amp; Frasconi, "Learning long-term dependencies with gradient descent is difficult" (1994); Pascanu, Mikolov &amp; Bengio, "On the difficulty of training recurrent neural networks" (2013).</li>
+  <li>Christopher Olah, "Understanding LSTM Networks" (blog post).</li>
+</ul>
+
+</main>
+
+<script>
+// the first 10,000 characters of data/tinyshakespeare.txt (pages can't read files over file://)
+const CORPUS = "First Citizen:\nBefore we proceed any further, hear me speak.\n\nAll:\nSpeak, speak.\n\nFirst Citizen:\nYou are all resolved rather to die than to famish?\n\nAll:\nResolved. resolved.\n\nFirst Citizen:\nFirst, you know Caius Marcius is chief enemy to the people.\n\nAll:\nWe know't, we know't.\n\nFirst Citizen:\nLet us kill him, and we'll have corn at our own price.\nIs't a verdict?\n\nAll:\nNo more talking on't; let it be done: away, away!\n\nSecond Citizen:\nOne word, good citizens.\n\nFirst Citizen:\nWe are accounted poor citizens, the patricians good.\nWhat authority surfeits on would relieve us: if they\nwould yield us but the superfluity, while it were\nwholesome, we might guess they relieved us humanely;\nbut they think we are too dear: the leanness that\nafflicts us, the object of our misery, is as an\ninventory to particularise their abundance; our\nsufferance is a gain to them Let us revenge this with\nour pikes, ere we become rakes: for the gods know I\nspeak this in hunger for bread, not in thirst for revenge.\n\nSecond Citizen:\nWould you proceed especially against Caius Marcius?\n\nAll:\nAgainst him first: he's a very dog to the commonalty.\n\nSecond Citizen:\nConsider you what services he has done for his country?\n\nFirst Citizen:\nVery well; and could be content to give him good\nreport fort, but that he pays himself with being proud.\n\nSecond Citizen:\nNay, but speak not maliciously.\n\nFirst Citizen:\nI say unto you, what he hath done famously, he did\nit to that end: though soft-conscienced men can be\ncontent to say it was for his country he did it to\nplease his mother and to be partly proud; which he\nis, even till the altitude of his virtue.\n\nSecond Citizen:\nWhat he cannot help in his nature, you account a\nvice in him. You must in no way say he is covetous.\n\nFirst Citizen:\nIf I must not, I need not be barren of accusations;\nhe hath faults, with surplus, to tire in repetition.\nWhat shouts are these? The other side o' the city\nis risen: why stay we prating here? to the Capitol!\n\nAll:\nCome, come.\n\nFirst Citizen:\nSoft! who comes here?\n\nSecond Citizen:\nWorthy Menenius Agrippa; one that hath always loved\nthe people.\n\nFirst Citizen:\nHe's one honest enough: would all the rest were so!\n\nMENENIUS:\nWhat work's, my countrymen, in hand? where go you\nWith bats and clubs? The matter? speak, I pray you.\n\nFirst Citizen:\nOur business is not unknown to the senate; they have\nhad inkling this fortnight what we intend to do,\nwhich now we'll show 'em in deeds. They say poor\nsuitors have strong breaths: they shall know we\nhave strong arms too.\n\nMENENIUS:\nWhy, masters, my good friends, mine honest neighbours,\nWill you undo yourselves?\n\nFirst Citizen:\nWe cannot, sir, we are undone already.\n\nMENENIUS:\nI tell you, friends, most charitable care\nHave the patricians of you. For your wants,\nYour suffering in this dearth, you may as well\nStrike at the heaven with your staves as lift them\nAgainst the Roman state, whose course will on\nThe way it takes, cracking ten thousand curbs\nOf more strong link asunder than can ever\nAppear in your impediment. For the dearth,\nThe gods, not the patricians, make it, and\nYour knees to them, not arms, must help. Alack,\nYou are transported by calamity\nThither where more attends you, and you slander\nThe helms o' the state, who care for you like fathers,\nWhen you curse them as enemies.\n\nFirst Citizen:\nCare for us! True, indeed! They ne'er cared for us\nyet: suffer us to famish, and their store-houses\ncrammed with grain; make edicts for usury, to\nsupport usurers; repeal daily any wholesome act\nestablished against the rich, and provide more\npiercing statutes daily, to chain up and restrain\nthe poor. If the wars eat us not up, they will; and\nthere's all the love they bear us.\n\nMENENIUS:\nEither you must\nConfess yourselves wondrous malicious,\nOr be accused of folly. I shall tell you\nA pretty tale: it may be you have heard it;\nBut, since it serves my purpose, I will venture\nTo stale 't a little more.\n\nFirst Citizen:\nWell, I'll hear it, sir: yet you must not think to\nfob off our disgrace with a tale: but, an 't please\nyou, deliver.\n\nMENENIUS:\nThere was a time when all the body's members\nRebell'd against the belly, thus accused it:\nThat only like a gulf it did remain\nI' the midst o' the body, idle and unactive,\nStill cupboarding the viand, never bearing\nLike labour with the rest, where the other instruments\nDid see and hear, devise, instruct, walk, feel,\nAnd, mutually participate, did minister\nUnto the appetite and affection common\nOf the whole body. The belly answer'd--\n\nFirst Citizen:\nWell, sir, what answer made the belly?\n\nMENENIUS:\nSir, I shall tell you. With a kind of smile,\nWhich ne'er came from the lungs, but even thus--\nFor, look you, I may make the belly smile\nAs well as speak--it tauntingly replied\nTo the discontented members, the mutinous parts\nThat envied his receipt; even so most fitly\nAs you malign our senators for that\nThey are not such as you.\n\nFirst Citizen:\nYour belly's answer? What!\nThe kingly-crowned head, the vigilant eye,\nThe counsellor heart, the arm our soldier,\nOur steed the leg, the tongue our trumpeter.\nWith other muniments and petty helps\nIn this our fabric, if that they--\n\nMENENIUS:\nWhat then?\n'Fore me, this fellow speaks! What then? what then?\n\nFirst Citizen:\nShould by the cormorant belly be restrain'd,\nWho is the sink o' the body,--\n\nMENENIUS:\nWell, what then?\n\nFirst Citizen:\nThe former agents, if they did complain,\nWhat could the belly answer?\n\nMENENIUS:\nI will tell you\nIf you'll bestow a small--of what you have little--\nPatience awhile, you'll hear the belly's answer.\n\nFirst Citizen:\nYe're long about it.\n\nMENENIUS:\nNote me this, good friend;\nYour most grave belly was deliberate,\nNot rash like his accusers, and thus answer'd:\n'True is it, my incorporate friends,' quoth he,\n'That I receive the general food at first,\nWhich you do live upon; and fit it is,\nBecause I am the store-house and the shop\nOf the whole body: but, if you do remember,\nI send it through the rivers of your blood,\nEven to the court, the heart, to the seat o' the brain;\nAnd, through the cranks and offices of man,\nThe strongest nerves and small inferior veins\nFrom me receive that natural competency\nWhereby they live: and though that all at once,\nYou, my good friends,'--this says the belly, mark me,--\n\nFirst Citizen:\nAy, sir; well, well.\n\nMENENIUS:\n'Though all at once cannot\nSee what I do deliver out to each,\nYet I can make my audit up, that all\nFrom me do back receive the flour of all,\nAnd leave me but the bran.' What say you to't?\n\nFirst Citizen:\nIt was an answer: how apply you this?\n\nMENENIUS:\nThe senators of Rome are this good belly,\nAnd you the mutinous members; for examine\nTheir counsels and their cares, digest things rightly\nTouching the weal o' the common, you shall find\nNo public benefit which you receive\nBut it proceeds or comes from them to you\nAnd no way from yourselves. What do you think,\nYou, the great toe of this assembly?\n\nFirst Citizen:\nI the great toe! why the great toe?\n\nMENENIUS:\nFor that, being one o' the lowest, basest, poorest,\nOf this most wise rebellion, thou go'st foremost:\nThou rascal, that art worst in blood to run,\nLead'st first to win some vantage.\nBut make you ready your stiff bats and clubs:\nRome and her rats are at the point of battle;\nThe one side must have bale.\nHail, noble Marcius!\n\nMARCIUS:\nThanks. What's the matter, you dissentious rogues,\nThat, rubbing the poor itch of your opinion,\nMake yourselves scabs?\n\nFirst Citizen:\nWe have ever your good word.\n\nMARCIUS:\nHe that will give good words to thee will flatter\nBeneath abhorring. What would you have, you curs,\nThat like nor peace nor war? the one affrights you,\nThe other makes you proud. He that trusts to you,\nWhere he should find you lions, finds you hares;\nWhere foxes, geese: you are no surer, no,\nThan is the coal of fire upon the ice,\nOr hailstone in the sun. Your virtue is\nTo make him worthy whose offence subdues him\nAnd curse that justice did it.\nWho deserves greatness\nDeserves your hate; and your affections are\nA sick man's appetite, who desires most that\nWhich would increase his evil. He that depends\nUpon your favours swims with fins of lead\nAnd hews down oaks with rushes. Hang ye! Trust Ye?\nWith every minute you do change a mind,\nAnd call him noble that was now your hate,\nHim vile that was your garland. What's the matter,\nThat in these several places of the city\nYou cry against the noble senate, who,\nUnder the gods, keep you in awe, which else\nWould feed on one another? What's their seeking?\n\nMENENIUS:\nFor corn at their own rates; whereof, they say,\nThe city is well stored.\n\nMARCIUS:\nHang 'em! They say!\nThey'll sit by the fire, and presume to know\nWhat's done i' the Capitol; who's like to rise,\nWho thrives and who declines; side factions\nand give out\nConjectural marriages; making parties strong\nAnd feebling such as stand not in their liking\nBelow their cobbled shoes. They say there's\ngrain enough!\nWould the nobility lay aside their ruth,\nAnd let me use my sword, I'll make a quarry\nWith thousands of these quarter'd slaves, as high\nAs I could pick my lance.\n\nMENENIUS:\nNay, these are almost thoroughly persuaded;\nFor though abundantly they lack discretion,\nYet are they passing cowardly. But, I beseech you,\nWhat says the other troop?\n\nMARCIUS:\nThey are dissolved: hang 'em!\nThey said they were an-hungry; sigh'd forth proverbs,\nThat hunger broke stone walls, that dogs must eat,\nThat meat was made for mouths, that the gods sent not\nCorn for the rich men only: with these shreds\nThey vented their complainings; which being answer'd,\nAnd a petition granted them, a strange one--\nTo break the heart of generosity,\nAnd make bold power look pale--they threw their caps\nAs they would hang them on the horns o' the moon,\nShouting their emulation.\n\nMENENIUS:\nWhat is granted them?\n\nMARCIUS:\nFive tribunes to defend their vulgar wisdoms,\nOf their own choice: one's Junius Brutus,\nSicinius Velutus, and I know not--'Sdeath!\nThe rabble should have first unroof'd the city,\nEre so prevail'd with me: ";
+Course.ready(() => {
+  const { Plot, slider, button, select, animator, fmt, color, withAlpha } = Course;
+  // 28-symbol alphabet for the in-browser models: a–z, "␣" (space/newline), "." (everything else)
+  const ALPHA = "abcdefghijklmnopqrstuvwxyz␣.".split(""), V = ALPHA.length;
+  const toId = ch => { const c = ch.toLowerCase(); if (c >= "a" && c <= "z") return c.charCodeAt(0) - 97; if (c === " " || c === "\n") return 26; return 27; };
+  const ids = []; for (const ch of CORPUS) { const id = toId(ch); if (id === 26 && ids[ids.length - 1] === 26) continue; ids.push(id); }   // squash runs of whitespace
+  const C = Array.from({ length: V }, () => new Array(V).fill(0)); for (let t = 0; t + 1 < ids.length; t++) C[ids[t]][ids[t + 1]]++;
+  const rowSum = C.map(r => r.reduce((a, b) => a + b, 0));
+  const Pc = C.map((r, a) => r.map(v => (v + 0.01) / (rowSum[a] + 0.01 * V)));
+  let countNLL = 0; for (let t = 0; t + 1 < ids.length; t++) countNLL -= Math.log(Pc[ids[t]][ids[t + 1]]); countNLL /= ids.length - 1;
+  const vowel = new Set("aeiou");
+  const symCol = s => s === "␣" || s === "." ? "c3" : vowel.has(s) ? "c4" : "c1";
+
+  // ---------- fig: one-hot × E ----------
+  {
+    const p = new Plot("#fig-onehot", { xmin: 0, xmax: 680, ymin: 0, ymax: 300 });
+    const out = document.getElementById("out-onehot");
+    const voc = ["a", "b", "c", "d", "e", "h", "l", "o"], d = 4, R = Course.rng(2);
+    const E = voc.map(() => Array.from({ length: d }, () => +R.normal(0, 1).toFixed(1)));
+    let sel = 4; const cs = 30, ox = 30, oy = 160, ex = 320, ey = 270, rx = 520;
+    const btns = document.getElementById("ctl-onehot");
+    voc.forEach((ch, i) => button(btns, ch, () => { sel = i; p.render(); }));
+    p.onClick = (x, y) => { if (x > ex && x < ex + d * cs && y < ey && y > ey - voc.length * cs) { sel = Math.floor((ey - y) / cs); p.render(); } else if (x > ox && x < ox + voc.length * cs && Math.abs(y - oy) < cs / 2) { sel = Math.floor((x - ox) / cs); p.render(); } };
+    p.render(() => {
+      voc.forEach((ch, j) => { const on = j === sel; p.rect(ox + j * cs, oy - cs / 2, ox + (j + 1) * cs, oy + cs / 2, { fill: on ? "c4" : "muted", fillAlpha: on ? .5 : .06, color: on ? "c4" : "muted", width: 1 });
+        p.label(ox + j * cs + cs / 2, oy, on ? "1" : "0", { align: "center", font: "600 13px monospace", color: on ? "fg" : "muted" }); p.label(ox + j * cs + cs / 2, oy + cs / 2 + 12, ch, { align: "center", font: "12px monospace", color: "muted" }); });
+      p.label(ox, oy + 42, `one-hot e("${voc[sel]}")   (1 × ${voc.length})`, { color: "fg", font: "600 12px sans-serif" });
+      p.label(ox + voc.length * cs + 18, oy, "·", { align: "center", font: "600 22px sans-serif" });
+      E.forEach((row, i) => row.forEach((v, j) => { const on = i === sel, t = (v + 2.5) / 5;
+        p.rect(ex + j * cs, ey - (i + 1) * cs, ex + (j + 1) * cs, ey - i * cs, { fill: on ? "c4" : "c1", fillAlpha: on ? .45 : .08 + .25 * Math.min(1, Math.max(0, t)), color: on ? "c4" : "muted", width: on ? 2 : .6 });
+        p.label(ex + j * cs + cs / 2, ey - i * cs - cs / 2, v.toFixed(1), { align: "center", font: "11px monospace", color: on ? "fg" : "muted" }); }));
+      voc.forEach((ch, i) => p.label(ex - 8, ey - i * cs - cs / 2, ch, { align: "right", font: "12px monospace", color: i === sel ? "c4" : "muted" }));
+      p.label(ex, ey + 14, `E  (${voc.length} × ${d})`, { color: "fg", font: "600 12px sans-serif" });
+      p.label(ex + d * cs + 30, oy, "=", { align: "center", font: "600 20px sans-serif" });
+      E[sel].forEach((v, j) => { p.rect(rx + j * cs, oy - cs / 2, rx + (j + 1) * cs, oy + cs / 2, { fill: "c4", fillAlpha: .45, color: "c4", width: 1.5 }); p.label(rx + j * cs + cs / 2, oy, v.toFixed(1), { align: "center", font: "11px monospace" }); });
+      p.label(rx, oy + 42, `row ${sel} of E  (1 × ${d})`, { color: "fg", font: "600 12px sans-serif" });
+      const terms = voc.map((_, i) => (i === sel ? "1" : "0") + "·" + E[i][0].toFixed(1));
+      out.textContent = `first output entry = ${terms.join(" + ")} = ${E[sel][0].toFixed(1)}\n${voc.length * d} multiplies, of which ${(voc.length - 1) * d} are by zero. Indexing E["${voc[sel]}"] does none.`;
+    });
+  }
+
+  // ---------- fig: bigram counts ----------
+  {
+    const H = new Plot("#fig-counts", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const B = new Plot("#fig-row", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const out = document.getElementById("out-counts");
+    let row = 7, sample = ""; const x0 = 0.07, x1 = 0.99, y0 = 0.01, y1 = 0.93;
+    const L = C.map(r => r.map(v => Math.log(1 + v)));
+    H.onClick = (x, y) => { if (y > y0 && y < y1 && x > x0 - 0.06 && x < x1) { row = Math.min(V - 1, Math.floor((y1 - y) / (y1 - y0) * V)); H.render(); B.render(); } };
+    button("#ctl-counts", "sample 200 chars", () => {
+      const R = Course.rng((Date.now() % 100000) | 0); let cur = 19, s = "t";
+      for (let i = 0; i < 200; i++) { let u = R.uniform(), k = 0; while (k < V - 1 && (u -= Pc[cur][k]) > 0) k++; cur = k; s += ALPHA[k] === "␣" ? " " : ALPHA[k]; }
+      sample = s; B.render();
+    });
+    H.render(H => {
+      H.heatmap(L, { x0, x1, y0, y1, cmap: "seq" });
+      const ch = (y1 - y0) / V, cw = (x1 - x0) / V;
+      ALPHA.forEach((s, i) => { H.label(x0 - 0.008, y1 - (i + .5) * ch, s, { align: "right", font: (i === row ? "700 " : "") + "10px monospace", color: i === row ? "c4" : "muted" });
+        H.label(x0 + (i + .5) * cw, y1 + 0.018, s, { align: "center", font: "10px monospace", color: "muted" }); });
+      H.rect(x0, y1 - (row + 1) * ch, x1, y1 - row * ch, { fill: false, color: "c4", width: 2 });
+      H.label(x0, 0.985, "next character →", { color: "muted", font: "11px sans-serif" });
+    });
+    B.render(B => {
+      const pr = C[row].map(v => v / (rowSum[row] || 1)), top = Math.max(0.05, ...pr) * 1.12;
+      const order = pr.map((v, i) => [v, i]).filter(q => q[0] > 0).sort((a, b) => b[0] - a[0]).slice(0, 12);
+      B.setView(-0.1 * top, top * 1.28, -0.5, 12.6);
+      order.forEach(([v, i], r) => { const y = 11.5 - r; B.rect(0, y - 0.35, v, y + 0.35, { fill: symCol(ALPHA[i]), fillAlpha: .7, color: symCol(ALPHA[i]), width: 1 });
+        B.label(0, y, ALPHA[i], { dx: -4, align: "right", font: "600 12px monospace" }); B.label(v, y, (100 * v).toFixed(1) + "%", { dx: 4, font: "11px monospace", color: "muted" }); });
+      B.label(12, 12, `P(next | "${ALPHA[row]}")  top 12  (n = ${rowSum[row]})`, { px: true, color: "fg", font: "600 12px sans-serif" });
+    });
+    // gutter for bar labels
+    B.render();
+    const show = () => { out.textContent = `excerpt: ${ids.length} characters, ${V}-symbol alphabet.  Count-model NLL on it: ${countNLL.toFixed(3)} nats/char (uniform: ${Math.log(V).toFixed(3)})` + (sample ? `\nsample: ${sample}` : ""); };
+    const orig = B.drawFn; B.drawFn = b => { orig(b); show(); }; B.render();
+  }
+
+  // ---------- fig: neural bigram by gradient descent ----------
+  {
+    const H = new Plot("#fig-nbigram", { xmin: 0, xmax: 680, ymin: 0, ymax: 300 });
+    const out = document.getElementById("out-nbigram");
+    let W, losses, step;
+    const T = ids.length - 1;
+    const reset = () => { W = Array.from({ length: V }, () => new Array(V).fill(0)); losses = []; step = 0; };
+    const soft = r => { const m = Math.max(...r), e = r.map(v => Math.exp(v - m)), s = e.reduce((a, b) => a + b, 0); return e.map(v => v / s); };
+    const train = lr => {
+      let L = 0;
+      for (let a = 0; a < V; a++) { if (!rowSum[a]) continue; const p = soft(W[a]);
+        for (let b = 0; b < V; b++) { if (C[a][b]) L -= C[a][b] * Math.log(p[b]); W[a][b] -= lr * (rowSum[a] * p[b] - C[a][b]) / T; } }
+      losses.push(L / T); step++;
+    };
+    const anim = animator(() => { for (let k = 0; k < 5; k++) train(50); H.render(); return step < 600; });
+    button("#ctl-nbigram", "▶ train", () => { reset(); anim.start(); });
+    button("#ctl-nbigram", "reset", () => { anim.stop(); reset(); H.render(); });
+    reset(); for (let k = 0; k < 30; k++) train(50);
+    H.render(H => {
+      const P = W.map(soft), cs = 9.4, gx = 20, gy = 285;
+      H.heatmap(P.map(r => r.map(v => Math.sqrt(v))), { x0: gx, x1: gx + V * cs, y0: gy - V * cs, y1: gy, cmap: "seq", vmin: 0, vmax: 1 });
+      H.label(gx, 10, "learned softmax(W) (√ scale): rows = current char", { color: "muted", font: "11px sans-serif", baseline: "top", px: true });
+      const lx = 330, lw = 330, ly0 = 30, lh = 240, n = Math.max(600, losses.length), lo = countNLL - 0.15, hi = Math.log(V) + 0.05;
+      const X = i => lx + lw * i / n, Y = v => ly0 + lh * (1 - (v - lo) / (hi - lo));
+      const c = H.ctx; c.save(); c.strokeStyle = color("axis"); c.lineWidth = 1; c.strokeRect(lx, ly0, lw, lh); c.restore();
+      H.line(lx, 300 - Y(countNLL), lx + lw, 300 - Y(countNLL), { color: "ok", width: 2, dash: [6, 5] });
+      H.path(losses.map((v, i) => [X(i), 300 - Y(v)]), { color: "c5", width: 2.5 });
+      H.label(lx + lw - 4, 300 - Y(countNLL) + 12, `count model ${countNLL.toFixed(3)}`, { align: "right", color: "ok", font: "11px sans-serif" });
+      H.label(lx + 4, 300 - Y(hi) - 10, `train NLL (from log V = ${Math.log(V).toFixed(2)})`, { color: "muted", font: "11px sans-serif" });
+      H.label(lx + lw, 300 - (ly0 + lh) - 12, `${n} steps`, { align: "right", color: "muted", font: "11px monospace" });
+      out.textContent = `step ${step}   neural-bigram NLL ${losses.length ? losses[losses.length - 1].toFixed(4) : "—"}   count-model NLL ${countNLL.toFixed(4)}   (gradient descent, lr 50, full batch)`;
+    });
+  }
+
+  // ---------- fig: MLP LM with 2-D embeddings ----------
+  {
+    const P2 = new Plot("#fig-emb", { xmin: -3, xmax: 3, ymin: -3, ymax: 3, equal: true });
+    const Lp = new Plot("#fig-emb-loss", { xmin: 0, xmax: 3000, ymin: 1.5, ymax: 3.5 });
+    const out = document.getElementById("out-emb");
+    const K = 3, D = 2, Hd = 48, steps = 3000, bs = 64;
+    let net, opt, losses, step, R;
+    const init = () => {
+      R = Course.rng(5);
+      net = { E: Array.from({ length: V * D }, () => R.normal(0, 1)), W1: Array.from({ length: K * D * Hd }, () => R.normal(0, 1 / Math.sqrt(K * D))), b1: new Array(Hd).fill(0),
+              W2: Array.from({ length: Hd * V }, () => R.normal(0, 1 / Math.sqrt(Hd)) * 0.5), b2: new Array(V).fill(0) };
+      opt = {}; for (const k in net) opt[k] = { m: net[k].map(() => 0), v: net[k].map(() => 0) }; opt.t = 0; losses = []; step = 0;
+    };
+    const trainStep = () => {
+      const G = {}; for (const k in net) G[k] = new Array(net[k].length).fill(0); let L = 0;
+      for (let s = 0; s < bs; s++) {
+        const t = K + R.int(ids.length - K), ctx = ids.slice(t - K, t), y = ids[t], x = [];
+        ctx.forEach(c => { for (let j = 0; j < D; j++) x.push(net.E[c * D + j]); });
+        const h = new Array(Hd); for (let k = 0; k < Hd; k++) { let z = net.b1[k]; for (let i = 0; i < K * D; i++) z += x[i] * net.W1[i * Hd + k]; h[k] = Math.tanh(z); }
+        const lo = new Array(V); for (let v = 0; v < V; v++) { let z = net.b2[v]; for (let k = 0; k < Hd; k++) z += h[k] * net.W2[k * V + v]; lo[v] = z; }
+        const m = Math.max(...lo), e = lo.map(z => Math.exp(z - m)), S = e.reduce((a, b) => a + b, 0); L -= Math.log(e[y] / S) / bs;
+        const g = e.map((z, v) => (z / S - (v === y ? 1 : 0)) / bs), gh = new Array(Hd).fill(0);
+        for (let v = 0; v < V; v++) { G.b2[v] += g[v]; for (let k = 0; k < Hd; k++) { G.W2[k * V + v] += h[k] * g[v]; gh[k] += net.W2[k * V + v] * g[v]; } }
+        const gx = new Array(K * D).fill(0);
+        for (let k = 0; k < Hd; k++) { const gz = gh[k] * (1 - h[k] * h[k]); G.b1[k] += gz; for (let i = 0; i < K * D; i++) { G.W1[i * Hd + k] += x[i] * gz; gx[i] += net.W1[i * Hd + k] * gz; } }
+        ctx.forEach((c, pos) => { for (let j = 0; j < D; j++) G.E[c * D + j] += gx[pos * D + j]; });   // embedding rows accumulate
+      }
+      opt.t++; const lr = 0.01;
+      for (const k in net) { const w = net[k], o = opt[k], gk = G[k]; for (let i = 0; i < w.length; i++) { o.m[i] = 0.9 * o.m[i] + 0.1 * gk[i]; o.v[i] = 0.999 * o.v[i] + 0.001 * gk[i] * gk[i];
+        w[i] -= lr * (o.m[i] / (1 - 0.9 ** opt.t)) / (Math.sqrt(o.v[i] / (1 - 0.999 ** opt.t)) + 1e-8); } }
+      losses.push(L); step++;
+    };
+    const smooth = () => { const out2 = []; let s = 0; losses.forEach((v, i) => { s = i ? 0.97 * s + 0.03 * v : v; out2.push(s); }); return out2; };
+    const draw = () => {
+      P2.render(P2 => {
+        const xs = [], ys = []; for (let c = 0; c < V; c++) { xs.push(net.E[c * D]); ys.push(net.E[c * D + 1]); }
+        const mx = Math.max(2, ...xs.map(Math.abs), ...ys.map(Math.abs)) * 1.15; P2.setView(-mx, mx, -mx, mx, true);
+        P2.grid({ step: mx > 4 ? 2 : 1 }).axes({ step: mx > 4 ? 2 : 1 });
+        for (let c = 0; c < V; c++) P2.label(xs[c], ys[c], ALPHA[c], { align: "center", color: symCol(ALPHA[c]), font: "700 15px monospace", bg: true });
+      });
+      Lp.render(Lp => {
+        Lp.setView(-steps * .1, steps * 1.05, 1.4, 3.65);
+        Lp.grid({ step: 500, stepY: 0.5 }).axes({ step: 1000, stepY: 0.5 });
+        Lp.line(0, countNLL, steps, countNLL, { color: "ok", width: 2, dash: [6, 5] });
+        Lp.label(steps, countNLL, "bigram", { align: "right", dy: -9, color: "ok", font: "11px sans-serif" });
+        Lp.path(smooth().map((v, i) => [i, Math.min(3.5, v)]), { color: "c5", width: 2.2 });
+        Lp.label(46, 14, "training loss (smoothed)", { px: true, color: "muted", font: "12px sans-serif" });
+      });
+      const sm = smooth();
+      out.textContent = `step ${step}/${steps}   smoothed training loss ${sm.length ? sm[sm.length - 1].toFixed(3) : "—"}   bigram NLL ${countNLL.toFixed(3)}   ` +
+        `parameters: E ${V * D} + W1 ${K * D * Hd + Hd} + W2 ${Hd * V + V} = ${V * D + K * D * Hd + Hd + Hd * V + V}`;
+    };
+    const anim = animator(() => { for (let k = 0; k < 15 && step < steps; k++) trainStep(); draw(); return step < steps; });
+    button("#ctl-emb", "▶ train / ❚❚ pause", () => anim.running ? anim.stop() : (step >= steps ? (init(), anim.start()) : anim.start()));
+    button("#ctl-emb", "reset", () => { anim.stop(); init(); draw(); });
+    init(); for (let i = 0; i < 300; i++) trainStep(); draw();   // open a little way into training
+  }
+
+  // ---------- fig: gradients through time ----------
+  {
+    const p = new Plot("#fig-bptt", { xmin: 0, xmax: 680, ymin: 0, ymax: 380 });
+    const out = document.getElementById("out-bptt");
+    let scale = 0.8, act = "tanh"; const T = 40, Hh = 32, Bb = 8, Dd = 8;
+    slider("#ctl-bptt", { label: "recurrent weight scale ", min: 0.2, max: 3, step: 0.05, value: scale }, v => { scale = v; p.render(); });
+    select("#ctl-bptt", "activation ", [["tanh", "tanh"], ["linear", "linear"]], v => { act = v; p.render(); });
+    p.render(() => {
+      const R = Course.rng(8), Wxh = Array.from({ length: Dd * Hh }, () => R.normal(0, 1 / Math.sqrt(Dd))), Whh = Array.from({ length: Hh * Hh }, () => R.normal(0, scale / Math.sqrt(Hh)));
+      const hs = []; let h = new Array(Bb * Hh).fill(0);
+      for (let t = 0; t < T; t++) { const z = new Array(Bb * Hh).fill(0);
+        for (let b = 0; b < Bb; b++) { const x = Array.from({ length: Dd }, () => R.normal()); for (let k = 0; k < Hh; k++) { let s = 0; for (let i = 0; i < Dd; i++) s += x[i] * Wxh[i * Hh + k]; for (let i = 0; i < Hh; i++) s += h[b * Hh + i] * Whh[i * Hh + k]; z[b * Hh + k] = s; } }
+        h = z.map(v => act === "tanh" ? Math.tanh(v) : v); hs.push(h); }
+      let g = Array.from({ length: Bb * Hh }, () => R.normal()); const norms = new Array(T); norms[T - 1] = Math.sqrt(g.reduce((a, b) => a + b * b, 0));
+      for (let t = T - 1; t > 0; t--) { const gz = g.map((v, i) => act === "tanh" ? v * (1 - hs[t][i] ** 2) : v), ng = new Array(Bb * Hh).fill(0);
+        for (let b = 0; b < Bb; b++) for (let i = 0; i < Hh; i++) { let s = 0; for (let k = 0; k < Hh; k++) s += gz[b * Hh + k] * Whh[i * Hh + k]; ng[b * Hh + i] = s; }
+        g = ng; norms[t - 1] = Math.sqrt(g.reduce((a, b) => a + b * b, 0)); }
+      const lg = norms.map(v => Math.log10(Math.max(v, 1e-300) / norms[T - 1]));
+      // top: unrolled chain
+      const bw = 640 / T, top = 345, lmax = Math.max(1, ...lg.map(Math.abs).filter(isFinite));
+      for (let t = 0; t < T; t++) { const s = Math.max(0, Math.min(1, (lg[t] + 8) / 8)), big = lg[t] > 0.3;
+        p.rect(20 + t * bw + 1, top - 26, 20 + (t + 1) * bw - 1, top, { fill: big ? "c4" : "c1", fillAlpha: big ? Math.min(.9, .25 + lg[t] / lmax) : .05 + .85 * s, color: "muted", width: .5 }); }
+      p.label(20, top + 14, "h₁", { color: "muted", font: "11px monospace" }); p.label(660, top + 14, `h_${T} ← loss`, { align: "right", color: "muted", font: "11px monospace" });
+      p.label(340, top + 14, "shade = ‖∂L/∂hₜ‖ (pink: larger than at the output)", { align: "center", color: "muted", font: "11px sans-serif" });
+      // bottom: log plot
+      const gx0 = 60, gx1 = 660, gy0 = 30, gy1 = 280, fin = lg.filter(isFinite), lo = Math.min(-2, ...fin), hi = Math.max(1, ...fin);
+      const X = d => gx0 + (gx1 - gx0) * d / (T - 1), Y = v => gy0 + (gy1 - gy0) * (Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo);
+      const stepY = Math.max(1, Math.ceil((hi - lo) / 6));
+      for (let v = Math.ceil(lo / stepY) * stepY; v <= hi; v += stepY) { p.line(gx0, Y(v), gx1, Y(v), { color: "grid", width: 1 }); p.label(gx0 - 6, Y(v), String(v), { align: "right", color: "muted", font: "11px monospace" }); }
+      p.line(gx0, Y(0), gx1, Y(0), { color: "axis", width: 1.2 });
+      for (let d = 0; d < T; d += 10) p.label(X(d), gy0 - 12, String(d), { align: "center", color: "muted", font: "11px monospace" });
+      p.path(lg.map((v, t) => [X(T - 1 - t), Y(v)]).filter(q => isFinite(q[1])), { color: "c5", width: 2.5 });
+      p.label(gx0 + 4, gy1 + 10, "log₁₀ ‖∂L/∂hₜ‖ / ‖∂L/∂h_T‖", { color: "muted", font: "12px sans-serif" });
+      p.label(gx1, gy0 - 26, "steps back in time →", { align: "right", color: "muted", font: "11px sans-serif" });
+      const r10 = lg[T - 11], r39 = lg[0];
+      out.textContent = `${act}, scale ${scale.toFixed(2)}:  gradient 10 steps back = 10^${r10.toFixed(1)} × output's,   ${T - 1} steps back = 10^${isFinite(r39) ? r39.toFixed(1) : "-∞"} ×`;
+    });
+  }
+});
+</script>
+</body>
+</html>

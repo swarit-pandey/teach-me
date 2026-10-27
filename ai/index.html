@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI from Scratch</title>
+<link rel="stylesheet" href="assets/course.css">
+<script src="assets/manifest.js"></script>
+</head>
+<body>
+<main>
+  <section class="course-hero">
+    <div class="kicker">A visual, bottom-up course</div>
+    <h1>AI from Scratch</h1>
+    <p class="lede">From vectors and derivatives to a GPT you train on your own laptop — and then align with RLHF, DPO and GRPO. Every idea is drawn, derived, and then built in code.</p>
+    <p id="progress-text" style="font-size:.9rem;color:var(--muted)"></p>
+    <div class="progressbar"><div id="progress-fill"></div></div>
+    <p style="font-size:.9rem;margin-top:1rem">How each lesson works: <b>read + play</b> with the visuals → <b>work the problems</b> on paper → <b>build it</b> in the Python workbook (<code>./course check NN</code>). Start with <a href="lessons/00-how-to-use.html">lesson 00</a>.</p>
+    <p style="font-size:.9rem"><a class="btn" href="download/ai-from-scratch.zip">⬇ Download the course + workbooks</a> <span style="color:var(--muted)">unzip, then <code>./course setup</code> (needs Python 3.11+)</span></p>
+  </section>
+  <div id="parts"></div>
+</main>
+<script>
+(function () {
+  let done = {}; try { done = JSON.parse(localStorage.getItem("aicourse.done.v1") || "{}"); } catch {}
+  const host = document.getElementById("parts");
+  let total = 0, n = 0, hours = 0;
+  for (const p of COURSE.parts) {
+    const sec = document.createElement("section"); sec.className = "part";
+    sec.innerHTML = `<h2>${p.id === "P0" ? "" : "Part " + p.id.slice(1) + " · "}${p.title}</h2>${p.blurb ? `<p class="blurb">${p.blurb}</p>` : ""}`;
+    const ul = document.createElement("ul"); ul.className = "lesson-list";
+    for (const l of p.lessons) {
+      total++; hours += l.hours; if (done[l.n]) n++;
+      const li = document.createElement("li");
+      li.innerHTML = `<a href="lessons/${l.n}-${l.slug}.html"><span class="num">${l.n}</span><span class="t">${l.title}</span><span class="h">~${l.hours} h</span><span class="chk">${done[l.n] ? "✓" : ""}</span></a>`;
+      ul.appendChild(li);
+    }
+    sec.appendChild(ul); host.appendChild(sec);
+  }
+  document.getElementById("progress-fill").style.width = (100 * n / total) + "%";
+  document.getElementById("progress-text").textContent = `${n} of ${total} lessons complete · about ${Math.round(hours)} hours of lessons, plus workbooks`;
+})();
+</script>
+</body>
+</html>

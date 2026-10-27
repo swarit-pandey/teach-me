@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Generalization, overfitting & regularization</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="15">
+<main>
+
+<div class="kicker">Part 4 · Machine learning in code</div>
+<h1>Generalization, overfitting &amp; regularization</h1>
+<p class="lede">Driving the training loss to zero is easy. A lookup table does it. The real goal is to do well on data the model has <em>never seen</em>. This lesson is about the gap between those two: how to measure it honestly, why it opens up (bias and variance), and the tools that close it (regularization, early stopping, cross-validation). It ends with a twist from modern deep learning that broke the textbook picture.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Split data into train/validation/test and say exactly what each split is allowed to influence.</li>
+    <li>Recognize underfitting and overfitting from training and validation curves, and explain them with the bias–variance decomposition (derived).</li>
+    <li>Derive ridge regression in closed form, and explain why L1 (lasso) gives exactly-zero weights while L2 only shrinks them.</li>
+    <li>Use early stopping and k-fold cross-validation to choose model complexity.</li>
+    <li>Describe double descent, and why huge networks can generalize despite fitting their training data perfectly.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="splits">1. Train, validation, test</h2>
+<p>The working assumption of supervised learning is that training data and future data are <b>i.i.d.</b> samples from the same distribution $\mathcal D$ (lesson 08). What we care about is the <b>expected loss</b> (the <b>risk</b>) on a fresh sample:</p>
+$$R(f) = \mathbb E_{(\mathbf x, y)\sim\mathcal D}\big[\ell(f(\mathbf x), y)\big].$$
+<p>We can't compute it, so we estimate it with an average over examples. Here's the catch. Once a dataset has influenced the model, its average is a <em>biased</em>, optimistic estimate, because the model was tuned to look good on exactly those points. So we keep separate piles:</p>
+<table>
+  <tr><th>Split</th><th>Typical share</th><th>Allowed to influence</th></tr>
+  <tr><td><b>Train</b></td><td>60–80%</td><td>the parameters $\mathbf w$ (via gradient descent or a closed form)</td></tr>
+  <tr><td><b>Validation</b></td><td>10–20%</td><td>the <em>hyperparameters</em>: degree, $\lambda$, learning rate, when to stop, which model</td></tr>
+  <tr><td><b>Test</b></td><td>10–20%</td><td><b>nothing</b>. You look at it once, at the end, to report the result.</td></tr>
+</table>
+<div class="callout warning">
+<p><b>Leakage</b> is any path by which test information reaches the model. Common forms: computing standardization statistics on all the data (lesson 13), choosing features after looking at the whole dataset, tuning against the test set "just once more", and duplicates or near-duplicates across splits. The same customer, the same patient, or a time series where you test on the past after training on the future all count. Each one makes your reported number optimistic, sometimes wildly so. For time series, split by time. For grouped data, split by group.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="overfit">2. Underfitting and overfitting</h2>
+<p>Take lesson 13's polynomial regression. The data come from a smooth curve plus noise. As the degree $p$ grows, the model's <b>capacity</b> grows: it can represent more functions. Training error can only go down (lesson 13, problem 7). Validation error tells a different story.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-deg" width="380" height="340"></canvas></div>
+    <div><canvas id="fig-deg-curve" width="380" height="340"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-deg"></div>
+  <div class="readout" id="out-deg"></div>
+  <div class="caption"><b>Try it:</b> left: 15 training points (blue), 40 validation points (orange), and the true curve (dashed). Slide the degree. At low degree the fit misses the shape (<b>underfitting</b>), and both errors are high. In the middle, both errors are low. At high degree the curve chases the noise (<b>overfitting</b>): training error keeps falling while validation error shoots up. The right panel plots both errors against degree on a log scale. Press <b>new sample</b> a few times. The best degree moves a little, but the U shape of the validation curve is always there.</div>
+</div>
+
+<p>The <b>generalization gap</b> is validation error minus training error. A small gap with high error means underfitting: the model is too simple, so add capacity or features. A large gap means overfitting: the model is too flexible for the amount of data, so add data, regularize, or simplify. The next section explains <em>why</em> the validation curve is U-shaped.</p>
+
+<!-- ============================================================ -->
+<h2 id="biasvar">3. The bias–variance decomposition</h2>
+<p>Imagine re-running the whole experiment many times: draw a fresh training set $\mathcal S$, fit $\hat f_{\mathcal S}$, and predict at a fixed input $\mathbf x$. The prediction $\hat f_{\mathcal S}(\mathbf x)$ is a random variable, because it depends on which training set you happened to get. Let the truth be $y = f(\mathbf x) + \varepsilon$ with $\mathbb E\varepsilon = 0$, $\operatorname{Var}\varepsilon = \sigma^2$, and $\varepsilon$ independent of $\mathcal S$. Write $\bar f(\mathbf x) = \mathbb E_{\mathcal S}[\hat f_{\mathcal S}(\mathbf x)]$ for the average prediction. Then the expected squared error at $\mathbf x$ splits into three parts:</p>
+$$\mathbb E\big[(y - \hat f)^2\big] = \underbrace{\sigma^2}_{\text{noise}} + \underbrace{\big(f - \bar f\big)^2}_{\text{bias}^2} + \underbrace{\mathbb E\big[(\hat f - \bar f)^2\big]}_{\text{variance}}.$$
+<p><b>Derivation.</b> Add and subtract: $y - \hat f = \varepsilon + (f - \bar f) + (\bar f - \hat f)$. Square and take expectations. The cross terms vanish. $\mathbb E[\varepsilon\cdot(\text{anything about }\mathcal S)] = 0$ because $\varepsilon$ has mean 0 and is independent. $\mathbb E[(f - \bar f)(\bar f - \hat f)] = (f-\bar f)\,\mathbb E[\bar f - \hat f] = 0$ because $\bar f$ is the mean of $\hat f$. What's left are the three squares. $\blacksquare$ (This is lesson 09's $\mathbb E[X^2] = \operatorname{Var}X + (\mathbb EX)^2$, applied twice.)</p>
+<ul>
+  <li><b>Noise</b> $\sigma^2$ is the floor. No model can predict the coin flips in the data.</li>
+  <li><b>Bias²</b> is how wrong the model is <em>on average</em>, its systematic error. A line fitted to a sine curve is wrong in the same way every time.</li>
+  <li><b>Variance</b> is how much the fit wobbles from one training set to another. A degree-11 polynomial through 12 noisy points changes wildly with every resample.</li>
+</ul>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-bv" width="380" height="340"></canvas></div>
+    <div><canvas id="fig-bv-curve" width="380" height="340"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-bv"></div>
+  <div class="readout" id="out-bv"></div>
+  <div class="caption"><b>Try it:</b> left: 25 fits, each to a different noisy sample of 12 points at the same $x$ positions. The thick curve is their average $\bar f$, and the dashed curve is the truth $f$. At degree 1 the fits agree with each other but are all wrong (high bias, low variance). At degree 10 they're right on average but disagree wildly (low bias, high variance). Right: bias², variance and their sum plus the noise, computed exactly. The total is the validation-error U from section 2.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: the numbers behind the picture</div>
+  <p>Truth $f(x) = \sin \pi x$ on $[-1,1]$, noise $\sigma = 0.3$ (so $\sigma^2 = 0.09$), and 12 equally spaced training inputs. Averaging over $x$:</p>
+  <table>
+    <tr><th>degree</th><th>bias²</th><th>variance</th><th>expected test MSE</th></tr>
+    <tr><td>1</td><td>0.220</td><td>0.014</td><td>0.324</td></tr>
+    <tr><td>3</td><td>0.006</td><td>0.026</td><td><b>0.122</b></td></tr>
+    <tr><td>9</td><td>≈ 0</td><td>0.118</td><td>0.208</td></tr>
+    <tr><td>11</td><td>≈ 0</td><td>3.00</td><td>3.09</td></tr>
+  </table>
+  <p>Degree 3 wins. It's the smallest model that can bend like $\sin\pi x$ (bias nearly gone) while it still averages over noise (low variance). Past that point, every extra parameter adds variance and removes no bias. At degree 11 the model has 12 parameters for 12 points, so it interpolates the noise exactly and the variance explodes.</p>
+</div>
+
+<div class="callout intuition">
+<p>Variance grows with (number of parameters) / (number of data points). For least squares with $k$ parameters and $n$ points, the average variance at the training inputs is exactly $\sigma^2 k/n$. Two levers lower it: <b>more data</b> (raise $n$) and <b>constraining the parameters</b> (effectively lowering $k$). That second lever is regularization.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="regularization">4. Regularization: L2 and L1</h2>
+<p>Instead of picking a smaller model, keep the big model and add a penalty that discourages large weights:</p>
+$$\min_{\mathbf w, b}\;\; \underbrace{\|\mathbf y - X\mathbf w - b\mathbf 1\|^2}_{\text{fit}} + \lambda\,\underbrace{\Omega(\mathbf w)}_{\text{complexity}}.$$
+<p>$\lambda \ge 0$ is a hyperparameter: $\lambda=0$ is plain least squares, and $\lambda\to\infty$ forces $\mathbf w = 0$. We never penalize $b$, since shifting all targets by a constant shouldn't change the fit. In practice you center $X$ and $\mathbf y$, solve for $\mathbf w$, and recover $b = \bar y - \bar{\mathbf x}\cdot\mathbf w$. Penalize like this only after standardizing the features (lesson 13). Otherwise the penalty treats a weight on "price in dollars" and one on "price in millions" completely differently.</p>
+
+<h3>Ridge (L2): $\Omega = \|\mathbf w\|_2^2$</h3>
+<p>The gradient of $\|\mathbf y - X\mathbf w\|^2 + \lambda\|\mathbf w\|^2$ (centered data) is $-2X^\top(\mathbf y - X\mathbf w) + 2\lambda\mathbf w$. Setting it to zero:</p>
+$$\boxed{\;(X^\top X + \lambda I)\,\mathbf w = X^\top\mathbf y\;}$$
+<p>This is lesson 13's normal equations with $\lambda$ added to the diagonal. Two consequences. For $\lambda \gt 0$ the matrix is always invertible: its eigenvalues are $d_j^2 + \lambda \gt 0$, even if features are collinear or $d \gt n$. And the conditioning improves, since $\kappa$ drops from $d_{\max}^2/d_{\min}^2$ to $(d_{\max}^2+\lambda)/(d_{\min}^2+\lambda)$. With the SVD $X = U D V^\top$ (lesson 04), the fit becomes</p>
+$$X\mathbf w_{\text{ridge}} = \sum_j \mathbf u_j\,\frac{d_j^2}{d_j^2 + \lambda}\,(\mathbf u_j\cdot\mathbf y).$$
+<p>Ridge shrinks the component of $\mathbf y$ along each principal direction by $d_j^2/(d_j^2+\lambda)$. Directions with lots of data spread (large $d_j$) pass through almost untouched. Poorly determined directions (small $d_j$), which are exactly where variance comes from, get shrunk toward zero.</p>
+<p><b>Bayesian view</b> (lesson 10). Put a Gaussian prior $\mathbf w\sim\mathcal N(\mathbf 0, \tau^2 I)$ on the weights, keep Gaussian noise of variance $\sigma^2$, and the MAP estimate minimizes $\frac{1}{2\sigma^2}\|\mathbf y - X\mathbf w\|^2 + \frac{1}{2\tau^2}\|\mathbf w\|^2$. That's ridge with $\lambda = \sigma^2/\tau^2$. Regularization is a prior belief that weights are small.</p>
+
+<h3>Lasso (L1): $\Omega = \|\mathbf w\|_1$</h3>
+<p>Replace the square with an absolute value. The usual scaling is $\frac{1}{2n}\|\mathbf y - X\mathbf w\|^2 + \lambda\|\mathbf w\|_1$, which corresponds to a Laplace prior. There's no closed form, because $|w|$ has a kink at 0. That kink is the whole point: it produces weights that are <b>exactly zero</b>, which is automatic feature selection. To see why, look at the equivalent <em>constrained</em> problem: minimize the fit subject to $\Omega(\mathbf w) \le t$. Every $\lambda$ corresponds to some budget $t$. The solution is where the expanding loss contours first touch the constraint region, and the regions are lesson 01's unit balls.</p>
+
+<div class="figure">
+  <canvas id="fig-ball" width="680" height="420"></canvas>
+  <div class="controls" id="ctl-ball"></div>
+  <div class="readout" id="out-ball"></div>
+  <div class="caption"><b>Try it:</b> the ellipses are contours of the squared-error loss around the unregularized solution $\hat{\mathbf w}_{\text{OLS}}$ (drag it). The shaded region is the budget $\|\mathbf w\| \le t$. The regularized solution ● is where the smallest touching ellipse meets the region. Under <b>L2</b> (a circle) the contact point is almost never on an axis, so both weights shrink but stay non-zero. Switch to <b>L1</b> (a diamond): for most positions of $\hat{\mathbf w}$ the ellipse first hits a <em>corner</em>, where one weight is exactly 0. Shrink $t$ and watch the solution snap onto an axis.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: one weight, both penalties</div>
+  <p>Take the simplest case, an orthonormal design ($X^\top X = I$; for the lasso scaling use $\frac1n X^\top X = I$). Then the problems separate per coordinate, and each weight just modifies its OLS value $z = \hat w_{\text{OLS}}$.</p>
+  <p><b>Ridge:</b> minimize $(w - z)^2 + \lambda w^2$. The derivative is $2(w-z) + 2\lambda w = 0$, so $w = \dfrac{z}{1+\lambda}$. It scales down proportionally and is never exactly 0.</p>
+  <p><b>Lasso:</b> minimize $\tfrac12(w - z)^2 + \lambda|w|$. For $w \gt 0$, the derivative $w - z + \lambda = 0$ gives $w = z - \lambda$, valid only if $z \gt \lambda$. Symmetrically, $w = z + \lambda$ if $z \lt -\lambda$. If $|z| \le \lambda$, then $0$ is optimal: the subgradient of $|w|$ at 0 is the whole interval $[-1, 1]$, which can absorb any $|z| \le \lambda$. Together:</p>
+  $$w = S(z, \lambda) = \operatorname{sign}(z)\max(|z| - \lambda, 0)\qquad(\textbf{soft-thresholding}).$$
+  <p>With $\lambda = 1$: OLS weights $(3, -0.5, 1.2)$ become $(1.5, -0.25, 0.6)$ under ridge and $(2, 0, 0.2)$ under lasso. Ridge halves everything. Lasso subtracts 1 from every magnitude and kills the small weight outright. Coordinate descent for the lasso (the workbook) applies exactly this one-dimensional rule to each weight in turn, against the current residual.</p>
+</div>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-path-r" width="380" height="320"></canvas></div>
+    <div><canvas id="fig-path-l" width="380" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-path"></div>
+  <div class="readout" id="out-path"></div>
+  <div class="caption"><b>Try it:</b> <b>regularization paths</b> for 8 standardized features, of which only 4 really matter. Each curve is one weight as the penalty grows from left (weak) to right (strong), and the vertical line is the current strength. Ridge (left) pulls all weights smoothly toward 0 together. Lasso (right) drops them out <em>one at a time</em>, the useless ones first, and they become exactly 0. Find the strength where lasso has kept exactly the 4 real features.</div>
+</div>
+
+<div class="callout ml">
+<p>In deep learning, L2 regularization appears as <b>weight decay</b>: each step multiplies weights by $(1 - \eta\lambda)$ before the gradient update. AdamW (lesson 18) applies it in exactly that decoupled form. Lasso-style sparsity shows up in pruning and in sparse autoencoders for interpretability. Dropout, data augmentation and small batch sizes act as implicit regularizers too.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="early">5. Early stopping</h2>
+<p>There's a regularizer you get almost for free: <b>stop training before convergence</b>. Start gradient descent at $\mathbf w = 0$. In lesson 13 we saw that the error along each eigen-direction of the Hessian shrinks like $(1-\eta\lambda_j)^t$. The well-determined, large-eigenvalue directions are learned within a few steps. The poorly determined, small-eigenvalue ones, which are the noise-fitting directions, take thousands. Stopping at step $t$ leaves those directions near zero. That's what ridge does too. Roughly, early stopping after $t$ steps behaves like ridge with $\lambda \approx 1/(\eta t)$.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-es" width="380" height="320"></canvas></div>
+    <div><canvas id="fig-es-curve" width="380" height="320"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-es"></div>
+  <div class="readout" id="out-es"></div>
+  <div class="caption"><b>Try it:</b> a linear model on 40 Gaussian "bump" features $\phi_j(x) = e^{-(x - c_j)^2/2(0.15)^2}$ (40 parameters, only 20 training points) trained by gradient descent from zero. Press <b>play</b> or drag the step slider (log scale). Early on, the fit is smooth and captures the main shape, and the validation error falls. Later, GD slowly works its way into the poorly conditioned directions, the fit starts to wiggle, and the validation error climbs while training error keeps falling. The marker on the right shows the step with the lowest validation error: that's where you stop and keep the weights.</div>
+</div>
+<p>In practice you evaluate on the validation set every so often, save a checkpoint whenever validation loss improves, and stop when it hasn't improved for a while (the "patience"). Nearly every deep-learning training run does a version of this.</p>
+
+<!-- ============================================================ -->
+<h2 id="cv">6. Cross-validation</h2>
+<p>With small datasets, a single validation split is both wasteful (those points never get trained on) and noisy (the score depends on which points landed in it). <b>k-fold cross-validation</b> fixes both. Shuffle, cut the data into $k$ folds, and for each fold $i$ train on the other $k-1$ and validate on fold $i$. The CV estimate is the average of the $k$ validation errors. Every point is used for validation exactly once and for training $k-1$ times.</p>
+
+<div class="figure">
+  <canvas id="fig-kfold" width="680" height="360"></canvas>
+  <div class="controls" id="ctl-kfold"></div>
+  <div class="readout" id="out-kfold"></div>
+  <div class="caption"><b>Try it:</b> each row is one round of $k$-fold CV on 30 points. Orange squares are that round's validation fold and blue squares its training set. The number at the end of each row is the round's validation MSE for a polynomial of the chosen degree. Change $k$ and the degree. The right panel shows the CV estimate for every degree: <b>pick the minimum</b>, then refit that degree on all the data. The per-fold errors vary a lot, which is why we average them.</div>
+</div>
+
+<p>Recipe for choosing a hyperparameter (degree, $\lambda$, …):</p>
+<ol>
+  <li>Set the test set aside. Don't touch it.</li>
+  <li>For each candidate value, compute the k-fold CV error on the remaining data.</li>
+  <li>Pick the value with the lowest CV error. A common refinement, the "one-standard-error rule", picks the simplest model within one standard error of the best.</li>
+  <li>Refit with that value on all non-test data, then evaluate once on the test set.</li>
+</ol>
+<p>The costs are $k$ fits per candidate. $k = 5$ or $10$ is standard. $k = n$ (leave-one-out) has the least bias but is expensive and high-variance. Deep learning, with its huge datasets and expensive training, mostly uses a single held-out validation set instead.</p>
+
+<h3>Learning curves</h3>
+<p>Plot training and validation error against the <em>training-set size</em> $m$. Training error rises with $m$ (more points are harder to fit), validation error falls (more data, less variance), and the two converge. If they converge at a <b>high</b> error, you have high bias: more data won't help, so add capacity. If there's a <b>large gap</b> that's still closing, you have high variance: more data will help. The workbook's <code>learning_curve</code> computes these.</p>
+
+<!-- ============================================================ -->
+<h2 id="double">7. A modern twist: double descent</h2>
+<p>The bias–variance U predicts that a model with far more parameters than data points should generalize terribly. Yet modern neural networks have millions or billions of parameters, fit their training sets perfectly, and generalize well. The resolution, observed by Belkin et al. (2019) and Nakkiran et al. (2019), is that the U is only the <em>first half</em> of the curve.</p>
+
+<div class="figure">
+  <canvas id="fig-dd" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-dd"></div>
+  <div class="readout" id="out-dd"></div>
+  <div class="caption"><b>Try it:</b> slide through the number of features $p$. These are real measured numbers. Each point is a linear model on $p$ random ReLU features of a 10-dimensional input, fitted to $n = 40$ noisy examples by <em>minimum-norm</em> least squares, with test error measured on 1000 fresh points (median over 60 repeats). Left of $p = n$ is the classical U. At $p = n$ the model has to interpolate with no slack and the test error spikes. Past it, many interpolating solutions exist, and the minimum-norm one gets <em>smoother</em> as $p$ grows. The test error falls below the classical optimum.</div>
+</div>
+
+<p>Why does it fall again? When $p \gt n$, infinitely many weight vectors fit the training data exactly, and the algorithm picks one. Least squares via the pseudo-inverse (and gradient descent started from zero, which converges to the same solution) picks the one with the <b>smallest norm</b>. That is an implicit regularizer. With more features there are more ways to interpolate, and the smallest-norm interpolant becomes smoother and less wild. Capacity in parameter count isn't the same as effective complexity. The training algorithm's implicit bias matters as much as the model class. Deep networks show the same curve in model size, in training time and in dataset size. This is an active research area, and the classical tools of this lesson (validation sets, regularization, early stopping) remain how practitioners actually decide.</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>At some input, the average prediction over training sets is $\bar f = 1.2$, the truth is $f = 1.0$, the predictions have variance $0.3$ across training sets, and the noise has standard deviation $0.5$. What is the expected squared error there?</p>
+<div class="numcheck" data-answer="0.59"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\sigma^2 + \text{bias}^2 + \text{var} = 0.25 + 0.2^2 + 0.3 = 0.25 + 0.04 + 0.3 = 0.59$. Here variance is the biggest term, so regularization or more data would help most.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>With an orthonormal design, the OLS weights are $(3, -0.5, 1.2)$. Give the lasso weights for $\lambda = 1$ (three numbers).</p>
+<div class="numcheck" data-answer="2,0,0.2" data-tol="1e-6"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Soft-threshold each one: $S(3,1) = 2$, $S(-0.5,1) = 0$ since $|{-0.5}| \le 1$, and $S(1.2, 1) = 0.2$. Ridge with $\lambda=1$ would give $(1.5, -0.25, 0.6)$, the same three weights halved and none of them zero.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>You run 5-fold cross-validation on $n = 1000$ examples to compare 12 values of $\lambda$, then refit the winner. How many model fits is that in total? How many training examples does each CV fit see?</p>
+<div class="numcheck" data-answer="61"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$12 \times 5 = 60$ CV fits, plus 1 final refit on everything, makes 61. Each CV fit trains on $4/5$ of the data, 800 examples. Because each CV model sees slightly less data than the final one, CV is slightly pessimistic about the final model.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>Show that $X^\top X + \lambda I$ is invertible for every $\lambda \gt 0$, even when $d \gt n$. What happens to ridge as $\lambda \to 0^+$ when $X^\top X$ is singular?</p>
+<details class="hint"><summary>Hint</summary><p>For any $\mathbf v \ne 0$, compute $\mathbf v^\top(X^\top X + \lambda I)\mathbf v$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathbf v^\top(X^\top X + \lambda I)\mathbf v = \|X\mathbf v\|^2 + \lambda\|\mathbf v\|^2 \ge \lambda\|\mathbf v\|^2 \gt 0$. So the matrix is positive definite, hence invertible. As $\lambda\to0^+$, ridge converges to the <em>minimum-norm</em> least-squares solution $X^+\mathbf y$ (the pseudo-inverse). That's exactly the solution behind double descent in section 7.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · derivation</span>
+<p>Show that the MAP estimate under the model $y_i = \mathbf w\cdot\mathbf x_i + \varepsilon_i$, $\varepsilon_i\sim\mathcal N(0,\sigma^2)$, with prior $w_j \sim \mathcal N(0, \tau^2)$ i.i.d., is ridge regression with $\lambda = \sigma^2/\tau^2$. Which prior gives the lasso?</p>
+<details class="solution"><summary>Solution</summary>
+<p>$-\log p(\mathbf w\mid\text{data}) = -\log p(\text{data}\mid\mathbf w) - \log p(\mathbf w) + \text{const} = \frac{1}{2\sigma^2}\sum_i(y_i - \mathbf w\cdot\mathbf x_i)^2 + \frac{1}{2\tau^2}\sum_j w_j^2 + \text{const}$. Multiply by $2\sigma^2$: $\|\mathbf y - X\mathbf w\|^2 + \frac{\sigma^2}{\tau^2}\|\mathbf w\|^2$. A Laplace prior $p(w_j)\propto e^{-|w_j|/s}$ gives an $\|\mathbf w\|_1$ penalty: the lasso. A sharper prior (smaller $\tau$) means a larger $\lambda$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · derivation</span>
+<p>Derive the soft-thresholding solution $\arg\min_w \tfrac12(w-z)^2 + \lambda|w| = S(z,\lambda)$ using subgradients. The subgradient of $|w|$ is $\operatorname{sign}(w)$ for $w\ne0$ and the interval $[-1,1]$ at $w=0$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>Optimality means $0 \in (w - z) + \lambda\,\partial|w|$. If $w \gt 0$: $w = z - \lambda$, consistent only if $z \gt \lambda$. If $w \lt 0$: $w = z+\lambda$, consistent only if $z \lt -\lambda$. If $w = 0$: we need $z \in \lambda[-1, 1]$, i.e. $|z| \le \lambda$. The three cases together give $S(z,\lambda)$. The flat region $|z|\le\lambda$ is what produces exact zeros. L2's derivative $2\lambda w$ has no such region.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>In the fixed-design example of section 3 (12 points, $\sigma = 0.3$), ordinary least squares with $k$ parameters has average variance $\sigma^2 k/n$ <em>at the training inputs</em>. What is that for degree 3, i.e. $k = 4$?</p>
+<div class="numcheck" data-answer="0.03" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$0.09\cdot 4/12 = 0.03$. The fact behind it: $\hat{\mathbf y} = P\mathbf y$ with the hat matrix $P$ (lesson 13, problem 6), so $\operatorname{Cov}\hat{\mathbf y} = \sigma^2 P P^\top = \sigma^2 P$, and $\operatorname{tr}P = k$ for a projection onto a $k$-dimensional space. The table's 0.026 is averaged over a grid on $[-1,1]$ instead of the training inputs, so it differs slightly. At degree 11 ($k=12=n$) the formula gives $\sigma^2$ at the training points, but between them, where the curve swings, the variance is much larger.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch · conceptual</span>
+<p>You try 200 hyperparameter configurations and report the best validation accuracy, 91.3%, as your model's expected accuracy. Why is this optimistic even though no configuration ever trained on the validation set? What should you report instead?</p>
+<details class="solution"><summary>Solution</summary>
+<p>Each validation score is a noisy estimate. The <em>maximum</em> of 200 noisy estimates is biased upward: you selected partly on lucky noise. This is the same "winner's curse" as fitting parameters to training data, one level up. By choosing among 200 options you've used the validation set to fit a hyperparameter. Report the score of the chosen configuration on an untouched test set. Nested cross-validation also works.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch</span>
+<p>Gradient descent on least squares from $\mathbf w = 0$, with $d \gt n$, converges to a weight vector in the row space of $X$, i.e. $\mathbf w = X^\top\boldsymbol\alpha$ for some $\boldsymbol\alpha$. Why? Conclude that it reaches the minimum-norm interpolant.</p>
+<details class="solution"><summary>Solution</summary>
+<p>Every gradient $\frac2n X^\top(X\mathbf w - \mathbf y)$ is $X^\top$ times something, so every update stays in the row space of $X$, and so does the starting point 0. Among all interpolants $\{\mathbf w : X\mathbf w = \mathbf y\}$, which differ by null-space vectors, exactly one lies in the row space. It's orthogonal to the null space, so by Pythagoras (lesson 01) it has the smallest norm. That's the implicit regularization of GD, and the mechanism behind section 7.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">Your model has 2% training error and 25% validation error. What's the most likely diagnosis and fix?</div>
+  <div class="opts">
+    <button data-k="a">High bias: add more features.</button>
+    <button data-k="b">The validation set must be broken; average it with the training error.</button>
+    <button data-k="c">High variance (overfitting): get more data, regularize, or reduce capacity.</button>
+    <button data-k="d">Learning rate too high: lower it.</button>
+  </div>
+  <div class="explain">A big gap between training and validation error is the signature of variance. More features would widen it. High bias looks like both errors being high and close together.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">Why does the lasso produce exactly-zero weights while ridge doesn't?</div>
+  <div class="opts">
+    <button data-k="a">Lasso uses a larger λ by convention.</button>
+    <button data-k="b">The L1 ball has corners on the axes (equivalently, |w| has a kink at 0 whose subgradient can absorb small correlations), so solutions land on them.</button>
+    <button data-k="c">Ridge is solved in closed form, which can't produce zeros.</button>
+    <button data-k="d">Lasso drops features whose OLS weight is negative.</button>
+  </div>
+  <div class="explain">Geometrically, the ellipse tends to touch the diamond at a vertex. Analytically, soft-thresholding sets $|z| \le \lambda$ to exactly 0. Ridge's penalty is smooth at 0, so its gradient there is 0 and it only scales weights down.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Which of these is a legitimate use of the <em>test</em> set?</div>
+  <div class="opts">
+    <button data-k="a">Choosing λ for ridge regression.</button>
+    <button data-k="b">Deciding when to stop training.</button>
+    <button data-k="c">Computing the mean and std used for feature standardization.</button>
+    <button data-k="d">Reporting the final error of the one model you've already chosen.</button>
+  </div>
+  <div class="explain">(a) and (b) are validation jobs. (c) is leakage, because the statistics must come from training data. The test set gives one honest number at the very end.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">In the double-descent figure, why does the test error <em>decrease</em> for $p \gg n$ even though every such model fits the training data perfectly?</div>
+  <div class="opts">
+    <button data-k="a">Among the many interpolating solutions, the minimum-norm one becomes smoother as $p$ grows: the fitting algorithm regularizes implicitly.</button>
+    <button data-k="b">More parameters always reduce variance.</button>
+    <button data-k="c">The training error becomes negative.</button>
+    <button data-k="d">The noise in the data disappears for large $p$.</button>
+  </div>
+  <div class="explain">At $p = n$ there's exactly one interpolant, and it's wild. For $p \gt n$ there are infinitely many, and the minimum-norm choice spreads the fit across many features, which damps the wiggles. The noise is still there, and variance didn't "always" decrease: look at the spike.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Idea</th><th>Formula / rule</th><th>Use it for</th></tr>
+  <tr><td>Splits</td><td>train → params; val → hyperparams; test → final report</td><td>honest error estimates</td></tr>
+  <tr><td>Bias–variance</td><td>$\mathbb E(y-\hat f)^2 = \sigma^2 + \text{bias}^2 + \text{var}$</td><td>diagnosing under/overfitting</td></tr>
+  <tr><td>Ridge (L2)</td><td>$(X^\top X + \lambda I)\mathbf w = X^\top\mathbf y$</td><td>shrinking, stabilizing, Gaussian prior</td></tr>
+  <tr><td>Lasso (L1)</td><td>$S(z,\lambda) = \operatorname{sign}(z)\max(|z|-\lambda,0)$</td><td>sparsity, feature selection, Laplace prior</td></tr>
+  <tr><td>Early stopping</td><td>keep the weights at the best validation step</td><td>implicit ridge, nearly free</td></tr>
+  <tr><td>k-fold CV</td><td>average of $k$ held-out errors</td><td>choosing degree / λ on small data</td></tr>
+  <tr><td>Double descent</td><td>test error falls again for $p \gg n$</td><td>why huge networks can generalize</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 15: build it</h3>
+  <p>Open <code>workbooks/15_generalization/exercises.py</code>. You'll write reproducible train/val/test splits and k-fold indices, then ridge in closed form (bias unpenalized) and the lasso by coordinate descent with soft-thresholding. Tests check the KKT optimality conditions and that $\lambda_{\max}$ zeroes every weight. Then you'll write a generic <code>cross_val_mse</code>, choose λ by CV for both penalties, compute learning curves, and run a Monte-Carlo bias–variance decomposition. Grade yourself with:</p>
+  <pre><code>./course check 15</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Hastie, Tibshirani &amp; Friedman, <em>The Elements of Statistical Learning</em>, §3.4 (shrinkage) and ch. 7 (model assessment and selection).</li>
+  <li>Tibshirani, "Regression Shrinkage and Selection via the Lasso" (1996).</li>
+  <li>Belkin, Hsu, Ma &amp; Mandal, "Reconciling modern machine learning practice and the bias–variance trade-off" (PNAS 2019); Nakkiran et al., "Deep Double Descent" (2019).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt } = Course;
+  const f = x => Math.sin(Math.PI * x);
+  // least squares via modified Gram-Schmidt QR (rows of A)
+  function lstsq(A, y) {
+    const m = A.length, k = A[0].length, Q = A.map(r => r.slice()), R = [...Array(k)].map(() => new Array(k).fill(0));
+    for (let j = 0; j < k; j++) {
+      for (let i = 0; i < j; i++) { let d = 0; for (let r = 0; r < m; r++) d += Q[r][i] * Q[r][j]; R[i][j] += d; for (let r = 0; r < m; r++) Q[r][j] -= d * Q[r][i]; }
+      for (let i = 0; i < j; i++) { let d = 0; for (let r = 0; r < m; r++) d += Q[r][i] * Q[r][j]; R[i][j] += d; for (let r = 0; r < m; r++) Q[r][j] -= d * Q[r][i]; } // re-orthogonalize
+      let nrm = 0; for (let r = 0; r < m; r++) nrm += Q[r][j] ** 2; nrm = Math.sqrt(nrm); R[j][j] = nrm; for (let r = 0; r < m; r++) Q[r][j] /= (nrm || 1);
+    }
+    const z = new Array(k).fill(0); for (let j = 0; j < k; j++) for (let r = 0; r < m; r++) z[j] += Q[r][j] * y[r];
+    const th = new Array(k).fill(0);
+    for (let i = k - 1; i >= 0; i--) { let s = z[i]; for (let j = i + 1; j < k; j++) s -= R[i][j] * th[j]; th[i] = R[i][i] > 1e-9 * (R[0][0] || 1) ? s / R[i][i] : 0; }
+    return th;
+  }
+  const vander = (xs, d) => xs.map(x => [...Array(d + 1).keys()].map(k => x ** k));
+  const polyval = (th, x) => th.reduce((s, c, k) => s + c * x ** k, 0);
+  const mse = (th, xs, ys) => xs.reduce((s, x, i) => s + (polyval(th, x) - ys[i]) ** 2, 0) / xs.length;
+  // log-scale y helpers for error plots
+  const logAxis = (p, lo, hi, xs) => {
+    for (let e = Math.ceil(lo); e <= hi; e++) { p.line(p.xmin, e, p.xmax, e, { color: "grid", width: 1 }); p.label(p.xmin, e, e >= 0 ? String(10 ** e) : "1e" + e, { dx: 4, dy: -7, color: "muted", font: "10px sans-serif" }); }
+    xs.forEach(([x, s]) => p.label(x, lo, s, { align: "center", dy: 10, color: "muted", font: "10px sans-serif" }));
+  };
+  const L10 = v => Math.log10(Math.max(v, 1e-12));
+
+  // ---------- fig: degree slider, train vs val ----------
+  {
+    const p = new Plot("#fig-deg", { xmin: -1.1, xmax: 1.1, ymin: -1.9, ymax: 1.9 }), q = new Plot("#fig-deg-curve", { xmin: -0.8, xmax: 14.8, ymin: -2.6, ymax: 1.6 });
+    let seed = 1, deg = 3, xtr, ytr, xva, yva, fits, tr, va; const out = document.getElementById("out-deg"), D = 14;
+    function sample() {
+      const R = Course.rng(seed); xtr = []; ytr = []; xva = []; yva = [];
+      for (let i = 0; i < 15; i++) { const x = R.uniform(-1, 1); xtr.push(x); ytr.push(f(x) + R.normal(0, 0.25)); }
+      for (let i = 0; i < 40; i++) { const x = R.uniform(-1, 1); xva.push(x); yva.push(f(x) + R.normal(0, 0.25)); }
+      fits = []; tr = []; va = [];
+      for (let d = 0; d <= D; d++) { const th = lstsq(vander(xtr, d), ytr); fits.push(th); tr.push(mse(th, xtr, ytr)); va.push(mse(th, xva, yva)); }
+      render();
+    }
+    slider("#ctl-deg", { label: "degree ", min: 0, max: D, step: 1, value: deg, digits: 0 }, v => { deg = v; render(); });
+    button("#ctl-deg", "new sample", () => { seed++; sample(); });
+    function render() {
+      p.render(p => {
+        p.grid({ step: 0.5, stepY: 0.5 }).axes({ step: 0.5, stepY: 1 });
+        p.fn(f, { color: "muted", width: 1.5, dash: [5, 4] });
+        p.fn(x => { const v = polyval(fits[deg], x); return Math.abs(v) < 4 ? v : NaN; }, { color: "c5", width: 2.5, samples: 500 });
+        xva.forEach((x, i) => p.point(x, yva[i], { r: 3, color: "c2", alpha: .8 }));
+        xtr.forEach((x, i) => p.point(x, ytr[i], { r: 4.5, color: "c1", stroke: "bg" }));
+        p.label(8, 14, `degree ${deg}`, { px: true, color: "c5", font: "600 12px sans-serif" });
+      });
+      q.render(q => {
+        logAxis(q, -2, 1, [0, 2, 4, 6, 8, 10, 12, 14].map(d => [d, String(d)]));
+        q.path(tr.map((v, d) => [d, L10(v)]), { color: "c1", width: 2.5 }); q.path(va.map((v, d) => [d, Math.min(1.55, L10(v))]), { color: "c2", width: 2.5 });
+        tr.forEach((v, d) => q.point(d, L10(v), { r: 3, color: "c1" })); va.forEach((v, d) => q.point(d, Math.min(1.55, L10(v)), { r: 3, color: "c2" }));
+        const best = va.indexOf(Math.min(...va));
+        q.line(deg, -2.6, deg, 1.6, { color: "c5", width: 1.5, dash: [4, 4] });
+        q.label(best, L10(va[best]), "best", { align: "center", dy: 14, color: "c2", font: "600 11px sans-serif" });
+        q.label(14.6, 1.35, "validation", { align: "right", color: "c2", font: "600 12px sans-serif" });
+        q.label(14.6, 1.1, "training", { align: "right", color: "c1", font: "600 12px sans-serif" });
+        q.label(-0.6, -2.35, "MSE (log scale) vs degree", { color: "muted", font: "11px sans-serif" });
+      });
+      out.textContent = `degree ${deg}:  train MSE = ${tr[deg].toFixed(4)}   validation MSE = ${va[deg] < 1e4 ? va[deg].toFixed(4) : va[deg].toExponential(2)}   gap = ${(va[deg] - tr[deg]).toPrecision(3)}\n` +
+        `best validation degree for this sample: ${va.indexOf(Math.min(...va))}   (noise variance = 0.0625)`;
+    }
+    sample();
+  }
+
+  // ---------- fig: bias-variance ----------
+  {
+    const p = new Plot("#fig-bv", { xmin: -1.1, xmax: 1.1, ymin: -2, ymax: 2 }), q = new Plot("#fig-bv-curve", { xmin: -0.6, xmax: 11, ymin: -3.2, ymax: 1 });
+    const n = 12, s = 0.3, xs = [...Array(n).keys()].map(i => -1 + 2 * i / (n - 1)), xt = [...Array(61).keys()].map(i => -1 + i / 30), D = 11;
+    // exact bias^2 and variance: predictions are linear in y, L[t][i] = weight of y_i in the prediction at xt[t]
+    const B2 = [], V = [], sims = [];
+    for (let d = 0; d <= D; d++) {
+      const A = vander(xs, d), cols = xs.map((_, i) => lstsq(A, xs.map((_, j) => +(i === j))));
+      let b2 = 0, v = 0;
+      xt.forEach(x => { let m = 0, ss = 0; cols.forEach((th, i) => { const l = polyval(th, x); m += l * f(xs[i]); ss += l * l; }); b2 += (m - f(x)) ** 2; v += s * s * ss; });
+      B2.push(b2 / xt.length); V.push(v / xt.length);
+      const R = Course.rng(100 + d), runs = [];
+      for (let r = 0; r < 25; r++) { const ys = xs.map(x => f(x) + R.normal(0, s)); runs.push(lstsq(A, ys)); }
+      sims.push(runs);
+    }
+    let deg = 1; const out = document.getElementById("out-bv");
+    slider("#ctl-bv", { label: "degree ", min: 0, max: D - 1, step: 1, value: deg, digits: 0 }, v => { deg = v; render(); });
+    function render() {
+      p.render(p => {
+        p.grid({ step: 0.5, stepY: 0.5 }).axes({ step: 0.5, stepY: 1 });
+        const clip = v => Math.abs(v) < 5 ? v : NaN;
+        sims[deg].forEach(th => p.fn(x => clip(polyval(th, x)), { color: "c1", width: 1, alpha: .3, samples: 200 }));
+        const mean = x => sims[deg].reduce((a, th) => a + polyval(th, x), 0) / sims[deg].length;
+        p.fn(x => clip(mean(x)), { color: "c5", width: 3 });
+        p.fn(f, { color: "fg", width: 1.5, dash: [5, 4] });
+        xs.forEach(x => p.line(x, -2, x, -1.88, { color: "muted", width: 2 }));
+        p.label(8, 14, `degree ${deg}: 25 fits, their mean, the truth`, { px: true, color: "muted", font: "11px sans-serif" });
+      });
+      q.render(q => {
+        logAxis(q, -3, 0, [0, 2, 4, 6, 8, 10].map(d => [d, String(d)]));
+        const tot = B2.map((b, d) => b + V[d] + s * s);
+        q.line(-0.6, L10(s * s), 11, L10(s * s), { color: "muted", width: 1, dash: [3, 4] });
+        q.path(B2.slice(0, D).map((v, d) => [d, Math.max(-3.1, L10(v))]), { color: "c4", width: 2.5 });
+        q.path(V.slice(0, D).map((v, d) => [d, L10(v)]), { color: "c1", width: 2.5 });
+        q.path(tot.slice(0, D).map((v, d) => [d, L10(v)]), { color: "c5", width: 3 });
+        q.line(deg, -3.2, deg, 1, { color: "c5", width: 1.2, dash: [4, 4] });
+        q.label(10.8, 0.8, "bias² + var + noise", { align: "right", color: "c5", font: "600 12px sans-serif" });
+        q.label(10.8, 0.55, "variance", { align: "right", color: "c1", font: "600 12px sans-serif" });
+        q.label(10.8, 0.3, "bias²", { align: "right", color: "c4", font: "600 12px sans-serif" });
+        q.label(10.8, L10(s * s), "noise σ²", { align: "right", dy: -8, color: "muted", font: "11px sans-serif" });
+      });
+      out.textContent = `degree ${deg}:  bias² = ${B2[deg].toFixed(4)}   variance = ${V[deg].toFixed(4)}   noise = ${(s * s).toFixed(4)}   expected test MSE = ${(B2[deg] + V[deg] + s * s).toFixed(4)}`;
+    }
+    render();
+  }
+
+  // ---------- fig: L1 vs L2 balls ----------
+  {
+    const p = new Plot("#fig-ball", { xmin: -3, xmax: 3, ymin: -2.6, ymax: 2.6, equal: true });
+    const h = { x: 2.0, y: 0.45, color: "c2" }; let t = 1.2, norm = "L1"; const out = document.getElementById("out-ball");
+    const c = Math.cos(0.5), sn = Math.sin(0.5), l1 = 1, l2 = 3.5; // loss Hessian = R diag(l1,l2) R^T
+    const Q = (w0, w1) => { const dx = w0 - h.x, dy = w1 - h.y, u = c * dx + sn * dy, v = -sn * dx + c * dy; return l1 * u * u + l2 * v * v; };
+    slider("#ctl-ball", { label: "budget t ", min: 0.1, max: 3, step: 0.05, value: t }, v => { t = v; p.render(); });
+    select("#ctl-ball", "penalty ", [["L1", "L1 (lasso): |w₁| + |w₂| ≤ t"], ["L2", "L2 (ridge): w₁² + w₂² ≤ t²"]], v => { norm = v; p.render(); });
+    p.draggable([h]).render(p => {
+      p.grid({ step: 0.5 }).axes({ step: 1, xlabel: "w₁", ylabel: "w₂" });
+      const inside = norm === "L1" ? Math.abs(h.x) + Math.abs(h.y) <= t : Math.hypot(h.x, h.y) <= t;
+      let best = [h.x, h.y], bl = 0;
+      if (!inside) {
+        bl = Infinity;
+        for (let i = 0; i < 4000; i++) {
+          const a = 2 * Math.PI * i / 4000, ca = Math.cos(a), sa = Math.sin(a);
+          const r = norm === "L1" ? t / (Math.abs(ca) + Math.abs(sa)) : t, w = [r * ca, r * sa], L = Q(w[0], w[1]);
+          if (L < bl) { bl = L; best = w; }
+        }
+        // snap to a corner if the best boundary point is within a hair of one (sampling resolution)
+        if (norm === "L1") [[t, 0], [-t, 0], [0, t], [0, -t]].forEach(v => { if (Q(v[0], v[1]) <= bl + 1e-9 || Math.hypot(v[0] - best[0], v[1] - best[1]) < 2e-3) { best = v; bl = Q(v[0], v[1]); } });
+      }
+      const levels = [0.05, 0.2, 0.5, 1, 2, 3.5, 5.5, 8].map(v => v * 1);
+      p.contour(Q, levels, { color: "muted", width: 1, res: 4 });
+      if (!inside) p.contour(Q, [bl], { color: "c2", width: 2.5, res: 3 });
+      if (norm === "L1") p.polygon([[t, 0], [0, t], [-t, 0], [0, -t]], { fill: "c1", fillAlpha: .18, color: "c1", width: 2 });
+      else p.circle(0, 0, t, { fill: "c1", fillAlpha: .18, color: "c1", width: 2 });
+      p.drawHandles(); p.label(h.x, h.y, "ŵ OLS", { color: "c2", dx: 10, dy: -10 });
+      p.point(best[0], best[1], { r: 7, color: "c3", stroke: "bg" });
+      const z = v => Math.abs(v) < 1e-3 ? 0 : v;
+      out.textContent = `OLS ŵ = (${h.x.toFixed(2)}, ${h.y.toFixed(2)})    regularized ● = (${z(best[0]).toFixed(3)}, ${z(best[1]).toFixed(3)})` +
+        (inside ? "    (OLS already inside the budget: no shrinkage)" : (norm === "L1" && (z(best[0]) === 0 || z(best[1]) === 0) ? "    ← a weight is exactly 0 (corner)" : ""));
+    });
+  }
+
+  // ---------- fig: regularization paths ----------
+  {
+    const R = Course.rng(21), n = 60, d = 8, wt = [3, -2, 0, 1.5, 0, 0, 0.8, 0];
+    const X = [], y = [];
+    for (let i = 0; i < n; i++) { const z = [...Array(d)].map(() => R.normal()); z[2] = 0.7 * z[0] + 0.7 * z[2]; z[5] = 0.6 * z[3] + 0.8 * z[5]; X.push(z); y.push(z.reduce((s, v, j) => s + v * wt[j], 0) + R.normal(0, 1.5)); }
+    // standardize X, center y
+    for (let j = 0; j < d; j++) { const m = X.reduce((s, r) => s + r[j], 0) / n, sd = Math.sqrt(X.reduce((s, r) => s + (r[j] - m) ** 2, 0) / n); X.forEach(r => r[j] = (r[j] - m) / sd); }
+    const my = y.reduce((a, b) => a + b) / n; y.forEach((v, i) => y[i] = v - my);
+    const G = [...Array(d)].map((_, i) => [...Array(d)].map((_, j) => X.reduce((s, r) => s + r[i] * r[j], 0))), Xy = [...Array(d)].map((_, j) => X.reduce((s, r, i) => s + r[j] * y[i], 0));
+    const solve = (A, b) => { const M = A.map((r, i) => [...r, b[i]]), k = b.length; for (let c = 0; c < k; c++) { let piv = c; for (let r = c + 1; r < k; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r; [M[c], M[piv]] = [M[piv], M[c]]; for (let r = c + 1; r < k; r++) { const fct = M[r][c] / M[c][c]; for (let q = c; q <= k; q++) M[r][q] -= fct * M[c][q]; } } const x = new Array(k).fill(0); for (let i = k - 1; i >= 0; i--) { let s = M[i][k]; for (let j = i + 1; j < k; j++) s -= M[i][j] * x[j]; x[i] = s / M[i][i]; } return x; };
+    const ridge = lam => solve(G.map((r, i) => r.map((v, j) => v + (i === j ? lam : 0))), Xy);
+    const lmax = Math.max(...Xy.map(v => Math.abs(v) / n));
+    let wl = new Array(d).fill(0);
+    const lasso = lam => { // warm-started coordinate descent on (1/2n)||y - Xw||^2 + lam ||w||_1
+      for (let it = 0; it < 300; it++) { let big = 0; for (let j = 0; j < d; j++) { let rho = Xy[j]; for (let k = 0; k < d; k++) if (k !== j) rho -= G[j][k] * wl[k]; rho /= n; const z = G[j][j] / n, nw = Math.sign(rho) * Math.max(Math.abs(rho) - lam, 0) / z; big = Math.max(big, Math.abs(nw - wl[j])); wl[j] = nw; } if (big < 1e-10) break; }
+      return wl.slice();
+    };
+    const T = [...Array(121).keys()].map(i => i / 120), lamR = t => 10 ** (-1 + 5 * t), lamL = t => lmax * 10 ** (-3 + 3.05 * t);
+    const PR = T.map(t => ridge(lamR(t))), PL = T.map(t => lasso(lamL(t)));
+    const ymax = Math.max(...PR[0].map(Math.abs), ...PL[0].map(Math.abs)) * 1.12;
+    const cols = ["c1", "c2", "c3", "c4", "c5", "c6", "fg", "muted"];
+    const pr = new Plot("#fig-path-r", { xmin: -0.12, xmax: 1.02, ymin: -ymax, ymax }), pl = new Plot("#fig-path-l", { xmin: -0.12, xmax: 1.02, ymin: -ymax, ymax });
+    let t0 = 0.5; const out = document.getElementById("out-path");
+    slider("#ctl-path", { label: "penalty strength (log scale) ", min: 0, max: 1, step: 0.005, value: t0, digits: 2 }, v => { t0 = v; draw(); });
+    const panel = (p, P, title, lamText) => p.render(p => {
+      p.grid({ step: 0.1, stepY: 1 }); p.line(0, 0, 1, 0, { color: "axis", width: 1 });
+      for (let j = 0; j < d; j++) { p.path(T.map((t, i) => [t, P[i][j]]), { color: cols[j], width: 2 }); p.label(0, P[0][j], "w" + (j + 1), { align: "right", dx: -4, color: cols[j], font: "11px ui-monospace, Menlo, monospace" }); }
+      p.line(t0, -ymax, t0, ymax, { color: "fg", width: 1.2, dash: [4, 4] });
+      p.label(p.W / 2, 14, title, { px: true, align: "center", color: "fg", bg: true, font: "600 12px sans-serif" });
+      p.label(p.W - 6, p.H - 10, lamText, { px: true, align: "right", color: "muted", font: "11px sans-serif" });
+      p.label(6, p.H - 10, "weak ← → strong", { px: true, color: "muted", font: "11px sans-serif" });
+    });
+    function draw() {
+      const i = Math.round(t0 * 120);
+      panel(pr, PR, "ridge (L2)", "λ = " + lamR(T[i]).toPrecision(3)); panel(pl, PL, "lasso (L1)", "λ = " + lamL(T[i]).toPrecision(3));
+      const nz = PL[i].filter(v => v !== 0).length;
+      out.textContent = `true weights:  [${wt.join(", ")}]   (w3 is correlated with w1, w6 with w4)\n` +
+        `ridge:  [${PR[i].map(v => v.toFixed(2)).join(", ")}]\nlasso:  [${PL[i].map(v => v === 0 ? "0" : v.toFixed(2)).join(", ")}]   ← ${nz} non-zero`;
+    }
+    draw();
+  }
+
+  // ---------- fig: early stopping ----------
+  {
+    const R = Course.rng(3), nt = 20, xtr = [], ytr = [], xva = [], yva = [];
+    for (let i = 0; i < nt; i++) { const x = R.uniform(-1, 1); xtr.push(x); ytr.push(f(x) + R.normal(0, 0.3)); }
+    for (let i = 0; i < 100; i++) { const x = -1 + 2 * (i + 0.5) / 100; xva.push(x); yva.push(f(x) + R.normal(0, 0.3)); }
+    const C = [...Array(40).keys()].map(i => -1.1 + 2.2 * i / 39), D = C.length;   // 40 Gaussian bump features, width 0.15
+    const phi = x => C.map(c => Math.exp(-((x - c) ** 2) / (2 * 0.15 ** 2))), Z = xtr.map(phi), Zv = xva.map(phi), b = ytr.reduce((a, c) => a + c) / nt;
+    // largest eigenvalue of H = (2/n) Z^T Z by power iteration
+    let v = new Array(D).fill(1), lam = 0;
+    for (let it = 0; it < 200; it++) { const Zv_ = Z.map(r => r.reduce((s, x, j) => s + x * v[j], 0)), Hv = v.map((_, j) => 2 / nt * Z.reduce((s, r, i) => s + r[j] * Zv_[i], 0)); lam = Math.hypot(...Hv); v = Hv.map(x => x / lam); }
+    const lr = 1.8 / lam, MAXT = 30000, pred = (w, z) => z.reduce((s, x, j) => s + x * w[j], b);
+    const errs = (w, ZZ, yy) => ZZ.reduce((s, z, i) => s + (pred(w, z) - yy[i]) ** 2, 0) / yy.length;
+    const ck = [], marks = new Set([...Array(161).keys()].map(i => Math.round(10 ** (4.4772 * i / 160))));
+    let w = new Array(D).fill(0);
+    ck.push({ t: 0, w: w.slice(), tr: errs(w, Z, ytr), va: errs(w, Zv, yva) });
+    for (let t = 1; t <= MAXT; t++) {
+      const r = Z.map((z, i) => pred(w, z) - ytr[i]);
+      for (let j = 0; j < D; j++) { let g = 0; for (let i = 0; i < nt; i++) g += Z[i][j] * r[i]; w[j] -= lr * 2 / nt * g; }
+      if (marks.has(t)) ck.push({ t, w: w.slice(), tr: errs(w, Z, ytr), va: errs(w, Zv, yva) });
+    }
+    let bi = 0; ck.forEach((c, i) => { if (c.va < ck[bi].va) bi = i; });
+    const p = new Plot("#fig-es", { xmin: -1.1, xmax: 1.1, ymin: -1.9, ymax: 1.9 }), q = new Plot("#fig-es-curve", { xmin: -0.3, xmax: 4.6, ymin: -2.2, ymax: 1.2 });
+    let k = 20; const out = document.getElementById("out-es");
+    const sl = slider("#ctl-es", { label: "step (log₁₀) ", min: 0, max: ck.length - 1, step: 1, value: k, digits: 0 }, v => { k = v; render(); });
+    const anim = Course.animator(() => { k = Math.min(ck.length - 1, k + 1); sl.set(k); render(); return k < ck.length - 1; });
+    button("#ctl-es", "▶ play", () => { if (k >= ck.length - 1) k = 0; anim.start(); }); button("#ctl-es", "jump to best", () => { anim.stop(); k = bi; sl.set(k); render(); });
+    function render() {
+      const c = ck[k];
+      p.render(p => {
+        p.grid({ step: 0.5, stepY: 0.5 }).axes({ step: 0.5, stepY: 1 });
+        p.fn(f, { color: "muted", width: 1.5, dash: [5, 4] });
+        xva.forEach((x, i) => p.point(x, yva[i], { r: 2.5, color: "c2", alpha: .6 }));
+        xtr.forEach((x, i) => p.point(x, ytr[i], { r: 4.5, color: "c1", stroke: "bg" }));
+        p.fn(x => { const v = pred(c.w, phi(x)); return Math.abs(v) < 4 ? v : NaN; }, { color: "c5", width: 2.5, samples: 400 });
+        p.label(8, 14, `after ${c.t} GD steps`, { px: true, color: "c5", font: "600 12px sans-serif" });
+      });
+      q.render(q => {
+        logAxis(q, -2, 1, [0, 1, 2, 3, 4].map(e => [e, e ? "1e" + e : "1"]));
+        const X = c0 => Math.log10(Math.max(1, c0.t));
+        q.path(ck.map(c0 => [X(c0), L10(c0.tr)]), { color: "c1", width: 2.5 }); q.path(ck.map(c0 => [X(c0), Math.min(1.15, L10(c0.va))]), { color: "c2", width: 2.5 });
+        q.line(X(c), -2.2, X(c), 1.2, { color: "c5", width: 1.5, dash: [4, 4] });
+        q.point(X(ck[bi]), L10(ck[bi].va), { r: 6, color: "c3", stroke: "bg" }); q.label(X(ck[bi]), L10(ck[bi].va), "stop here", { align: "center", dy: 16, color: "c3", font: "600 11px sans-serif" });
+        q.label(4.5, 0.95, "validation", { align: "right", color: "c2", font: "600 12px sans-serif" }); q.label(4.5, 0.7, "training", { align: "right", color: "c1", font: "600 12px sans-serif" });
+        q.label(0.3, -1.75, "MSE (log) vs GD step (log)", { color: "muted", font: "11px sans-serif" });
+      });
+      out.textContent = `step ${c.t}:  train MSE ${c.tr.toFixed(4)}   validation MSE ${c.va.toFixed(4)}    best validation at step ${ck[bi].t} (${ck[bi].va.toFixed(4)})   lr = 1.8/λmax = ${lr.toFixed(4)}`;
+    }
+    render();
+  }
+
+  // ---------- fig: k-fold CV ----------
+  {
+    const p = new Plot("#fig-kfold", { xmin: 0, xmax: 680, ymin: 0, ymax: 360 });
+    const R = Course.rng(8), n = 30, xs = [], ys = []; for (let i = 0; i < n; i++) { const x = R.uniform(-1, 1); xs.push(x); ys.push(f(x) + R.normal(0, 0.3)); }
+    const perm = [...Array(n).keys()]; for (let i = n - 1; i > 0; i--) { const j = Course.rng(99 + i).int(i + 1); [perm[i], perm[j]] = [perm[j], perm[i]]; }
+    let k = 5, deg = 3; const out = document.getElementById("out-kfold");
+    slider("#ctl-kfold", { label: "k ", min: 2, max: 10, step: 1, value: k, digits: 0 }, v => { k = v; p.render(); });
+    slider("#ctl-kfold", { label: "degree ", min: 0, max: 10, step: 1, value: deg, digits: 0 }, v => { deg = v; p.render(); });
+    const folds = k => { const out = [], base = Math.floor(n / k), extra = n % k; let s = 0; for (let i = 0; i < k; i++) { const len = base + (i < extra ? 1 : 0); out.push(perm.slice(s, s + len)); s += len; } return out; };
+    const cv = (k, d) => { const F = folds(k); return F.map(va => { const vs = new Set(va), tr = perm.filter(i => !vs.has(i)), th = lstsq(vander(tr.map(i => xs[i]), d), tr.map(i => ys[i])); return mse(th, va.map(i => xs[i]), va.map(i => ys[i])); }); };
+    p.render(p => {
+      const F = folds(k), E = cv(k, deg), H = p.ymax, top = 34, rh = Math.min(28, 290 / k), bw = 11;
+      p.label(20, H - 16, `${k}-fold CV on ${n} points (one square per example)`, { color: "muted", font: "12px sans-serif" });
+      F.forEach((va, r) => {
+        const vs = new Set(va), yt = top + r * rh;
+        p.label(20, H - yt - rh / 2 + 2, "round " + (r + 1), { color: "muted", font: "11px sans-serif" });
+        for (let i = 0; i < n; i++) p.rect(80 + i * bw, H - yt - 2, 80 + i * bw + bw - 2, H - yt - rh + 4, { fill: vs.has(i) ? "c2" : "c1", fillAlpha: vs.has(i) ? .85 : .3, color: vs.has(i) ? "c2" : "c1", width: .5 });
+        p.label(80 + n * bw + 6, H - yt - rh / 2 + 2, E[r] < 100 ? E[r].toFixed(3) : E[r].toExponential(1), { color: "c2", font: "11px ui-monospace, Menlo, monospace" });
+      });
+      // CV curve vs degree
+      const x0 = 480, x1 = 665, y0 = 60, y1 = 320, lo = -1.5, hi = 1.5, X = d => x0 + (x1 - x0) * d / 10, Y = v => y0 + (y1 - y0) * (Math.min(hi, Math.max(lo, Math.log10(v))) - lo) / (hi - lo);
+      p.rect(x0 - 8, y0 - 8, x1 + 8, y1 + 22, { fill: "bg", fillAlpha: .4, color: "line", width: 1 });
+      for (let e = -1; e <= 1; e++) { p.line(x0, Y(10 ** e), x1, Y(10 ** e), { color: "grid", width: 1 }); p.label(x0, Y(10 ** e), e === 0 ? "1" : "1e" + e, { dx: 2, dy: -7, color: "muted", font: "10px sans-serif" }); }
+      const cvs = [...Array(11).keys()].map(d => { const e = cv(k, d); return e.reduce((a, b) => a + b) / e.length; });
+      p.path(cvs.map((v, d) => [X(d), Y(v)]), { color: "c5", width: 2.5 }); cvs.forEach((v, d) => p.point(X(d), Y(v), { r: d === deg ? 6 : 3, color: d === deg ? "c3" : "c5" }));
+      [0, 5, 10].forEach(d => p.label(X(d), y0 - 2, String(d), { align: "center", dy: 8, color: "muted", font: "10px sans-serif" }));
+      p.label((x0 + x1) / 2, y1 + 10, "CV MSE vs degree (log)", { align: "center", color: "muted", font: "11px sans-serif" });
+      const best = cvs.indexOf(Math.min(...cvs)), m = E.reduce((a, b) => a + b) / E.length;
+      out.textContent = `degree ${deg}, k = ${k}:  CV estimate = mean of ${k} fold errors = ${m < 100 ? m.toFixed(4) : m.toExponential(2)}    (each fit trains on ~${Math.round(n * (k - 1) / k)} points)\n` +
+        `CV picks degree ${best} for k = ${k}   (true noise variance 0.09)`;
+    });
+  }
+
+  // ---------- fig: double descent (measured offline, numbers below) ----------
+  {
+    // median test MSE / mean train MSE for min-norm least squares on p random ReLU features; n = 40, d = 10, 60 repeats
+    const P = [4, 8, 12, 16, 20, 24, 28, 32, 36, 38, 40, 42, 44, 48, 52, 60, 70, 80, 100, 120, 160, 200, 300, 400, 600, 800];
+    const TE = [1.418, 1.115, 0.977, 0.916, 0.910, 0.989, 1.174, 1.628, 3.376, 4.673, 15.43, 5.456, 2.767, 1.729, 1.355, 0.961, 0.765, 0.672, 0.548, 0.524, 0.483, 0.438, 0.393, 0.370, 0.357, 0.345];
+    const TR = [1.147, 0.771, 0.496, 0.329, 0.229, 0.145, 0.097, 0.059, 0.026, 0.0098, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const p = new Plot("#fig-dd", { xmin: 0.45, xmax: 3.0, ymin: -2.25, ymax: 1.35 }); let k = 4; const out = document.getElementById("out-dd");
+    slider("#ctl-dd", { label: "features p ", min: 0, max: P.length - 1, step: 1, value: k, digits: 0 }, v => { k = v; p.render(); });
+    const X = v => Math.log10(v), Y = v => Math.max(-2.2, Math.log10(Math.max(v, 1e-3)));
+    p.render(p => {
+      for (let e = -1; e <= 1; e += 1) { const vals = e < 0 ? [0.01, 0.1, 0.5] : e === 0 ? [1, 2, 5] : [10]; vals.forEach(v => { p.line(p.xmin, Math.log10(v), p.xmax, Math.log10(v), { color: "grid", width: 1 }); p.label(p.xmin, Math.log10(v), String(v), { dx: 4, dy: -7, color: "muted", font: "10px sans-serif" }); }); }
+      [5, 10, 20, 40, 100, 200, 400, 800].forEach(v => p.label(X(v), -2.25, String(v), { align: "center", dy: -9, color: "muted", font: "10px sans-serif", bg: true }));
+      p.rect(X(40) - 0.05, -2.25, X(40) + 0.05, 1.35, { fill: "c4", fillAlpha: .08, stroke: false });
+      p.line(X(40), -2.25, X(40), 1.35, { color: "c4", width: 1.2, dash: [4, 4] });
+      p.label(X(40), 1.28, "p = n = 40", { align: "center", color: "c4", font: "600 11px sans-serif" });
+      p.label(X(12), 1.1, "classical regime", { align: "center", color: "muted", font: "11px sans-serif" });
+      p.label(X(250), 1.1, "over-parameterized", { align: "center", color: "muted", font: "11px sans-serif" });
+      p.line(p.xmin, Math.log10(0.91), p.xmax, Math.log10(0.91), { color: "c5", width: 1, dash: [2, 4] });
+      p.label(p.xmax, Math.log10(0.91), "best classical", { align: "right", dy: -8, dx: -4, color: "c5", font: "10px sans-serif" });
+      p.path(P.map((v, i) => [X(v), Y(TE[i])]), { color: "c2", width: 2.5 });
+      p.path(P.slice(0, 10).map((v, i) => [X(v), Y(TR[i])]), { color: "c1", width: 2 });
+      p.label(X(10), Y(0.03), "train (→ 0 at p ≥ n)", { color: "c1", font: "600 12px sans-serif" });
+      p.label(X(600), Y(0.345), "test", { color: "c2", dy: -12, font: "600 12px sans-serif" });
+      P.forEach((v, i) => p.point(X(v), Y(TE[i]), { r: i === k ? 6 : 2.5, color: "c2" }));
+      p.line(X(P[k]), -2.25, X(P[k]), 1.35, { color: "fg", width: 1, alpha: .4 });
+      out.textContent = `p = ${P[k]} features, n = 40 examples:  test MSE ${TE[k].toFixed(3)}   train MSE ${TR[k].toFixed(3)}` + (P[k] >= 40 ? "   (interpolates the training data)" : "");
+    });
+  }
+});
+</script>
+</body>
+</html>

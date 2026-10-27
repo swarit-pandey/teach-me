@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maximum likelihood & Bayes</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="10">
+<main>
+
+<div class="kicker">Part 3 · Probability &amp; statistics</div>
+<h1>Maximum likelihood &amp; Bayes</h1>
+<p class="lede">So far a model's parameters were given and we asked how likely the data was. Learning flips the question: the data is given, so which parameters explain it best? Answer it with maximum likelihood and you get every standard loss function, MSE and cross-entropy included. Answer it the Bayesian way and you also get regularization.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Read a likelihood $L(\theta) = p(\text{data}\mid\theta)$ as a function of the parameter, and say why it is <em>not</em> a probability distribution over $\theta$.</li>
+    <li>Derive the maximum-likelihood estimates for Bernoulli, categorical and Gaussian models with a derivative (and a Lagrange multiplier).</li>
+    <li>Explain where loss functions come from: MSE is the Gaussian negative log-likelihood, cross-entropy is the categorical one.</li>
+    <li>Update a Beta prior with coin flips, and show that a MAP estimate with a Gaussian prior is L2-regularized least squares.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="likelihood">1. Turning the question around: likelihood</h2>
+<p>In lesson 08 a coin had a known bias $\theta = P(\text{heads})$, and we asked questions like "how probable are 7 heads in 10 flips?" Now suppose you <em>don't</em> know $\theta$. You flip the coin 10 times and see 7 heads and 3 tails. Which $\theta$ should you believe?</p>
+<p>Flips are independent, so the probability of one particular sequence with $h$ heads and $t$ tails is a product:</p>
+$$p(\text{data}\mid\theta) = \underbrace{\theta\cdot\theta\cdots\theta}_{h}\;\underbrace{(1-\theta)\cdots(1-\theta)}_{t} = \theta^{h}(1-\theta)^{t}.$$
+<p>Read with $\theta$ fixed, this is a probability of data. Now freeze the data and let $\theta$ vary. The same expression becomes a function of $\theta$, called the <b>likelihood</b>:</p>
+$$L(\theta) = p(\text{data}\mid\theta), \qquad \text{data fixed, } \theta \text{ varying.}$$
+<p>$L(\theta)$ scores each candidate parameter by how well it predicted what actually happened. The <b>maximum-likelihood estimate (MLE)</b> is the parameter with the highest score:</p>
+$$\hat\theta_{\text{MLE}} = \arg\max_\theta\, L(\theta).$$
+
+<div class="figure">
+  <canvas id="fig-lik" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-lik"></div>
+  <div class="readout" id="out-lik"></div>
+  <div class="caption"><b>Try it:</b> set the counts of heads and tails, then drag the orange dot along the axis to try different $\theta$. The curve is $L(\theta)$ divided by its peak value, because the raw numbers get tiny fast. The peak always sits at $h/(h+t)$. Now multiply both counts by 3 (e.g. 21 and 9): the peak stays put but gets much <em>narrower</em>. More data, less doubt. Switch to the log view and notice the peak doesn't move.</div>
+</div>
+
+<div class="callout warning">
+<p><b>The likelihood is not a probability distribution over $\theta$.</b> For 7 heads and 3 tails, $\int_0^1 \theta^7(1-\theta)^3\,d\theta = 1/1320$, not 1. It's a probability of the data, reread as a score for $\theta$. To get an actual distribution over $\theta$ you need Bayes' rule and a prior (section 6).</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="log">2. Work with logs: the log-likelihood</h2>
+<p>With $n$ independent data points the likelihood is a product of $n$ numbers, each at most 1. Multiply 2000 coin-flip probabilities of 0.5 and you get $0.5^{2000} \approx 10^{-602}$. That is far below the smallest positive double ($\approx 10^{-308}$), so the computer rounds it to exactly 0, for every $\theta$. Products of probabilities are numerically useless.</p>
+<p>The fix is to take logs. The log turns the product into a sum:</p>
+$$\ell(\theta) = \log L(\theta) = \sum_{i=1}^n \log p(x_i \mid \theta).$$
+<p>Because $\log$ is strictly increasing, it never changes <em>where</em> the maximum is: $\arg\max_\theta \ell(\theta) = \arg\max_\theta L(\theta)$. The log also makes calculus easier, since the derivative of a sum is a sum of derivatives (lesson 05).</p>
+<p>Optimizers in ML conventionally <em>minimize</em>, so flip the sign. The <b>negative log-likelihood</b> is</p>
+$$\text{NLL}(\theta) = -\sum_{i=1}^n \log p(x_i\mid\theta).$$
+<p>Maximizing the likelihood, maximizing the log-likelihood and minimizing the NLL all give the same $\hat\theta$. Divide the NLL by $n$ and you have an <em>average per-example loss</em>, which is exactly the shape of every training objective you'll write from lesson 13 on.</p>
+
+<div class="callout key">
+<p>$$\hat\theta_{\text{MLE}} = \arg\max_\theta \prod_i p(x_i\mid\theta) = \arg\min_\theta \; \frac{1}{n}\sum_i \big(-\log p(x_i\mid\theta)\big).$$ Training a model by "minimizing a loss" is, in most cases, maximum likelihood in disguise.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mle-bernoulli">3. The MLE for a coin, derived</h2>
+<p>For $h$ heads and $t$ tails ($n = h + t$),</p>
+$$\ell(\theta) = h\log\theta + t\log(1-\theta).$$
+<p>Set the derivative to zero:</p>
+$$\ell'(\theta) = \frac{h}{\theta} - \frac{t}{1-\theta} = 0 \;\Longrightarrow\; h(1-\theta) = t\,\theta \;\Longrightarrow\; \boxed{\hat\theta = \frac{h}{h+t} = \frac{h}{n}}.$$
+<p>Check that it's a maximum: $\ell''(\theta) = -h/\theta^2 - t/(1-\theta)^2 \lt 0$, so $\ell$ is concave and this is the only peak. The answer is what intuition says, the fraction of heads. The derivation matters because the same recipe works for models where intuition gives no answer at all.</p>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Data: 7 heads, 3 tails. $\hat\theta = 7/10 = 0.7$.</p>
+  <p>Compare with a fair coin. $L(0.7) = 0.7^7\cdot 0.3^3 \approx 0.002224$ and $L(0.5) = 0.5^{10} \approx 0.000977$. In logs, $\ell(0.7) \approx -6.109$ and $\ell(0.5) \approx -6.931$.</p>
+  <p>The likelihood ratio is $L(0.7)/L(0.5) = e^{-6.109 + 6.931} \approx 2.28$. The data is only about 2.3 times better explained by $\theta = 0.7$ than by a fair coin. Ten flips are weak evidence, which the wide curve in the figure shows.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mle-gaussian">4. The MLE for a Gaussian</h2>
+<p>Now continuous data $x_1,\dots,x_n$ modeled as independent draws from $\mathcal N(\mu, \sigma^2)$ (lesson 09). Each point contributes its density:</p>
+$$p(x_i\mid\mu,\sigma) = \frac{1}{\sqrt{2\pi\sigma^2}}\exp\!\Big(-\frac{(x_i-\mu)^2}{2\sigma^2}\Big).$$
+<p>Take $-\log$ and sum:</p>
+$$\text{NLL}(\mu,\sigma) = \frac{n}{2}\log(2\pi\sigma^2) + \frac{1}{2\sigma^2}\sum_{i=1}^n (x_i-\mu)^2.$$
+<p>The two terms pull against each other. The second term is the squared error, which a large $\sigma$ forgives. The first term charges for a large $\sigma$, because a wide density spreads its probability thin and gives every point a low score.</p>
+
+<div class="figure">
+  <canvas id="fig-gauss" width="680" height="360"></canvas>
+  <div class="controls" id="ctl-gauss"></div>
+  <div class="readout" id="out-gauss"></div>
+  <div class="caption"><b>Try it:</b> each orange stick's height is one data point's density $p(x_i\mid\mu,\sigma)$, and the log-likelihood adds up the logs of the stick heights. Move $\mu$ and $\sigma$ to make the total as large as you can, then press the button to jump to the closed-form MLE. Shrink $\sigma$ a lot: points near $\mu$ get tall sticks, but one far-away point gets a stick of almost zero and its log goes to $-\infty$. Drag a data point far to the right and watch the MLE $\sigma$ grow to cover it.</div>
+</div>
+
+<h3>Deriving $\hat\mu$ and $\hat\sigma$</h3>
+<p>Take partial derivatives (lesson 06) and set them to zero. For $\mu$:</p>
+$$\frac{\partial\,\text{NLL}}{\partial\mu} = -\frac{1}{\sigma^2}\sum_i (x_i-\mu) = 0 \;\Longrightarrow\; \hat\mu = \frac1n\sum_i x_i = \bar x.$$
+<p>The sample mean. Note it doesn't depend on $\sigma$. For $\sigma$, plug in $\hat\mu$:</p>
+$$\frac{\partial\,\text{NLL}}{\partial\sigma} = \frac{n}{\sigma} - \frac{1}{\sigma^3}\sum_i (x_i-\hat\mu)^2 = 0 \;\Longrightarrow\; \hat\sigma^2 = \frac1n\sum_i (x_i-\bar x)^2.$$
+<p>This is the mean squared deviation, with divisor $n$. Lesson 09 showed that this estimator is <em>biased</em>: on average it comes out $\frac{n-1}{n}\sigma^2$, which is why the unbiased version divides by $n-1$. So the MLE is not automatically unbiased. It is consistent (it converges to the truth as $n\to\infty$), and for large $n$ the difference disappears.</p>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Data: $2, 4, 4, 4, 5, 5, 7, 9$ ($n = 8$, sum $= 40$).</p>
+  <p>$\hat\mu = 40/8 = 5$. Deviations: $-3,-1,-1,-1,0,0,2,4$. Squares sum to $9+1+1+1+0+0+4+16 = 32$.</p>
+  <p>$\hat\sigma^2 = 32/8 = 4$, so $\hat\sigma = 2$. The unbiased variance would be $32/7 \approx 4.571$.</p>
+  <p>The minimum NLL is $\frac82\log(2\pi\cdot 4) + \frac{32}{2\cdot 4} = 4\log(8\pi) + 4 \approx 16.897$ nats.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="losses">5. Where loss functions come from</h2>
+<p>Here's the payoff. A supervised model doesn't output a single number for $y$. Read it as outputting a <em>distribution</em> over $y$ given $x$. Training by maximum likelihood then means minimizing $-\sum_i \log p(y_i\mid x_i;\mathbf w)$. Different assumptions about the noise give different losses.</p>
+
+<h3>Gaussian noise → mean squared error</h3>
+<p>Assume $y = f_{\mathbf w}(x) + \varepsilon$ with $\varepsilon \sim \mathcal N(0,\sigma^2)$. In other words $p(y\mid x) = \mathcal N(y;\, f_{\mathbf w}(x), \sigma^2)$. By section 4 with $\mu$ replaced by $f_{\mathbf w}(x_i)$:</p>
+$$\text{NLL}(\mathbf w) = \frac n2\log(2\pi\sigma^2) + \frac{1}{2\sigma^2}\sum_i \big(y_i - f_{\mathbf w}(x_i)\big)^2.$$
+<p>For fixed $\sigma$ the first term is a constant and the second is a positive multiple of the sum of squared errors. The two have the same minimizer:</p>
+$$\arg\min_{\mathbf w}\text{NLL}(\mathbf w) = \arg\min_{\mathbf w}\frac1n\sum_i\big(y_i - f_{\mathbf w}(x_i)\big)^2 = \arg\min_{\mathbf w}\text{MSE}(\mathbf w).$$
+
+<div class="figure">
+  <canvas id="fig-reg" width="680" height="400"></canvas>
+  <div class="controls" id="ctl-reg"></div>
+  <div class="readout" id="out-reg"></div>
+  <div class="caption"><b>Try it:</b> drag the two handles to move the line. Each purple bell is the model's predicted Gaussian $p(y\mid x)$ at a data point. The likelihood rewards lines that put each point near the top of its bell. Compare the readout's MSE and NLL as you move the line: they rise and fall together. Press "least squares" and then change $\sigma$. The NLL changes, but the best line never does. That's why you can train with plain MSE and never mention $\sigma$.</div>
+</div>
+
+<h3>Coin-flip labels → binary cross-entropy</h3>
+<p>For a yes/no label $y\in\{0,1\}$, let the model output $p_i = P(y_i = 1\mid x_i)$, for example $p_i = \sigma(\mathbf w\cdot\mathbf x_i)$ (lesson 14). Each label is a Bernoulli draw with probability $p_i^{y_i}(1-p_i)^{1-y_i}$, so</p>
+$$\text{NLL} = -\sum_i \big[\,y_i\log p_i + (1-y_i)\log(1-p_i)\,\big].$$
+<p>That's the <b>binary cross-entropy</b> loss, derived rather than invented.</p>
+
+<h3>Categorical labels → cross-entropy, the language-model loss</h3>
+<p>With $K$ classes the model outputs a probability vector $\mathbf p = \operatorname{softmax}(\mathbf z)$. The probability of the observed class $y_i$ is $p_{i,y_i}$, so</p>
+$$\text{NLL} = -\sum_i \log p_{i,\,y_i}.$$
+<p>A language model is exactly this. At each position $t$ it outputs a categorical over the vocabulary, and the training loss is $-\frac1T\sum_t \log p(x_t\mid x_{\lt t})$, the average NLL of the actual next tokens. When you train a tiny GPT in lesson 24, this is the number going down. Lesson 11 explains why it's also called <em>cross-entropy</em>.</p>
+
+<p><b>What is the MLE of a plain categorical?</b> If class $k$ shows up $n_k$ times, maximize $\sum_k n_k\log p_k$ subject to $\sum_k p_k = 1$. Add a Lagrange multiplier: $\frac{\partial}{\partial p_k}\big[\sum_j n_j\log p_j - \lambda(\sum_j p_j - 1)\big] = \frac{n_k}{p_k} - \lambda = 0$. So $p_k = n_k/\lambda$, and the constraint forces $\lambda = n$:</p>
+$$\hat p_k = \frac{n_k}{n}.$$
+<p>Counting frequencies is maximum likelihood. A bigram language model built by counting word pairs is an MLE too.</p>
+
+<div class="callout ml">
+<p>Training on Gaussian noise gives MSE. Bernoulli labels give binary cross-entropy. Categorical labels give cross-entropy. Learning a variance, mixtures, or heavy-tailed noise (Laplace → L1 loss, problem 6) each produce a new loss by the same recipe. When a paper introduces a "new loss", ask which likelihood it is the NLL of.</p>
+</div>
+
+<div class="callout warning">
+<p><b>MLE overfits small data.</b> Three flips, all heads: $\hat\theta = 1$. That model says tails are <em>impossible</em>, and the first tail it sees costs $-\log 0 = \infty$ loss. A bigram model that never saw "cat sat" assigns it probability zero. The fix is to bring prior beliefs into the estimate, which is what the rest of this lesson does.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bayes">6. Bayesian updating: a distribution over $\theta$</h2>
+<p>MLE returns one number. The Bayesian approach treats the unknown $\theta$ as a random variable and keeps a whole distribution over it. Before seeing data you have a <b>prior</b> $p(\theta)$. Bayes' rule (lesson 08) turns it into a <b>posterior</b>:</p>
+$$\underbrace{p(\theta\mid D)}_{\text{posterior}} = \frac{\overbrace{p(D\mid\theta)}^{\text{likelihood}}\;\overbrace{p(\theta)}^{\text{prior}}}{p(D)} \;\propto\; L(\theta)\,p(\theta).$$
+<p>The denominator $p(D) = \int p(D\mid\theta)p(\theta)\,d\theta$ is a constant that makes the posterior integrate to 1. So the posterior is just likelihood × prior, renormalized. That multiplication is the step that turns a likelihood into a real distribution.</p>
+
+<h3>The Beta prior for a coin</h3>
+<p>A convenient prior for $\theta\in[0,1]$ is the <b>Beta distribution</b>:</p>
+$$\text{Beta}(\theta;\,a,b) = \frac{\theta^{a-1}(1-\theta)^{b-1}}{B(a,b)}, \qquad a, b > 0,$$
+<p>where $B(a,b)$ is the normalizing constant. $\text{Beta}(1,1)$ is uniform. $\text{Beta}(5,5)$ is a bump around 0.5. Larger $a$ leans toward heads. Now multiply by the likelihood of $h$ heads and $t$ tails:</p>
+$$p(\theta\mid D) \;\propto\; \theta^{h}(1-\theta)^{t}\cdot\theta^{a-1}(1-\theta)^{b-1} = \theta^{(a+h)-1}(1-\theta)^{(b+t)-1}.$$
+<p>That's another Beta. No integral needed:</p>
+$$\boxed{\;\text{Beta}(a, b) \;\xrightarrow{\;h \text{ heads},\ t \text{ tails}\;}\; \text{Beta}(a+h,\; b+t)\;}$$
+<p>When the posterior has the same family as the prior, the prior is called <b>conjugate</b>. The intuition: $a-1$ and $b-1$ act as <b>pseudo-counts</b>, heads and tails you pretend to have seen before starting. The posterior mean is $\frac{a+h}{a+b+n}$. With little data it stays near the prior; with lots of data it approaches $h/n$.</p>
+
+<div class="figure">
+  <canvas id="fig-beta" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-beta"></div>
+  <div class="readout" id="out-beta"></div>
+  <div class="caption"><b>Try it:</b> press <em>play</em> and watch flips of a coin with the hidden "true θ" arrive. The blue posterior starts as the dashed grey prior and narrows around the truth, roughly like $1/\sqrt n$. The dashed orange curve is the likelihood alone, rescaled to area 1. Then reset, set a strong <em>wrong</em> prior (e.g. a = 20, b = 2 with true θ = 0.3) and play again. Early on the prior wins. After a few hundred flips the data wins anyway.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Prior $\text{Beta}(2,2)$, a mild belief that the coin is roughly fair (one pseudo-head, one pseudo-tail). Observe H, H, T, H: $h = 3$, $t = 1$.</p>
+  <p>Posterior: $\text{Beta}(2+3,\; 2+1) = \text{Beta}(5, 3)$.</p>
+  <p>Posterior mean $= 5/8 = 0.625$. Posterior mode (the MAP, next section) $= \frac{5-1}{5+3-2} = 4/6 \approx 0.667$. MLE $= 3/4 = 0.75$.</p>
+  <p>Both Bayesian estimates sit between the prior's 0.5 and the data's 0.75. Updating one flip at a time gives the same answer: $(2,2)\to(3,2)\to(4,2)\to(4,3)\to(5,3)$. Today's posterior is tomorrow's prior.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="map">7. MAP estimation is regularization</h2>
+<p>Often you want one parameter value, not a distribution. The <b>maximum a posteriori (MAP)</b> estimate is the peak of the posterior:</p>
+$$\hat\theta_{\text{MAP}} = \arg\max_\theta\, p(\theta\mid D) = \arg\min_\theta\Big[\underbrace{-\log p(D\mid\theta)}_{\text{NLL: fit the data}}\;\underbrace{-\log p(\theta)}_{\text{penalty from the prior}}\Big].$$
+<p>$p(D)$ drops out because it doesn't depend on $\theta$. So MAP is MLE plus an extra term in the loss, and <b>an extra term in the loss is what regularization is</b>.</p>
+<p><b>Coin.</b> The mode of $\text{Beta}(a+h, b+t)$ is $\hat\theta_{\text{MAP}} = \frac{h + a - 1}{n + a + b - 2}$. With $a = b = 2$ this is $\frac{h+1}{n+2}$, i.e. <em>add-one (Laplace) smoothing</em>: three heads out of three now gives $4/5$ instead of an overconfident 1. With $a = b = 1$ (flat prior) the MAP equals the MLE.</p>
+
+<h3>Gaussian prior ↔ L2 regularization</h3>
+<p>Take linear regression with Gaussian noise, $y_i = \mathbf w\cdot\mathbf x_i + \varepsilon_i$, $\varepsilon_i\sim\mathcal N(0,\sigma^2)$. Put a Gaussian prior on the weights, $\mathbf w\sim\mathcal N(\mathbf 0,\tau^2 I)$, which says "weights are probably small". Then $-\log p(\mathbf w) = \frac{\|\mathbf w\|^2}{2\tau^2} + \text{const}$, and</p>
+$$-\log p(\mathbf w\mid D) = \frac{1}{2\sigma^2}\sum_i(y_i - \mathbf w\cdot\mathbf x_i)^2 + \frac{1}{2\tau^2}\|\mathbf w\|^2 + \text{const}.$$
+<p>Multiply by $2\sigma^2$ (which doesn't move the minimum):</p>
+$$\boxed{\;\hat{\mathbf w}_{\text{MAP}} = \arg\min_{\mathbf w}\;\sum_i(y_i - \mathbf w\cdot\mathbf x_i)^2 + \lambda\|\mathbf w\|^2, \qquad \lambda = \frac{\sigma^2}{\tau^2}.\;}$$
+<p>That is <b>ridge regression</b>, or L2 regularization (weight decay, in neural-network terms). The regularization strength has a meaning now: it is the ratio of noise variance to prior variance. A tight prior (small $\tau$) means a large $\lambda$. Swap the Gaussian prior for a Laplace prior $p(w)\propto e^{-|w|/b}$ and the penalty becomes $\lambda\|\mathbf w\|_1$: L1 / lasso, with the sparse solutions you saw in lesson 01's unit-ball picture. Lesson 15 uses both.</p>
+
+<div class="figure">
+  <canvas id="fig-map" width="680" height="380"></canvas>
+  <div class="controls" id="ctl-map"></div>
+  <div class="readout" id="out-map"></div>
+  <div class="caption"><b>Try it:</b> estimate the mean $\mu$ of $\mathcal N(\mu, 1)$ from $n$ samples (dots on the axis), with prior $\mu\sim\mathcal N(0,\tau^2)$. All curves are shifted so their minimum is 0. The blue curve is the data term (NLL), the orange curve is the prior penalty $\mu^2/2\tau^2$, and the green curve is their sum, whose minimum is the MAP. With $n = 1$ and a small $\tau$, MAP is pulled hard toward 0. Raise $n$: the data term gets steeper (it is $n(\mu-\bar x)^2/2$) and MAP slides to the MLE. A large $\tau$ (vague prior) does the same.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>One observation $x = 3$ from $\mathcal N(\mu, 1)$, prior $\mu\sim\mathcal N(0, 1)$. MLE: $\hat\mu = 3$.</p>
+  <p>MAP: minimize $\frac{(3-\mu)^2}{2} + \frac{\mu^2}{2}$. The derivative $-(3-\mu) + \mu = 0$ gives $\hat\mu_{\text{MAP}} = 1.5$.</p>
+  <p>In general, for $n$ points with mean $\bar x$: $\hat\mu_{\text{MAP}} = \frac{n\bar x}{n + \lambda}$ with $\lambda = \sigma^2/\tau^2$. The prior is worth $\lambda$ pseudo-observations at 0, the same pseudo-count idea as the Beta prior.</p>
+</div>
+
+<div class="callout intuition">
+<p>Three estimators, one spectrum. <b>MLE</b>: trust only the data. <b>MAP</b>: data plus a penalty, giving one point. <b>Full Bayes</b>: keep the whole posterior and average predictions over it. Deep learning mostly does MLE or MAP, because a posterior over a billion weights is intractable. Weight decay is MAP. Dropout and ensembles are rough approximations of the Bayesian average.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+<p>Do these with pencil and paper before opening the solutions.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>A coin gives 7 heads in 10 flips. Find the MLE $\hat\theta$ and the likelihood ratio $L(\hat\theta)/L(0.5)$. Enter both, separated by a comma.</p>
+<div class="numcheck" data-answer="0.7,2.277" data-tol="0.005"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\hat\theta = 7/10 = 0.7$. $L(0.7) = 0.7^7\, 0.3^3 \approx 0.0022236$ and $L(0.5) = 0.5^{10} \approx 0.00097656$, so the ratio is $\approx 2.277$. The data mildly favors 0.7, but a fair coin is far from ruled out.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>Fit $\mathcal N(\mu,\sigma^2)$ by maximum likelihood to $2, 4, 4, 4, 5, 5, 7, 9$. Enter $\hat\mu, \hat\sigma$.</p>
+<div class="numcheck" data-answer="5,2"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\hat\mu = 40/8 = 5$. Squared deviations sum to 32, so $\hat\sigma^2 = 32/8 = 4$ and $\hat\sigma = 2$. (With divisor $n-1$ you would get $\sqrt{32/7}\approx 2.138$. That's the unbiased variance's square root, not the MLE.)</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core · derivation</span>
+<p>Counts of events per hour are modeled as Poisson: $p(k\mid\lambda) = \lambda^k e^{-\lambda}/k!$. Derive the MLE of $\lambda$ for observations $k_1,\dots,k_n$, then evaluate it for $2, 0, 3, 1, 4$.</p>
+<div class="numcheck" data-answer="2"></div>
+<details class="hint"><summary>Hint</summary><p>Write $\ell(\lambda) = \sum_i [k_i\log\lambda - \lambda - \log k_i!]$. The last term doesn't depend on $\lambda$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\ell'(\lambda) = \frac{\sum_i k_i}{\lambda} - n = 0 \Rightarrow \hat\lambda = \frac1n\sum_i k_i$, the sample mean. $\ell''(\lambda) = -\sum k_i/\lambda^2 \lt 0$, so it's a maximum. For the data, $\hat\lambda = 10/5 = 2$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>Prior $\text{Beta}(2,2)$. You see three heads and no tails. Give the MLE, the MAP estimate and the posterior mean, in that order.</p>
+<div class="numcheck" data-answer="1,0.8,0.7143"></div>
+<details class="solution"><summary>Solution</summary>
+<p>MLE $= 3/3 = 1$. Posterior $= \text{Beta}(5, 2)$. MAP $= (5-1)/(5+2-2) = 0.8$. Mean $= 5/7 \approx 0.7143$. The MLE claims tails are impossible. The Bayesian estimates hedge.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A toy corpus has 10 tokens: "the" ×5, "cat" ×3, "sat" ×2. Fit a unigram (categorical) model by maximum likelihood. Give $\hat p(\text{cat})$ and the average NLL per token, in nats, of the corpus under the fitted model.</p>
+<div class="numcheck" data-answer="0.3,1.0297"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\hat p = (0.5, 0.3, 0.2)$, so $\hat p(\text{cat}) = 0.3$. Average NLL $= -\frac{1}{10}(5\log 0.5 + 3\log 0.3 + 2\log 0.2) = -(0.5\log0.5 + 0.3\log0.3 + 0.2\log0.2) \approx 1.0297$. That expression is the <em>entropy</em> of $\hat p$, which lesson 11 explains.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · derivation</span>
+<p>Suppose regression noise is Laplace instead of Gaussian: $p(\varepsilon) = \frac{1}{2b}e^{-|\varepsilon|/b}$. (a) Which loss does maximum likelihood give? (b) For the simplest model $y_i = c + \varepsilon_i$, what is the MLE of $c$? (c) Why is this loss more robust to outliers than MSE?</p>
+<details class="hint"><summary>Hint</summary><p>For (b), the derivative of $\sum_i |y_i - c|$ in $c$ is (number of points below $c$) − (number above $c$).</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $-\log p(y_i\mid x_i) = \frac{|y_i - f(x_i)|}{b} + \log 2b$, so MLE minimizes the sum of absolute errors: the <b>L1 / MAE loss</b>. (b) The derivative is zero when as many points lie below $c$ as above, so $\hat c$ is the <b>median</b>. Under Gaussian noise it would be the mean. (c) A squared error grows quadratically, so one outlier at distance 100 costs 10,000 and drags the fit toward it. An absolute error costs only 100. In probability terms, the Laplace density has heavier tails, so it isn't "shocked" by a far-away point.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>Four samples from $\mathcal N(\mu, 1)$ have mean $\bar x = 2.5$. With prior $\mu\sim\mathcal N(0, 1)$, what is $\hat\mu_{\text{MAP}}$? What is the equivalent ridge $\lambda$?</p>
+<div class="numcheck" data-answer="2"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Minimize $\sum_i\frac{(x_i-\mu)^2}{2} + \frac{\mu^2}{2}$. The derivative gives $-(n\bar x - n\mu) + \mu = 0$, so $\mu = \frac{n\bar x}{n+1} = \frac{10}{5} = 2$. Here $\lambda = \sigma^2/\tau^2 = 1$: the prior counts as one extra observation at 0.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch · proof</span>
+<p>Show that the Gaussian MLE variance $\hat\sigma^2 = \frac1n\sum_i(x_i-\bar x)^2$ satisfies $\mathbb E[\hat\sigma^2] = \frac{n-1}{n}\sigma^2$.</p>
+<details class="hint"><summary>Hint</summary><p>Use $\sum_i(x_i-\bar x)^2 = \sum_i (x_i-\mu)^2 - n(\bar x-\mu)^2$ and $\operatorname{Var}(\bar x) = \sigma^2/n$ (lesson 09).</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Expand $\sum_i (x_i - \mu)^2 = \sum_i\big((x_i-\bar x) + (\bar x - \mu)\big)^2 = \sum_i(x_i-\bar x)^2 + n(\bar x-\mu)^2$. The cross term vanishes because $\sum_i (x_i - \bar x) = 0$. Take expectations: $\mathbb E\sum_i(x_i-\mu)^2 = n\sigma^2$ and $\mathbb E[n(\bar x-\mu)^2] = n\cdot\sigma^2/n = \sigma^2$. So $\mathbb E\sum_i(x_i-\bar x)^2 = (n-1)\sigma^2$, and dividing by $n$ gives the result. The MLE uses $\bar x$, which is fit to the same data, so deviations from $\bar x$ are systematically a bit smaller than deviations from the true $\mu$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">stretch · conceptual</span>
+<p>A regression network outputs both a mean $\mu(x)$ and a standard deviation $\sigma(x)$ per input, and is trained with the Gaussian NLL $\sum_i \big[\log\sigma(x_i) + \frac{(y_i-\mu(x_i))^2}{2\sigma(x_i)^2}\big]$. (a) Why can't the network cheat by sending $\sigma\to 0$ everywhere, or $\sigma\to\infty$? (b) For a fixed residual $r$, which $\sigma$ minimizes that example's term?</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) As $\sigma\to 0$ the squared-error term $r^2/2\sigma^2$ explodes for any non-zero residual. As $\sigma\to\infty$ the $\log\sigma$ term grows without bound. It's the same tension as in section 4. (b) Differentiate $\log\sigma + r^2/2\sigma^2$: $1/\sigma - r^2/\sigma^3 = 0 \Rightarrow \sigma = |r|$. The network learns to predict its own typical error, high $\sigma$ where the data is noisy and low where it's predictable. That's a learned uncertainty estimate, and it comes straight out of the likelihood.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">For fixed data, you integrate the likelihood $L(\theta) = p(D\mid\theta)$ over all $\theta\in[0,1]$. What do you get?</div>
+  <div class="opts">
+    <button data-k="a">Exactly 1, since it's a probability.</button>
+    <button data-k="b">The MLE.</button>
+    <button data-k="c">Some positive number that is generally not 1. The likelihood is not a density over θ.</button>
+    <button data-k="d">0, because the data is fixed.</button>
+  </div>
+  <div class="explain">$L$ is a probability of the <em>data</em>, so it sums to 1 over datasets, not over $\theta$. For 7H/3T, $\int_0^1 \theta^7(1-\theta)^3d\theta = 1/1320$. Multiply by a prior and normalize to get a distribution over $\theta$.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">Why do we maximize the log-likelihood instead of the likelihood?</div>
+  <div class="opts">
+    <button data-k="a">Because the log changes the answer to a more robust one.</button>
+    <button data-k="b">The argmax is the same, but sums of logs don't underflow and are easier to differentiate than long products.</button>
+    <button data-k="c">Because likelihoods can be negative.</button>
+    <button data-k="d">Because the log makes every problem convex.</button>
+  </div>
+  <div class="explain">$\log$ is strictly increasing, so it preserves the argmax exactly. The win is numerical ($0.5^{2000}$ is 0.0 in floating point, but $2000\log 0.5$ is fine) and algebraic (product → sum).</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Training a regression network with MSE loss is maximum likelihood under which assumption?</div>
+  <div class="opts">
+    <button data-k="a">The inputs $x$ are Gaussian.</button>
+    <button data-k="b">The weights have a Gaussian prior.</button>
+    <button data-k="c">The noise is uniform.</button>
+    <button data-k="d">The targets are the prediction plus Gaussian noise with a fixed variance.</button>
+  </div>
+  <div class="explain">$-\log\mathcal N(y; f(x), \sigma^2) = (y-f(x))^2/2\sigma^2 + \text{const}$. Nothing is assumed about the inputs. A Gaussian prior on the weights would add an L2 penalty, which is MAP, not plain MSE.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">You keep the same Beta(10, 10) prior and collect more and more flips. What happens to the MAP estimate?</div>
+  <div class="opts">
+    <button data-k="a">It converges to the MLE: the prior's fixed pseudo-counts are swamped by real counts.</button>
+    <button data-k="b">It stays near 0.5 forever because the prior is strong.</button>
+    <button data-k="c">It converges to the prior mean.</button>
+    <button data-k="d">It oscillates and never settles.</button>
+  </div>
+  <div class="explain">MAP $= \frac{h + 9}{n + 18}$. As $n\to\infty$ the 9 and the 18 stop mattering and this tends to $h/n$. Regularization matters most when data is scarce.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">In ridge regression you raise $\lambda$. In Bayesian terms you have…</div>
+  <div class="opts">
+    <button data-k="a">assumed less noise in the data.</button>
+    <button data-k="b">widened the prior on the weights.</button>
+    <button data-k="c">narrowed the prior on the weights (smaller τ), believing more strongly that they're near 0.</button>
+    <button data-k="d">switched from a Gaussian to a Laplace prior.</button>
+  </div>
+  <div class="explain">$\lambda = \sigma^2/\tau^2$. A larger $\lambda$ means a smaller prior variance $\tau^2$ (or more assumed noise $\sigma^2$, which also makes you trust the data less).</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Likelihood</td><td>$L(\theta) = \prod_i p(x_i\mid\theta)$</td><td>how well $\theta$ predicted the data (not a density in $\theta$)</td></tr>
+  <tr><td>MLE</td><td>$\arg\min_\theta -\sum_i\log p(x_i\mid\theta)$</td><td>best-fitting parameter; minimize NLL</td></tr>
+  <tr><td>Bernoulli / categorical MLE</td><td>$\hat\theta = h/n$, $\hat p_k = n_k/n$</td><td>empirical frequencies</td></tr>
+  <tr><td>Gaussian MLE</td><td>$\hat\mu = \bar x$, $\hat\sigma^2 = \frac1n\sum(x_i-\bar x)^2$</td><td>sample mean; biased variance</td></tr>
+  <tr><td>Losses</td><td>Gaussian → MSE, Bernoulli → BCE, categorical → CE</td><td>every loss is an NLL</td></tr>
+  <tr><td>Posterior</td><td>$p(\theta\mid D)\propto p(D\mid\theta)\,p(\theta)$</td><td>prior beliefs updated by data</td></tr>
+  <tr><td>Beta–Bernoulli</td><td>$\text{Beta}(a,b)\to\text{Beta}(a+h, b+t)$</td><td>prior = pseudo-counts</td></tr>
+  <tr><td>MAP</td><td>$\arg\min_\theta\,[\text{NLL} - \log p(\theta)]$</td><td>MLE + regularizer; Gaussian prior ↔ L2, $\lambda = \sigma^2/\tau^2$</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 10: build it</h3>
+  <p>Open <code>workbooks/10_mle_bayes/exercises.py</code>. Part A has plain-Python log-likelihoods and closed-form MLEs (Bernoulli, Gaussian, categorical), plus a demonstration that the raw likelihood underflows. In Part B you derive the Gaussian NLL gradient (checked against finite differences) and fit both models by gradient ascent, confirming that the optimizer lands on your closed-form answers. Part C covers Beta–Bernoulli updating, MAP versus MLE, and a check that MAP linear regression is exactly ridge regression. Grade yourself with:</p>
+  <pre><code>./course check 10</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Christopher Bishop, <em>Pattern Recognition and Machine Learning</em>, §1.2 and §2.1 (Bernoulli, Beta, MLE vs Bayes for curve fitting).</li>
+  <li>Kevin Murphy, <em>Probabilistic Machine Learning: An Introduction</em>, ch. 4 (statistics: MLE, MAP, Bayesian inference).</li>
+  <li>David MacKay, <em>Information Theory, Inference, and Learning Algorithms</em>, ch. 3 (more about inference).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, fmt } = Course;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const SMALL = "11px sans-serif";
+
+  // Local axes helper: L-shaped frame with ticks at chosen values (Plot.axes() always
+  // draws through the origin, which doesn't suit plots whose data lives far from 0).
+  function frame(p, o) {
+    (o.xt || []).forEach(v => { p.line(v, o.y0, v, o.y1, { color: "grid", width: 1 }); p.label(v, o.y0, o.xf ? o.xf(v) : fmt(v), { align: "center", dy: 11, color: "muted", font: SMALL }); });
+    (o.yt || []).forEach(v => { p.line(o.x0, v, o.x1, v, { color: "grid", width: 1 }); p.label(o.x0, v, o.yf ? o.yf(v) : fmt(v), { align: "right", dx: -5, color: "muted", font: SMALL }); });
+    p.line(o.x0, o.y0, o.x1, o.y0, { color: "axis", width: 1.2 });
+    p.line(o.x0, o.y0, o.x0, o.y1, { color: "axis", width: 1.2 });
+    if (o.xl) p.label(o.x1, o.y0, o.xl, { align: "left", dx: 6, color: "muted", font: "600 13px sans-serif" });
+    if (o.yl) p.label(o.x0, o.y1, o.yl, { dx: 8, dy: 6, color: "muted", font: "12px sans-serif" });
+  }
+  function ticks(lo, hi, n = 5) { const raw = (hi - lo) / n, p10 = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p10, s = (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p10, out = []; for (let v = Math.ceil(lo / s) * s; v <= hi + 1e-9; v += s) out.push(+v.toFixed(10)); return out; }
+  function areaFill(p, f, a, b, o) { const pts = [[a, o.base]]; for (let i = 0; i <= 300; i++) { const x = a + (b - a) * i / 300; pts.push([x, f(x)]); } pts.push([b, o.base]); p.polygon(pts, { fill: o.fill, fillAlpha: o.fillAlpha ?? .15, stroke: false }); }
+  // Normalized density on a grid of midpoints over (0,1) from an unnormalized log-density.
+  function gridDensity(logf, N = 400) {
+    const xs = [], lv = []; for (let i = 0; i < N; i++) { const x = (i + .5) / N; xs.push(x); lv.push(logf(x)); }
+    const m = Math.max(...lv), ys = lv.map(v => Math.exp(v - m)), Z = ys.reduce((s, y) => s + y, 0) / N;
+    return { xs, ys: ys.map(y => y / Z) };
+  }
+  const logBetaU = (a, b) => x => (a - 1) * Math.log(x) + (b - 1) * Math.log(1 - x);
+
+  // ---------- fig 1: likelihood curve ----------
+  {
+    const p = new Plot("#fig-lik", { xmin: -0.11, xmax: 1.04, ymin: -0.14, ymax: 1.12 });
+    let h = 7, t = 3, mode = "lik"; const out = document.getElementById("out-lik");
+    const th = { x: 0.5, y: 0, color: "c2", constrain: (x) => [clamp(x, 0.001, 0.999), th.y] };
+    slider("#ctl-lik", { label: "heads h ", min: 0, max: 30, step: 1, value: 7 }, v => { h = v; p.render(); });
+    slider("#ctl-lik", { label: "tails t ", min: 0, max: 30, step: 1, value: 3 }, v => { t = v; p.render(); });
+    select("#ctl-lik", "view ", [["lik", "likelihood (scaled)"], ["log", "log-likelihood"]], v => { mode = v; p.render(); });
+    const ll = q => (h ? h * Math.log(q) : 0) + (t ? t * Math.log(1 - q) : 0);
+    p.draggable([th]).render(p => {
+      const n = h + t, mle = n ? h / n : null, lmax = n ? ll(mle) : 0;
+      let f, lo, hi, yt, yl;
+      if (mode === "lik") { lo = 0; hi = 1; f = q => Math.exp(ll(q) - lmax); yt = [0, .25, .5, .75, 1]; yl = "L(θ) / L(θ̂)"; }
+      else { hi = lmax + 1; lo = lmax - 24; f = q => Math.max(lo, ll(q)); yt = ticks(lo, hi); yl = "log L(θ)"; }
+      const span = hi - lo; p.setView(-0.11, 1.04, lo - 0.12 * span, hi + 0.1 * span);
+      th.y = lo;
+      frame(p, { x0: 0, x1: 1, y0: lo, y1: hi + 0.05 * span, xt: [0, .2, .4, .6, .8, 1], yt, xl: "θ", yl, yf: v => mode === "lik" ? String(v) : fmt(v, 0) });
+      areaFill(p, f, 0.0005, 0.9995, { base: lo, fill: "c1", fillAlpha: .1 });
+      p.fn(f, { color: "c1", width: 2.5, xmin: 0.0005, xmax: 0.9995 });
+      if (mle !== null) {
+        p.line(mle, lo, mle, f(clamp(mle, 0.0005, 0.9995)), { color: "c3", dash: [5, 4], width: 1.5 });
+        p.label(mle, hi + 0.05 * span, "θ̂ = " + mle.toFixed(2), { align: "center", color: "c3", dy: -2, font: "600 12px sans-serif" });
+      }
+      const fy = f(th.x);
+      p.line(th.x, lo, th.x, fy, { color: "c2", width: 1.5, dash: [2, 3] });
+      p.point(th.x, fy, { r: 5, color: "c2" });
+      p.drawHandles();
+      const L = Math.exp(ll(th.x));
+      out.textContent = `data: ${h} heads, ${t} tails     θ = ${th.x.toFixed(3)}\n` +
+        `L(θ) = θ^${h}·(1−θ)^${t} = ${L.toExponential(3)}     log L(θ) = ${ll(th.x).toFixed(3)}\n` +
+        (n ? `MLE θ̂ = h/n = ${mle.toFixed(3)}     L(θ)/L(θ̂) = ${Math.exp(ll(th.x) - lmax).toFixed(3)}` : "no data yet: every θ is equally likely (L ≡ 1)");
+    });
+  }
+
+  // ---------- fig 2: Gaussian MLE ----------
+  {
+    const p = new Plot("#fig-gauss", { xmin: -1.3, xmax: 10.8, ymin: -0.13, ymax: 0.9 });
+    const out = document.getElementById("out-gauss");
+    const pts = [2.5, 3.6, 4.2, 5.0, 5.5, 7.1].map(x => ({ x, y: 0, color: "c2", snap: 0.1, constrain: x => [clamp(x, 0, 10), 0] }));
+    let mu = 3, sg = 2.5;
+    const sMu = slider("#ctl-gauss", { label: "μ ", min: 0, max: 10, step: 0.05, value: mu, digits: 2 }, v => { mu = v; p.render(); });
+    const sSg = slider("#ctl-gauss", { label: "σ ", min: 0.3, max: 4, step: 0.05, value: sg, digits: 2 }, v => { sg = v; p.render(); });
+    button("#ctl-gauss", "jump to the MLE", () => {
+      const xs = pts.map(q => q.x), n = xs.length, m = xs.reduce((a, b) => a + b, 0) / n;
+      const s = Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / n);
+      mu = m; sg = clamp(s, 0.3, 4); sMu.set(mu); sSg.set(sg); p.render();
+    });
+    const pdf = (x, m, s) => Math.exp(-((x - m) ** 2) / (2 * s * s)) / Math.sqrt(2 * Math.PI * s * s);
+    p.draggable(pts).render(p => {
+      frame(p, { x0: -0.5, x1: 10.5, y0: 0, y1: 0.85, xt: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], yt: [0.2, 0.4, 0.6, 0.8], xl: "x", yl: "density" });
+      const f = x => pdf(x, mu, sg);
+      areaFill(p, f, -0.5, 10.5, { base: 0, fill: "c1", fillAlpha: .12 });
+      p.fn(f, { color: "c1", width: 2.5, xmin: -0.5, xmax: 10.5 });
+      p.line(mu, 0, mu, f(mu), { color: "c1", dash: [4, 4], width: 1 });
+      let LL = 0; const parts = [];
+      pts.forEach(q => { const d = f(q.x); LL += Math.log(d); parts.push(Math.log(d).toFixed(2)); p.line(q.x, 0, q.x, d, { color: "c2", width: 3, alpha: .8 }); });
+      p.drawHandles();
+      const xs = pts.map(q => q.x), n = xs.length, m = xs.reduce((a, b) => a + b, 0) / n, s = Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / n);
+      const best = xs.reduce((a, x) => a + Math.log(pdf(x, m, s)), 0);
+      out.textContent = `log p(xᵢ) = [${parts.join(", ")}]\n` +
+        `log-likelihood = ${LL.toFixed(3)}     NLL = ${(-LL).toFixed(3)}\n` +
+        `MLE: μ̂ = ${m.toFixed(3)}, σ̂ = ${s.toFixed(3)}  →  best possible log-likelihood = ${best.toFixed(3)}`;
+    });
+  }
+
+  // ---------- fig 3: regression, MSE vs Gaussian NLL ----------
+  {
+    const p = new Plot("#fig-reg", { xmin: -1.0, xmax: 10.6, ymin: -1.6, ymax: 9.4 });
+    const out = document.getElementById("out-reg"), R = Course.rng(3);
+    const data = []; for (let i = 0; i < 12; i++) { const x = 0.5 + 9 * (i + R.uniform(0.1, 0.9)) / 12; data.push([x, 0.6 * x + 1 + R.normal(0, 0.8)]); }
+    const n = data.length;
+    const A = { x: 1, y: 4, color: "c1", constrain: (x, y) => [1, clamp(y, -1, 9)] }, B = { x: 9, y: 3, color: "c1", constrain: (x, y) => [9, clamp(y, -1, 9)] };
+    let sg = 1;
+    slider("#ctl-reg", { label: "noise σ ", min: 0.3, max: 3, step: 0.05, value: 1, digits: 2 }, v => { sg = v; p.render(); });
+    const ls = () => { const mx = data.reduce((s, d) => s + d[0], 0) / n, my = data.reduce((s, d) => s + d[1], 0) / n; let sxy = 0, sxx = 0; data.forEach(([x, y]) => { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; }); const w = sxy / sxx; return [w, my - w * mx]; };
+    button("#ctl-reg", "least squares", () => { const [w, b] = ls(); A.y = w * 1 + b; B.y = w * 9 + b; p.render(); });
+    p.draggable([A, B]).render(p => {
+      frame(p, { x0: -0.3, x1: 10.3, y0: -1, y1: 9, xt: [0, 2, 4, 6, 8, 10], yt: [0, 2, 4, 6, 8], xl: "x", yl: "y" });
+      const w = (B.y - A.y) / 8, b = A.y - w, f = x => w * x + b;
+      p.line(-0.3, f(-0.3), 10.3, f(10.3), { color: "c1", width: 2.5 });
+      const k = 0.55 * sg * Math.sqrt(2 * Math.PI);   // bell peak width ≈ 0.55 x-units regardless of σ
+      let sse = 0;
+      data.forEach(([x, y]) => {
+        const m = f(x), r = y - m; sse += r * r;
+        const bell = []; for (let i = 0; i <= 40; i++) { const yy = m - 3 * sg + 6 * sg * i / 40; bell.push([x + k * Math.exp(-((yy - m) ** 2) / (2 * sg * sg)) / Math.sqrt(2 * Math.PI * sg * sg), yy]); }
+        p.path(bell, { color: "c5", width: 1.3, alpha: .7 });
+        p.line(x, y, x, m, { color: "c4", width: 2, alpha: .8 });
+      });
+      data.forEach(([x, y]) => p.point(x, y, { r: 4.5, color: "fg" }));
+      p.drawHandles();
+      const [w0, b0] = ls(); let sse0 = 0; data.forEach(([x, y]) => sse0 += (y - w0 * x - b0) ** 2);
+      const nll = s => n / 2 * Math.log(2 * Math.PI * sg * sg) + s / (2 * sg * sg);
+      out.textContent = `line: y = ${w.toFixed(3)}x + ${b.toFixed(3)}     MSE = ${(sse / n).toFixed(4)}\n` +
+        `NLL = (n/2)·log(2πσ²) + SSE/(2σ²) = ${(n / 2 * Math.log(2 * Math.PI * sg * sg)).toFixed(3)} + ${(sse / (2 * sg * sg)).toFixed(3)} = ${nll(sse).toFixed(3)}\n` +
+        `NLL(this line) − NLL(least-squares line) = ${(nll(sse) - nll(sse0)).toFixed(4)}  (≥ 0 for every σ)`;
+    });
+  }
+
+  // ---------- fig 4: Beta–Bernoulli updating ----------
+  {
+    const p = new Plot("#fig-beta", { xmin: -0.11, xmax: 1.04, ymin: -1, ymax: 10 });
+    const out = document.getElementById("out-beta"), R = Course.rng(11);
+    let a = 2, b = 2, truth = 0.7, flips = [], frameN = 0;
+    slider("#ctl-beta", { label: "prior a ", min: 1, max: 20, step: 0.5, value: 2, digits: 1 }, v => { a = v; p.render(); });
+    slider("#ctl-beta", { label: "prior b ", min: 1, max: 20, step: 0.5, value: 2, digits: 1 }, v => { b = v; p.render(); });
+    slider("#ctl-beta", { label: "true θ ", min: 0.05, max: 0.95, step: 0.01, value: 0.7, digits: 2 }, v => { truth = v; p.render(); });
+    const flip = k => { for (let i = 0; i < k; i++) flips.push(R.uniform() < truth ? 1 : 0); p.render(); };
+    const anim = Course.animator(() => { if (++frameN % 5 === 0) flip(1); if (flips.length >= 500) { playB.textContent = "play"; return false; } });
+    button("#ctl-beta", "flip once", () => flip(1));
+    button("#ctl-beta", "flip ×10", () => flip(10));
+    const playB = button("#ctl-beta", "play", () => { if (anim.running) { anim.stop(); playB.textContent = "play"; } else { anim.start(); playB.textContent = "pause"; } });
+    button("#ctl-beta", "reset", () => { anim.stop(); playB.textContent = "play"; flips = []; p.render(); });
+    for (let i = 0; i < 12; i++) flips.push(R.uniform() < truth ? 1 : 0);   // start with a few flips so all three curves show
+    p.render(p => {
+      const n = flips.length, h = flips.reduce((s, x) => s + x, 0), t = n - h, A2 = a + h, B2 = b + t;
+      const prior = gridDensity(logBetaU(a, b)), post = gridDensity(logBetaU(A2, B2)), lik = n ? gridDensity(logBetaU(h + 1, t + 1)) : null;
+      const top = Math.max(...post.ys, ...prior.ys, ...(lik ? lik.ys : [0]));
+      const hi = Math.max(2, top * 1.12);
+      p.setView(-0.11, 1.04, -0.13 * hi, hi * 1.08);
+      frame(p, { x0: 0, x1: 1, y0: 0, y1: hi, xt: [0, .2, .4, .6, .8, 1], yt: ticks(0, hi * 0.98, 4).filter(v => v > 0), xl: "θ", yl: "density" });
+      const toPts = d => d.xs.map((x, i) => [x, d.ys[i]]);
+      p.polygon([[post.xs[0], 0], ...toPts(post), [post.xs[post.xs.length - 1], 0]], { fill: "c1", fillAlpha: .18, stroke: false });
+      p.path(toPts(prior), { color: "muted", width: 2, dash: [6, 4] });
+      if (lik) p.path(toPts(lik), { color: "c2", width: 1.8, dash: [3, 3] });
+      p.path(toPts(post), { color: "c1", width: 2.8 });
+      p.line(truth, 0, truth, hi, { color: "c3", width: 1.5, dash: [5, 4] });
+      p.label(truth, hi, "true θ", { align: "center", color: "c3", dy: -6, font: "600 12px sans-serif" });
+      const mean = A2 / (A2 + B2), map = (A2 - 1) / (A2 + B2 - 2);
+      // 95% credible interval from the grid CDF
+      let c = 0, lo95 = 0, hi95 = 1; const N = post.xs.length;
+      for (let i = 0; i < N; i++) { const c2 = c + post.ys[i] / N; if (c < .025 && c2 >= .025) lo95 = post.xs[i]; if (c < .975 && c2 >= .975) hi95 = post.xs[i]; c = c2; }
+      p.line(lo95, 0, hi95, 0, { color: "c1", width: 6, alpha: .55 });
+      const pd = x => { const i = clamp(Math.floor(x * N), 0, N - 1); return post.ys[i]; };
+      p.point(map, pd(map), { r: 5, color: "c1", stroke: "bg" });
+      p.label(map, pd(map), "MAP", { color: "c1", dx: 8, dy: -8, font: "600 12px sans-serif" });
+      if (n) { const mle = h / n; p.point(mle, 0, { r: 5, color: "c2", stroke: "bg" }); p.label(mle, 0, "MLE", { color: "c2", align: "center", dy: 22, font: "600 12px sans-serif" }); }
+      // legend
+      const lx = 0.03, ly = hi * 0.86, dyl = hi * 0.075;
+      [["prior Beta(" + a + ", " + b + ")", "muted", [6, 4]], ["likelihood (rescaled)", "c2", [3, 3]], ["posterior", "c1", []]].forEach(([s, col, dash], i) => {
+        p.line(lx, ly - i * dyl, lx + 0.06, ly - i * dyl, { color: col, width: 2.2, dash });
+        p.label(lx + 0.075, ly - i * dyl, s, { color: col, font: "12px sans-serif", bg: true });
+      });
+      const hist = flips.slice(-60).map(x => x ? "H" : "T").join("");
+      out.textContent = `flips: n = ${n}  (${h} H, ${t} T)\nlatest: ${n > 60 ? "…" : ""}${hist || "(none yet)"}\n` +
+        `posterior = Beta(${a}+${h}, ${b}+${t}) = Beta(${A2}, ${B2})\n` +
+        `mean = ${mean.toFixed(3)}   MAP = ${map.toFixed(3)}   MLE = ${n ? (h / n).toFixed(3) : "undefined"}   95% interval ≈ [${lo95.toFixed(3)}, ${hi95.toFixed(3)}]`;
+    });
+  }
+
+  // ---------- fig 5: MAP = regularization ----------
+  {
+    const p = new Plot("#fig-map", { xmin: -1.75, xmax: 4.4, ymin: -1.2, ymax: 9.1 });
+    const out = document.getElementById("out-map"), R = Course.rng(5);
+    const all = []; for (let i = 0; i < 50; i++) all.push(R.normal(2, 1));
+    let n = 1, tau = 0.5;
+    slider("#ctl-map", { label: "samples n ", min: 1, max: 50, step: 1, value: 1 }, v => { n = v; p.render(); });
+    slider("#ctl-map", { label: "prior τ ", min: 0.1, max: 3, step: 0.05, value: 0.5, digits: 2 }, v => { tau = v; p.render(); });
+    p.render(p => {
+      frame(p, { x0: -1.3, x1: 4.2, y0: 0, y1: 8, xt: [-1, 0, 1, 2, 3, 4], yt: [2, 4, 6, 8], xl: "μ", yl: "loss" });
+      const xs = all.slice(0, n), xbar = xs.reduce((s, x) => s + x, 0) / n, lam = 1 / (tau * tau), map = n * xbar / (n + lam);
+      const D = m => n * (m - xbar) ** 2 / 2, P = m => m * m / (2 * tau * tau), T = m => D(m) + P(m) - D(map) - P(map);
+      const o = { xmin: -1.3, xmax: 4.2, samples: 800 }, cut = v => v > 8.1 ? NaN : v;   // NaN breaks the path at the frame top
+      p.fn(m => cut(D(m)), { ...o, color: "c1", width: 2 });
+      p.fn(m => cut(P(m)), { ...o, color: "c2", width: 2 });
+      p.fn(m => cut(T(m)), { ...o, color: "c3", width: 3.2 });
+      xs.forEach(x => p.point(x, 0, { r: 3, color: "c1", alpha: .55 }));
+      p.line(xbar, 0, xbar, 8, { color: "c1", dash: [4, 4], width: 1 });
+      p.line(map, 0, map, 8, { color: "c3", dash: [4, 4], width: 1 });
+      p.point(xbar, 0, { r: 6, color: "c1", stroke: "bg" }); p.point(map, 0, { r: 6, color: "c3", stroke: "bg" });
+      const left = map < xbar;
+      p.label(xbar, 8.5, "MLE", { align: left ? "left" : "right", dx: left ? 4 : -4, color: "c1", font: "600 12px sans-serif" });
+      p.label(map, 8.5, "MAP", { align: left ? "right" : "left", dx: left ? -4 : 4, color: "c3", font: "600 12px sans-serif" });
+      const lx = 2.75, ly = 7.2;
+      [["data term (NLL)", "c1"], ["prior penalty μ²/2τ²", "c2"], ["sum → MAP", "c3"]].forEach(([s, col], i) => { p.line(lx, ly - i * 0.6, lx + 0.25, ly - i * 0.6, { color: col, width: 2.5 }); p.label(lx + 0.32, ly - i * 0.6, s, { color: col, font: "12px sans-serif", bg: true }); });
+      out.textContent = `n = ${n}   x̄ (MLE) = ${xbar.toFixed(3)}   λ = σ²/τ² = ${lam.toFixed(2)}\n` +
+        `MAP = n·x̄ / (n + λ) = ${map.toFixed(3)}     shrinkage factor n/(n+λ) = ${(n / (n + lam)).toFixed(3)}`;
+    });
+  }
+});
+</script>
+</body>
+</html>

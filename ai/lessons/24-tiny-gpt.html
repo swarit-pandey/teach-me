@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Train a tiny GPT</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="24">
+<main>
+<style>
+  .textwin { font-family: var(--mono); font-size: .78rem; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: .6rem .8rem; }
+  .textwin mark { border-radius: 3px; padding: 0 1px; color: var(--fg); }
+  .xy { font-family: var(--mono); font-size: .76rem; border-collapse: collapse; margin: .5rem 0; }
+  .xy td { border: 1px solid var(--line); padding: 1px 4px; text-align: center; min-width: 1.3em; }
+  .xy td.h { border: 0; color: var(--muted); text-align: right; padding-right: 8px; }
+  .sample { font-family: var(--mono); font-size: .8rem; line-height: 1.5; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: .7rem .9rem; min-height: 11.5em; }
+</style>
+
+<div class="kicker">Part 6 · Transformers</div>
+<h1>Train a tiny GPT</h1>
+<p class="lede">Time to put everything together and watch a transformer learn to write. You'll build the data pipeline, assemble a 0.8M-parameter character-level GPT, predict its loss before training, then train it on Shakespeare with AdamW on your laptop's CPU. Along the way you'll watch random characters turn into something that looks like a play. The loss curve and samples on this page come from a run of the provided <code>train.py</code>.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Build a language-model data pipeline: vocabulary, encoding, a leak-free train/validation split, and random context windows with shifted targets.</li>
+    <li>Predict a model's loss at initialization ($\ln V$), derive the correction for non-tiny initial logits, and use it to debug.</li>
+    <li>Write and read a full training loop (AdamW, warm-up + cosine schedule, gradient clipping, eval loss) and interpret train/val curves against simple baselines.</li>
+    <li>Generate text autoregressively, and connect cross-entropy to bits per character and compression.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="plan">1. The plan</h2>
+<p>Tiny Shakespeare is about 1.1 million characters of plays, one text file. We'll train a model that, given up to 128 characters, predicts the next one. That's the bigram/MLP/RNN task from lesson 20, now with the transformer from lesson 23. Four pieces:</p>
+<ol>
+  <li><b>Data</b>: text → ids → batches of (input, target) windows (section 2).</li>
+  <li><b>Model</b>: token + position embeddings, 4 transformer blocks, LayerNorm, linear head (section 3).</li>
+  <li><b>Training</b>: cross-entropy, AdamW, a learning-rate schedule, evaluation on held-out text (sections 4–5).</li>
+  <li><b>Sampling</b>: feed the model its own output, one character at a time (section 6).</li>
+</ol>
+<p>We use <b>characters</b> as tokens ($V = 65$) instead of BPE (lesson 21). The vocabulary is tiny, there is no tokenizer to train, and every sample is easy to read. The cost is long sequences: 128 tokens are only about 25 words of context.</p>
+
+<!-- ============================================================ -->
+<h2 id="data">2. The data pipeline</h2>
+<p><b>Vocabulary.</b> Collect the distinct characters, sort them, and number them: <code>itos</code> is the sorted list, <code>stoi</code> the inverse map. Tiny Shakespeare has 65: newline, space, the 52 upper- and lower-case letters, and 11 symbols (punctuation, a stray dollar sign, and the digit 3, the only digit in the file). The whole corpus becomes one long int64 tensor <code>data</code>.</p>
+<p><b>Train/validation split.</b> Take the first 90% for training and the last 10% for validation, as <em>contiguous</em> blocks. Don't shuffle characters, or windows, into the two sets: neighbouring windows overlap almost entirely. A validation window starting one character after a training window would be 99% memorized text, and the validation loss would lie. A contiguous split means validation is genuinely unseen text (a different play, in fact).</p>
+<p><b>Batches.</b> Pick $B$ random start positions $i$. The input is <code>data[i : i+T]</code> and the target is <code>data[i+1 : i+T+1]</code>, the same window shifted by one. Thanks to the causal mask (lesson 22), each window is $T$ training examples at once: position $t$ is trained to predict character $t+1$ from characters $1..t$, for every $t$.</p>
+
+<div class="figure">
+  <div class="controls" id="ctl-batch"></div>
+  <div id="txt-batch" class="textwin"></div>
+  <div id="xy-batch"></div>
+  <div class="caption"><b>Try it:</b> press <b>New batch</b> to draw $B = 4$ random windows (highlighted in the text) with context length $T$ (slider). Below are the input rows $x$ and target rows $y$, with spaces shown as ␣ and newlines as ↵. Each target row is its input row shifted left by one. Every column is one supervised example: "given everything up to here, predict the box below".</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: how much data is a run?</div>
+  <p>The training split has $\lfloor 0.9 \times 1{,}115{,}394\rfloor = 1{,}003{,}854$ characters. One step with $B = 32$, $T = 128$ makes $32 \times 128 = 4096$ predictions. <code>train.py</code> runs 3,000 steps: $12{,}288{,}000$ predictions, or about $12.2$ passes ("epochs") over the training text. Each window is a fresh random draw, so the model sees every character in many different contexts and positions.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="model">3. The model</h2>
+<p>Exactly the GPT of lesson 23, small:</p>
+<table>
+  <tr><th>Setting</th><th>Value</th><th>Parameters</th></tr>
+  <tr><td>vocabulary $V$ / context $T$</td><td>65 / 128</td><td>token emb $65\cdot128 = 8{,}320$; position emb $128\cdot128 = 16{,}384$</td></tr>
+  <tr><td>width $d$, heads $h$</td><td>128, 4 (so $d_h = 32$)</td><td></td></tr>
+  <tr><td>layers $L$</td><td>4</td><td>$4\,(12\cdot128^2 + 13\cdot128) = 793{,}088$</td></tr>
+  <tr><td>final LN + head (untied)</td><td></td><td>$256 + 8{,}320$</td></tr>
+  <tr><th>total</th><th></th><th>826,368</th></tr>
+</table>
+<p>Two initialization details from GPT-2 matter more than you'd think. Every weight starts as $\mathcal N(0, 0.02^2)$, and the two layers that <em>write into the residual stream</em> (attention's output projection and the MLP's second layer) are scaled down further by $1/\sqrt{2L}$. That keeps the stream's variance from growing with depth at initialization (lesson 23, section 2).</p>
+
+<!-- ============================================================ -->
+<h2 id="initloss">4. What should the loss be at step 0?</h2>
+<p>Before training, predict the number your code will print. That one number catches a surprising fraction of bugs.</p>
+<p>With small random weights the logits are all close to 0, so the softmax is close to <b>uniform</b>: every character gets probability $1/V$. Cross-entropy (lesson 11) is $-\log p(\text{correct})$, so</p>
+$$\mathcal L_0 \approx -\ln\frac1V = \ln V = \ln 65 \approx 4.174 \text{ nats}.$$
+<p>That's the loss of knowing nothing. If your first printed loss is 4.17, the wiring is plausible. If it's 0.5, you're probably leaking the target into the input (a missing causal mask, or targets not shifted). If it's 10, the initialization is too large.</p>
+<p><b>Why a large init is worse than "knowing nothing".</b> Suppose the initial logits are independent $\mathcal N(0, \sigma^2)$. The loss is $\log\sum_j e^{z_j} - z_y$, and $\mathbb E[z_y] = 0$. For large $V$, the sum is close to $V\,\mathbb E[e^{z}]$, and the mean of a log-normal is $\mathbb E[e^z] = e^{\sigma^2/2}$ (lesson 09). So</p>
+$$\mathbb E[\mathcal L_0] \approx \ln\!\big(V e^{\sigma^2/2}\big) = \ln V + \frac{\sigma^2}{2}.$$
+<p>Random but <em>confident</em> predictions are confidently wrong, and each unit of logit variance costs half a nat. The first few hundred training steps then go into merely shrinking the logits (the "hockey stick" at the start of many loss curves) instead of learning anything. GPT-2's $0.02$ init keeps $\sigma \approx 0.02\sqrt d \approx 0.23$, costing only about $0.03$ nats.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-init" width="420" height="300"></canvas></div>
+    <div><canvas id="fig-init-p" width="340" height="300"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-init"></div>
+  <div class="readout" id="out-init"></div>
+  <div class="caption"><b>Try it:</b> slide the standard deviation $\sigma$ of the initial logits. Left: the expected initial loss (Monte Carlo, <span style="color:var(--c1)">solid</span>), the approximation $\ln V + \sigma^2/2$ (<span style="color:var(--c2)">dashed</span>), and the floor $\ln 65$. Right: the predicted distribution over the 65 characters for one random input, with the correct character in orange. At $\sigma = 0.2$ the prediction is nearly flat ("I don't know"). At $\sigma = 3$ it puts most of its mass on a few arbitrary characters ("I'm sure, and wrong").</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="train">5. The training loop</h2>
+<p>The core of <code>train.py</code> is the same five lines you've written since lesson 19:</p>
+<pre><code>for step in range(steps):
+    x, y = get_batch(train_data, T, B)          # (B, T) each
+    logits, loss = model(x, y)                  # mean cross-entropy over B*T predictions
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    opt.step()</code></pre>
+<p>Around it are three ingredients from lesson 18:</p>
+<ul>
+  <li><b>AdamW</b> with $\beta = (0.9, 0.99)$ and weight decay $0.1$ applied only to weight matrices and embeddings. Decaying LayerNorm gains or biases toward 0 would just fight the normalization.</li>
+  <li><b>Learning-rate schedule</b>: linear warm-up for 100 steps (Adam's second-moment estimates are noisy at first, so big early steps are risky), then cosine decay from $2\times10^{-3}$ to $2\times10^{-4}$. Small steps at the end let the model settle into a minimum instead of bouncing around it.</li>
+  <li><b>Gradient clipping</b> to global norm 1: a rare bad batch can't throw the weights far.</li>
+</ul>
+<p><b>Evaluation.</b> Every 250 steps we estimate the loss on 20 random batches from <em>both</em> splits, under <code>torch.no_grad()</code> and <code>model.eval()</code> (no graph, and no dropout if there were any). The batch loss printed each step is too noisy for decisions; the averaged train and validation losses are what you watch.</p>
+
+<div class="figure">
+  <canvas id="fig-loss" width="680" height="380"></canvas>
+  <canvas id="fig-lr" width="680" height="110" style="margin-top:6px"></canvas>
+  <div class="controls" id="ctl-loss"></div>
+  <div class="readout" id="out-loss"></div>
+  <div class="caption"><b>Try it:</b> a real run of <code>train.py</code> on a laptop CPU. Faint dots: single-batch losses. Lines: averaged <span style="color:var(--c1)">train</span> and <span style="color:var(--c2)">validation</span> loss. Dashed reference lines show what simpler models reach on the same validation text: uniform guessing ($\ln 65$), a unigram model (character frequencies only), a bigram model (lesson 20) and a trigram model. Slide through the steps. The model passes the bigram level within a few hundred steps and the trigram level soon after. Watch the end of the run: validation flattens around 1.53 while train keeps falling to 1.25. That 0.27-nat gap is still widening, so the model has started to memorize its 1 MB of training text. More steps alone would mostly widen the gap. The next levers are regularization (dropout, weight decay) or more data (lesson 15). Bottom: the learning-rate schedule.</div>
+</div>
+
+<div class="callout key">
+<p>Always compare a loss to baselines. "Val loss 1.6" means nothing alone. "Uniform 4.17, unigram 3.35, bigram 2.48, trigram 2.05, ours 1.53" tells you the model uses far more than the last two characters of context.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sample">6. Sampling</h2>
+<p>Generation (workbook 24's <code>generate</code>) starts from a prompt, here a single newline. Then it loops: crop the context to the last $T$ characters, run the model, take the logits at the <em>last</em> position, softmax (optionally with a temperature, lesson 25), sample a character, append it. The model never sees the "real" next character during generation. It conditions on its own previous choices, so small errors can compound.</p>
+
+<div class="figure">
+  <div class="controls" id="ctl-samples"></div>
+  <div id="out-samples" class="sample"></div>
+  <div class="readout" id="out-samples-info"></div>
+  <div class="caption"><b>Try it:</b> slide through the training run. Each text is 200 characters sampled at temperature 1 from the model checkpoint at that step, always with the same random seed. At step 0 the output is uniform noise over the 65 characters. Within ~100 steps it learns the character frequencies (lots of spaces and e's) and line breaks. Next come word-like chunks and the play format (NAME:, newlines). Late in training it produces real words, plausible names and a recognizable rhythm, though the sentences still don't mean anything.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="bits">7. What the number means: bits and compression</h2>
+<p>A loss of $\mathcal L$ nats per character is $\mathcal L/\ln 2$ <b>bits per character</b>. That's not just a unit change. By arithmetic coding, a model with cross-entropy $\mathcal L$ can <em>compress</em> held-out text to about $\mathcal L/\ln2$ bits per character (lesson 11: cross-entropy is the expected code length under the model). Prediction and compression are the same problem.</p>
+<p>For comparison, standard compressors on the whole Tiny Shakespeare file achieve: gzip 3.11 bits/char, xz 2.61, bzip2 2.36. Our run's validation loss of 1.53 nats is 2.20 bits/char, already better than bzip2, from a 0.8M-parameter model trained for about two minutes on a laptop CPU. The <b>perplexity</b> $e^{\mathcal L}$ is another common way to say it: $e^{1.6} \approx 4.95$, as uncertain as a uniform choice among about 5 characters (versus 65 at the start).</p>
+
+<div class="callout ml">
+<p>Everything in the RL lessons (26–29) starts from a model trained exactly like this one, just much larger and on far more text: a <em>pretrained</em> next-token predictor. RLHF and DPO then adjust its distribution, with a KL penalty that keeps it close to this pretrained (or SFT) starting point.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="run">8. Run it yourself</h2>
+<p>From the course root:</p>
+<pre><code>.venv/bin/python workbooks/24_tiny_gpt/train.py              # full run
+.venv/bin/python workbooks/24_tiny_gpt/train.py --steps 300  # 30-second smoke test</code></pre>
+<p>It prints the averaged losses and a sample every 250 steps, then saves <code>data/tinygpt.pt</code> (weights, config and vocabulary), <code>data/tinygpt_vocab.json</code> and <code>data/tinygpt_log.json</code> (the numbers plotted on this page). <span id="run-stats">A full run takes a few minutes on a laptop CPU.</span> Things to try once it works: double $d$ or $L$ (watch the validation gap), drop the warm-up and raise the learning rate (watch for spikes), or set the head's init std to 1.0 and look at the step-0 loss.</p>
+
+<!-- ============================================================ -->
+<h2 id="problems">9. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>What loss should a freshly initialized model print on a vocabulary of 65 characters? And with a BPE vocabulary of 50,257?</p>
+<div class="numcheck" data-answer="4.1744,10.8249" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\ln 65 = 4.1744$ and $\ln 50{,}257 = 10.8249$. GPT-2 runs start near 10.8.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>A validation loss of 1.6 nats per character: how many bits per character, and what perplexity?</p>
+<div class="numcheck" data-answer="2.3083,4.9530" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$1.6/\ln 2 = 2.308$ bits. Perplexity $e^{1.6} = 4.953$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Using the lesson-23 formula, compute the parameter count of a char-level GPT with $V = 65$, $T = 256$, $d = 384$, $L = 6$ and an untied head. (This is the "bigger" Shakespeare model often trained on a GPU.)</p>
+<div class="numcheck" data-answer="10795776"></div>
+<details class="solution"><summary>Solution</summary>
+<p>One block: $12\cdot384^2 + 13\cdot384 = 1{,}769{,}472 + 4{,}992 = 1{,}774{,}464$; six blocks: $10{,}646{,}784$. Embeddings: $65\cdot384 + 256\cdot384 = 24{,}960 + 98{,}304$. Final LN $768$, head $384\cdot65 = 24{,}960$. Total $10{,}795{,}776$, the "10.8M" model. At this size the blocks are 98.6% of the parameters.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · derivation</span>
+<p>Show that if the initial logits are i.i.d. $\mathcal N(0,\sigma^2)$, the expected initial loss is approximately $\ln V + \sigma^2/2$ for large $V$. Evaluate it for $V = 65$, $\sigma = 1$.</p>
+<div class="numcheck" data-answer="4.6744" data-tol="1e-3"></div>
+<details class="hint"><summary>Hint</summary><p>Write $\log\sum_j e^{z_j} = \log V + \log\big(\frac1V\sum_j e^{z_j}\big)$ and use the law of large numbers on the average.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathcal L = \log\sum_j e^{z_j} - z_y = \log V + \log\big(\tfrac1V\sum_j e^{z_j}\big) - z_y$. For large $V$, the average $\tfrac1V\sum_j e^{z_j} \to \mathbb E[e^{z}] = e^{\sigma^2/2}$ (the moment generating function of a Gaussian: $\mathbb E[e^{tz}] = e^{t^2\sigma^2/2}$ at $t=1$). And $\mathbb E[z_y] = 0$. So $\mathbb E[\mathcal L] \approx \ln V + \sigma^2/2 = 4.1744 + 0.5 = 4.6744$. A simulation gives 4.666, so the approximation is excellent. It slightly overestimates for large $\sigma$, where a few huge $e^{z_j}$ dominate the sum and the law of large numbers kicks in slowly.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>Your step-0 loss is 0.9 and falls to 0.02 within 200 steps, but samples are garbage. Name the two most likely bugs, and a 1-line test for each.</p>
+<details class="solution"><summary>Solution</summary>
+<p>A loss far <em>below</em> $\ln V$ before training means the model can see the answer. (1) <b>Targets not shifted</b>: $y = x$ instead of $y = x$ shifted by one, so the model just copies its input. Test: assert <code>torch.equal(x[:, 1:], y[:, :-1])</code>. (2) <b>No causal mask</b>: position $t$ attends to $t+1$, which is its own target. Test: change the input at a future position and assert the logits at earlier positions don't change (the causality test from workbooks 22–23). Garbage samples follow because at generation time the future isn't available to cheat with.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · conceptual</span>
+<p>A colleague splits the data by drawing random windows and assigning each to train or validation with probability 0.9/0.1. Their validation loss is 1.2 while yours is 1.6 with the same model. Who has the better model?</p>
+<details class="solution"><summary>Solution</summary>
+<p>Probably nobody. Their split leaks. A validation window overlaps heavily with training windows that start a few characters earlier or later, so their "validation" text was mostly trained on, and 1.2 measures memorization. With a contiguous split, validation is the final 10% of the file, text the model has never seen. Always split <em>before</em> windowing, along a boundary that matches how the model will be used.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">stretch</span>
+<p>Our run processes about $1.2\times10^7$ training tokens with $8.3\times10^5$ parameters. Using $C \approx 6ND$ (lesson 25), estimate the training FLOPs. If your CPU sustains $5\times10^{10}$ FLOP/s on this workload, how many seconds would that take?</p>
+<div class="numcheck" data-answer="6.09e13,1218" data-tol="0.02"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$C = 6 \cdot 826{,}368 \cdot 12{,}288{,}000 \approx 6.09\times10^{13}$ FLOPs. At $5\times10^{10}$ FLOP/s: about $1{,}218$ s. In practice the run is faster than this estimate on a multi-core laptop, and the formula ignores attention's $n^2$ term (sizeable here, since $T = 128$ is comparable to $d = 128$). The order of magnitude is the point: GPT-3's $3\times10^{23}$ is ten billion times more.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">10. Quick check</h2>
+<div class="quiz" data-answer="b">
+  <div class="q">One batch is $B = 32$ windows of length $T = 128$. How many next-token predictions contribute to the loss?</div>
+  <div class="opts">
+    <button data-k="a">32: one per window, the token after the window.</button>
+    <button data-k="b">4096: every position in every window predicts its next token.</button>
+    <button data-k="c">128: one per position, averaged over the batch first.</button>
+    <button data-k="d">32 × 127, because the first position has no context.</button>
+  </div>
+  <div class="explain">The causal mask makes each position a separate example with its own prefix. The first position predicts from a context of one character, which is still a valid prediction.</div>
+</div>
+<div class="quiz" data-answer="c">
+  <div class="q">Your first printed loss is 4.17 for $V = 65$. What can you conclude?</div>
+  <div class="opts">
+    <button data-k="a">The model is already trained.</button>
+    <button data-k="b">The causal mask is definitely correct.</button>
+    <button data-k="c">The initialization is sensible (near-uniform predictions) and the loss is wired to the right targets. It doesn't prove the mask is right.</button>
+    <button data-k="d">The learning rate is too low.</button>
+  </div>
+  <div class="explain">$\ln 65 = 4.17$ is what an untrained, near-uniform model scores. A leaking model would also start near 4.17. The leak shows up once training starts, as an implausibly fast drop.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">Train loss 1.45, validation loss 1.47, and both still decreasing at the end of the run. What should you try first?</div>
+  <div class="opts">
+    <button data-k="a">Train longer or use a bigger model: it's underfitting.</button>
+    <button data-k="b">Add dropout and weight decay: it's overfitting.</button>
+    <button data-k="c">Lower the learning rate to zero.</button>
+    <button data-k="d">Shuffle the validation set into training.</button>
+  </div>
+  <div class="explain">A tiny train/val gap with both curves still falling means capacity or training time is the bottleneck, not generalization (lesson 15).</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">11. Summary</h2>
+<table>
+  <tr><th>Piece</th><th>What to remember</th></tr>
+  <tr><td>Data</td><td>contiguous 90/10 split; windows <code>x = data[i:i+T]</code>, <code>y = data[i+1:i+T+1]</code>; $B\cdot T$ examples per batch</td></tr>
+  <tr><td>Model</td><td>lesson-23 GPT; $V = 65$, $d = 128$, $L = 4$, $h = 4$, $T = 128$: 826k parameters</td></tr>
+  <tr><td>Initial loss</td><td>$\ln V$ (4.17); $\approx \ln V + \sigma^2/2$ with logit std $\sigma$</td></tr>
+  <tr><td>Training</td><td>AdamW (decay on matrices only), warm-up + cosine, clip to 1, eval on both splits</td></tr>
+  <tr><td>Baselines</td><td>uniform 4.17 → unigram 3.35 → bigram 2.48 → trigram 2.05 nats</td></tr>
+  <tr><td>Meaning</td><td>loss / ln 2 = bits per char = compression rate; perplexity $e^{\mathcal L}$</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 24: the pieces of a training run</h3>
+  <p>Open <code>workbooks/24_tiny_gpt/exercises.py</code>. You'll write <code>build_vocab</code>/<code>encode</code>/<code>decode</code>, <code>train_val_split</code> and <code>get_batch</code>, then assemble <code>TinyGPT</code> from the provided <code>Block</code> with GPT-2 initialization, <code>expected_initial_loss</code>, <code>make_optimizer</code> (AdamW with decay groups), <code>train_step</code>, <code>estimate_loss</code> and <code>generate</code>. The tests check that targets are shifted inputs, that your initial loss is within 0.1 of $\ln V$, that the model can <b>memorize a single batch</b> (loss below 0.3 in 150 steps, the standard sanity check before any long run), and that greedy generation follows the argmax chain. Then read and run <code>train.py</code>, the same pieces in one file.</p>
+  <pre><code>./course check 24
+.venv/bin/python workbooks/24_tiny_gpt/train.py</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Andrej Karpathy, <em>Let's build GPT: from scratch, in code, spelled out</em> (video) and the <code>nanoGPT</code> repository: the same model, a few sizes up.</li>
+  <li>Andrej Karpathy (2015), <em>The Unreasonable Effectiveness of Recurrent Neural Networks</em>: where Tiny Shakespeare comes from.</li>
+  <li>Andrej Karpathy (2019), <em>A Recipe for Training Neural Networks</em>: "overfit one batch", "verify loss at init" and other habits.</li>
+  <li>Claude Shannon (1951), <em>Prediction and Entropy of Printed English</em>: the original bits-per-character experiments.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, LA, fmt, withAlpha } = Course;
+  const mono = getComputedStyle(document.documentElement).getPropertyValue("--mono");
+  const SNIP = "First Citizen:\nBefore we proceed any further, hear me speak.\n\nAll:\nSpeak, speak.\n\nFirst Citizen:\nYou are all resolved rather to die than to famish?\n\nAll:\nResolved. resolved.\n\nFirst Citizen:\nFirst, you know Caius Marcius is chief enemy to the people.\n\nAll:\nWe know't, we know't.\n\nFirst Citizen:\nLet us kill him, and we'll have corn at our own price.\nIs't a verdict?\n\nAll:\nNo more talking on't; let it be done: away, away!\n\nSecond Citizen:\nOne word, good citizens.\n\nFirst Citizen:\nWe are accounted poor citizens, the patricians good.\nWhat authority surfeits on would relieve us: if they\nwould yield us but the superfluity, while it were\nwholesome, we might guess they relieved us humanely;\nbut they think we are too dear: the leanness that\nafflicts us, the object of our misery, is as an\ninventory to particularise their abundance; our\nsufferance is a gain to them Let us revenge this with\nour pikes, ere we become rakes: for the gods know I\nspeak this in hunger for bread, not in thirst for revenge.\n\nSecond Citizen:\nWould you proceed especially against Caius Marcius?\n\nAll:\nAgainst him first: he's a ";
+  const LOG = /*LOG*/{"config":{"block_size":128,"d":128,"n_heads":4,"n_layers":4,"batch_size":32,"steps":3000,"lr":0.002,"min_lr":0.0002,"warmup":100,"weight_decay":0.1,"eval_every":250,"eval_batches":20,"seed":1337},"n_params":826368,"vocab_size":65,"ln_vocab":4.174387269895637,"steps":[0,50,100,250,500,750,1000,1250,1500,1750,2000,2250,2500,2750,3000],"train_loss":[4.1817,2.6462,2.4905,2.2481,1.8543,1.6695,1.5602,1.4839,1.4329,1.3844,1.3461,1.3149,1.2865,1.2675,1.2549],"val_loss":[4.1829,2.6536,2.4978,2.273,1.9725,1.825,1.7457,1.678,1.6286,1.5898,1.5736,1.5514,1.5372,1.5304,1.5266],"batch_loss":[4.1876,3.645,3.3001,2.9677,2.7422,2.6379,2.6076,2.5576,2.5573,2.5243,2.4724,2.4948,2.4231,2.4672,2.4347,2.4291,2.3845,2.4081,2.3588,2.3703,2.3004,2.3522,2.3146,2.3069,2.2854,2.2632,2.2053,2.1793,2.1758,2.2151,2.1309,2.1013,2.1113,2.1278,2.0587,2.0718,2.0013,2.0465,1.9796,1.9462,1.9988,1.9893,1.9793,1.8935,1.9871,1.9318,1.8739,1.8601,1.881,1.8949,1.8242,1.8098,1.8142,1.81,1.7517,1.7902,1.7912,1.8083,1.8075,1.7436,1.8034,1.786,1.6834,1.6982,1.712,1.7553,1.7169,1.7065,1.6765,1.6669,1.7267,1.717,1.7426,1.7151,1.6518,1.7003,1.6194,1.6833,1.677,1.6332,1.6445,1.635,1.6486,1.6143,1.5788,1.5453,1.6524,1.5949,1.5036,1.6301,1.5694,1.6177,1.5744,1.537,1.5388,1.5562,1.5739,1.5727,1.5674,1.5312,1.5381,1.5249,1.542,1.5324,1.5681,1.587,1.5742,1.5304,1.5209,1.5799,1.5229,1.4855,1.532,1.4659,1.5481,1.5556,1.4932,1.4906,1.5642,1.4588,1.5417,1.556,1.5134,1.5138,1.4887,1.4251,1.4758,1.4767,1.4518,1.4782,1.4854,1.439,1.4759,1.4931,1.4622,1.4555,1.4416,1.4665,1.5315,1.4312,1.4186,1.405,1.4689,1.431,1.4606,1.457,1.478,1.388,1.477,1.3929,1.4344,1.4242,1.3891,1.3943,1.3626,1.3694,1.4094,1.3927,1.4182,1.4331,1.4381,1.3702,1.3521,1.3991,1.3693,1.3524,1.4638,1.3692,1.3967,1.3827,1.4268,1.3568,1.3957,1.3388,1.3829,1.397,1.3925,1.3545,1.3774,1.4007,1.3719,1.4328,1.3654,1.3333,1.3512,1.375,1.3109,1.3451,1.338,1.3406,1.3944,1.3561,1.3389,1.3852,1.3638,1.3626,1.3691,1.3592,1.3553,1.3629,1.2929,1.3042,1.3812,1.3354,1.38,1.3255,1.3326,1.3448,1.332,1.3249,1.2741,1.3272,1.3298,1.2781,1.3103,1.3491,1.2585,1.324,1.3135,1.291,1.2798,1.2905,1.332,1.3346,1.3243,1.3455,1.3255,1.2666,1.3047,1.3333,1.3093,1.3055,1.3534,1.3018,1.3245,1.308,1.2884,1.2367,1.3373,1.308,1.2835,1.2615,1.2683,1.2831,1.3066,1.3029,1.274,1.2869,1.3308,1.2819,1.2433,1.2469,1.2865,1.219,1.3419,1.2755,1.3042,1.2445,1.2577,1.258,1.2999,1.3176,1.291,1.2886,1.2708,1.2676,1.2351,1.2653,1.2858,1.2605,1.2875,1.3155,1.2573,1.3036,1.2554,1.2824,1.2491,1.2251,1.2645,1.2301,1.3038,1.2523,1.2443,1.275,1.2329,1.3125,1.3424,1.2328,1.2842,1.2423,1.2634,1.2291,1.2389,1.2746,1.2874,1.2213,1.2669,1.1837,1.2183,1.2608],"samples":{"0":"Dt!'ma!Ae\ncms:vEoYSkIlG!t'QSUQSN?eEMMEXQuG\nRYabfjk-YGFymfz:ZtzuO RUK?hUkTkKbOqh'ZsVT TbMch'HZd bIJ;kgAKe3YcUXD'lSLH:tbFSx!Y&TkZNLftEBx'\nKAMj\nlj-RxvNISJwQlwOtOuOcAu?ssxn EXFfivr;XkTd;E.DRvbld? -v&KWOJM","50":"At 'manthocos: loroky hetserl SNHerthemouG\nRYabe m-hed mer s bet rof hUCTheemy fes w ca ch'd d bIUNEganday weD'lldr:\nG he o&ur t, than'\nWhon\nAjanr ge Jwilwithuranursson thafivr;\nked;E:\nRvbld  mvestO:\n","100":"At!'santercos:\nJorok le!tserowisseres\n\nIf hirabe mee t mer s ber bof hUCTheemy fes iscave, gud bIUNEganeave e maldr:\n\nFir ol k:\nLeatou'\nWhonelar rve\nS:\nBlouthurchursson thadivr;\nked; barveld yove;\nOMy","250":"At 'mandercos: lorok leftsery Saser srenep\nRrabe mee thmf the me bof haksweer, fes whil che pe beestganeay wer'lld.\n\nGUSINYETE:\nLethan't fonell trvee cwilld surchuesson thasivr;\nked; wass lal mat;\nOee","500":"Duk's mast me: lord, leftsery Sasester\nIf him be my thymen stert boody what my fessing of 'twick!\n\nJULIET:\nMe mald at she blik:\nLetter's for law right wilt thum himsson that vrimsed;\nParvile you faire","750":"At 'man orcom: lord, lady's likes and more\nRecut my trament, but road be at my fessing of 't.\n\nPRINCE KING HEDwalth:\nWhix olding, that's for law rights.\n\nQUEEN:\nAughson that vrifked; basible you fault","1000":"DUKE VINCENTIO:\nMYok lordself, as your happy abude-his morry bettent?\nUntate you shumbanch'd doth, to that we made at;\nAnd like the cant foree and good little your\nsson that vrisked; bass lamen! Lay, ","1250":"Atorman:\nAcome losted he seal was and more\nReame my stame of better do what my fear, They\n'Hud be see that we maddy: being him they too\nWhom law not bowl'd they humss not afivr;\nkide basswer your twee","1500":"Atteman: but wills, I hate all, serve\nmore, tabber-hid my return roady what have ships\nMy love been gater consul, Hath he is that that's for\nlaw rage own with your sson that vrims?\n\nESCALUS:\nWhat they","1750":"At 'tis once will on the seal was and mour\nReave my stamp of but book to aten, and while,\n'Hed by my freament male at the flight, that's for\nlaw now and lourself upon nothing: so, what\nsigh my visame ","2000":"At 'man's commonousny.\n\nGLOUCESTER:\nWell, here fame! What is the royal waked you shing!\n\nESCALUS:\nNew, may we may you the flight, that's for\nlaw them own with your sorn that vrimity; but blumy--\nLaw y","2250":"At 'tis encorning, kill't's man servers fortune!\nO, thy forst unmand his weeds and whit chance by,\nThat a cheapled at thy flight fatal's for\nAgainst and louts of unsuon that vrimit\nAnd birthly voices,","2500":"At 'man: but whoose you!--pallass your husband,\nFor thy friends; boy, be at have shung of 'glden?\n\nESCALUS:\nNo, here being him by the secret\nAgainst and louts manuls.\n\nCLARENCE:\nGod plays like my twen","2750":"At 'man's commonousny.\n\nGLOUCESTER:\nMethinks about his mother? O more bestress fast, gave 'guilts,\nTo that we may rather a like that a thought an age\nJester succepts on these remaid; but blumes!\nLawie","3000":"At 'man's commanousny.\n\nGLOUCESTER:\nMethinks absence that watchman!\nThe sweets are incance's debt, bear a cheerly rate;\nWhen thou art at for law rage owly proud\nAumes not afivr; keep was blush-visaged"},"seconds":[0.8,3.7,6.4,13.0,23.5,33.3,43.8,54.5,63.7,75.8,85.0,94.3,103.5,112.8,121.9]};
+  const show = c => c === " " ? "␣" : c === "\n" ? "↵" : c;
+
+  // ---------- fig: batches ----------
+  {
+    let T = 16; const B = 4; let R = Course.rng(5), starts = [];
+    const txt = document.getElementById("txt-batch"), xy = document.getElementById("xy-batch");
+    const PAL = ["c1", "c2", "c3", "c5"];
+    slider("#ctl-batch", { label: "context length T ", min: 4, max: 32, step: 1, value: T, digits: 0 }, v => { T = v; draw(false); });
+    button("#ctl-batch", "New batch", () => draw(true));
+    function draw(resample) {
+      if (resample || !starts.length) { starts = []; while (starts.length < B) { const s = R.int(SNIP.length - T - 1); if (starts.every(t => Math.abs(t - s) > T + 2)) starts.push(s); } }
+      starts = starts.map(s => Math.min(s, SNIP.length - T - 2));
+      const owner = new Array(SNIP.length).fill(-1);
+      starts.forEach((s, b) => { for (let i = s; i <= s + T; i++) owner[i] = b; });
+      const parts = []; let i = 0;
+      while (i < SNIP.length) { let j = i; while (j < SNIP.length && owner[j] === owner[i]) j++; parts.push([owner[i], SNIP.slice(i, j)]); i = j; }
+      const vis = s => s.replace(/\n/g, "↵ ");
+      txt.innerHTML = ""; parts.forEach(([o, s]) => { if (o < 0) txt.append(document.createTextNode(vis(s))); else { const m = document.createElement("mark"); m.style.background = withAlpha(PAL[o], .3); m.textContent = vis(s); txt.append(m); } });
+      const first = Math.min(...starts); txt.scrollTop = 0;
+      let html = "";
+      starts.forEach((s, b) => {
+        const row = (lab, off) => `<tr><td class="h" style="color:var(--${PAL[b]})">${lab}</td>` + Array.from({ length: T }, (_, t) => `<td style="background:${withAlpha(PAL[b], off ? .1 : .22)}">${escape(show(SNIP[s + t + off]))}</td>`).join("") + "</tr>";
+        html += row(`x[${b}]`, 0) + row(`y[${b}]`, 1);
+      });
+      xy.innerHTML = `<table class="xy">${html}</table>`;
+    }
+    const escape = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    draw(true);
+  }
+
+  // ---------- fig: initial loss vs logit scale ----------
+  {
+    const V = 65, lnV = Math.log(V), R = Course.rng(9);
+    const sig = [], mc = [];
+    for (let s = 0; s <= 3.001; s += 0.1) {
+      let tot = 0; const N = 600;
+      for (let k = 0; k < N; k++) { let m = -1e9; const z = Array.from({ length: V }, () => { const v = s * R.normal(); if (v > m) m = v; return v; }); const lse = m + Math.log(z.reduce((a, v) => a + Math.exp(v - m), 0)); tot += lse - z[0]; }
+      sig.push(s); mc.push(tot / N);
+    }
+    let S = 0.25;
+    const p = new Plot("#fig-init", { xmin: -0.25, xmax: 3.1, ymin: 3.3, ymax: 9.2 });
+    const q = new Plot("#fig-init-p", { xmin: -1, xmax: 66, ymin: -0.05, ymax: 1 });
+    const out = document.getElementById("out-init");
+    slider("#ctl-init", { label: "logit std σ ", min: 0, max: 3, step: 0.05, value: S }, v => { S = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 0.5, stepY: 1 });
+      p.line(0, 3.3, 0, 9.2, { color: "axis", width: 1 });
+      for (let y = 4; y <= 9; y++) p.label(0, y, String(y), { align: "right", dx: -4, color: "muted", font: "11px " + mono });
+      [1, 2, 3].forEach(x => p.label(x, 3.3, String(x), { align: "center", dy: -9, color: "muted", font: "11px " + mono }));
+      p.line(0, lnV, 3.1, lnV, { color: "muted", dash: [2, 4], width: 1.2 }); p.label(3.05, lnV, "ln 65 = 4.17", { align: "right", dy: 10, color: "muted", font: "11px sans-serif" });
+      p.fn(s => lnV + s * s / 2, { color: "c2", dash: [6, 4], width: 2, xmin: 0, xmax: 3 });
+      p.path(sig.map((s, i) => [s, mc[i]]), { color: "c1", width: 2.5 });
+      const k = Math.round(S * 10), L = mc[Math.min(k, mc.length - 1)];
+      p.point(S, L, { r: 6, color: "c1" });
+      p.label(0.1, 8.9, "expected loss at step 0", { color: "muted", font: "12px sans-serif" });
+      p.label(3.05, 3.5, "σ →", { align: "right", color: "muted", font: "12px sans-serif" });
+      q.render(q => {
+        const R2 = Course.rng(31), z = Array.from({ length: V }, () => S * R2.normal()), pr = LA.softmax(z), y = 17;
+        const mx = Math.max(0.08, ...pr); q.setView(-1, 66, -0.06 * mx * 1.15, mx * 1.15);
+        pr.forEach((v, i) => q.rect(i + 0.1, 0, i + 0.9, v, { fill: i === y ? "c2" : "c1", fillAlpha: i === y ? .9 : .55, color: i === y ? "c2" : "c1", width: .5 }));
+        q.line(-1, 1 / V, 66, 1 / V, { color: "muted", dash: [3, 3], width: 1 });
+        q.label(1, mx * 1.08, `p(correct) = ${pr[y].toFixed(4)}  →  loss ${(-Math.log(pr[y])).toFixed(2)}`, { color: "muted", font: "12px sans-serif" });
+        q.label(64, 1 / V, "1/65", { align: "right", dy: -8, color: "muted", font: "10px sans-serif" });
+      });
+      out.textContent = `σ = ${S.toFixed(2)}:  expected initial loss ${L.toFixed(3)} (approximation ${(lnV + S * S / 2).toFixed(3)}); excess over ln V: ${(L - lnV).toFixed(3)} nats`;
+    });
+  }
+
+  // ---------- fig: loss curve + lr ----------
+  {
+    const p = new Plot("#fig-loss", { xmin: 0, xmax: 1, ymin: 1, ymax: 4.6 });
+    const pl = new Plot("#fig-lr", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const out = document.getElementById("out-loss");
+    if (!LOG) { out.textContent = "(training log not embedded yet: run train.py, then paste data/tinygpt_log.json into LOG in this page's script)"; p.render(q => q.label(0.5, 2.8, "training log not embedded yet", { align: "center", color: "muted" })); }
+    else {
+      const c = LOG.config, S = c.steps, steps = LOG.steps;
+      const refs = [["uniform ln 65", Math.log(65)], ["unigram", 3.347], ["bigram", 2.482], ["trigram", 2.046]];
+      const lr = s => s < c.warmup ? c.lr * (s + 1) / c.warmup : c.min_lr + 0.5 * (c.lr - c.min_lr) * (1 + Math.cos(Math.PI * (s - c.warmup) / Math.max(1, S - c.warmup)));
+      let k = steps.length - 1;
+      const yMin = Math.min(1.2, Math.floor(Math.min(...LOG.val_loss, ...LOG.train_loss) * 5) / 5 - 0.1);
+      p.setView(-S * 0.08, S * 1.02, yMin, 4.6); pl.setView(-S * 0.08, S * 1.02, -c.lr * 0.15, c.lr * 1.25);
+      slider("#ctl-loss", { label: "checkpoint ", min: 0, max: steps.length - 1, step: 1, value: k, digits: 0 }, v => { k = v; p.render(); });
+      p.render(p => {
+        p.grid({ step: 500, stepY: 0.5 });
+        for (let y = Math.ceil(yMin * 2) / 2; y <= 4.5; y += 0.5) p.label(0, y, y.toFixed(1), { align: "right", dx: -6, color: "muted", font: "11px " + mono });
+        for (let x = 0; x <= S; x += 500) p.label(x, yMin, String(x), { align: "center", dy: -9, color: "muted", font: "11px " + mono });
+        refs.forEach(([name, v]) => { p.line(0, v, S, v, { color: "muted", dash: [3, 4], width: 1 }); p.label(S, v, name + " " + v.toFixed(2), { align: "right", dy: -8, color: "muted", font: "11px sans-serif" }); });
+        LOG.batch_loss.forEach((v, i) => p.point(i * 10, v, { r: 1.3, color: "muted", alpha: .35 }));
+        p.path(steps.map((s, i) => [s, LOG.train_loss[i]]), { color: "c1", width: 2.5 });
+        p.path(steps.map((s, i) => [s, LOG.val_loss[i]]), { color: "c2", width: 2.5 });
+        p.line(steps[k], yMin, steps[k], 4.6, { color: "fg", dash: [4, 4], width: 1, alpha: .5 });
+        p.point(steps[k], LOG.train_loss[k], { r: 5, color: "c1" }); p.point(steps[k], LOG.val_loss[k], { r: 5, color: "c2" });
+        p.label(S * 0.02, 4.45, "loss (nats / char)", { color: "muted", font: "12px sans-serif" });
+        pl.render(q => {
+          q.line(0, 0, S, 0, { color: "axis", width: 1 });
+          q.fn(lr, { color: "c5", width: 2, xmin: 0, xmax: S });
+          q.line(steps[k], 0, steps[k], c.lr * 1.2, { color: "fg", dash: [4, 4], width: 1, alpha: .5 });
+          q.label(S * 0.02, c.lr * 1.12, "learning rate", { color: "muted", font: "11px sans-serif" });
+          q.label(0, c.lr, c.lr.toExponential(0), { align: "right", dx: -6, color: "muted", font: "10px " + mono });
+        });
+        out.textContent = `step ${steps[k]} (${LOG.seconds[k]} s): train ${LOG.train_loss[k].toFixed(3)}, val ${LOG.val_loss[k].toFixed(3)} nats = ${(LOG.val_loss[k] / Math.LN2).toFixed(2)} bits/char, perplexity ${Math.exp(LOG.val_loss[k]).toFixed(2)}, lr ${lr(Math.min(steps[k], S - 1)).toExponential(2)}`;
+      });
+    }
+  }
+
+  // ---------- fig: sample evolution ----------
+  {
+    const box = document.getElementById("out-samples"), info = document.getElementById("out-samples-info");
+    if (!LOG) { box.textContent = "(training log not embedded yet: samples appear here after train.py has been run and its log embedded)"; }
+    else {
+      const steps = LOG.steps;
+      let k = 0;
+      const draw = () => { const s = steps[k]; box.textContent = LOG.samples[String(s)]; info.textContent = `step ${s}: val loss ${LOG.val_loss[k].toFixed(3)} nats/char`; };
+      slider("#ctl-samples", { label: "training step ", min: 0, max: steps.length - 1, step: 1, value: 0, digits: 0 }, v => { k = v; draw(); }).nextSibling.style.display = "none";
+      draw();
+      const stats = document.getElementById("run-stats");
+      if (stats) stats.textContent = `The run shown on this page took ${Math.round(LOG.seconds[LOG.seconds.length - 1])} seconds on a laptop CPU (including evaluation) and reached a validation loss of ${LOG.val_loss[LOG.val_loss.length - 1].toFixed(3)}.`;
+    }
+  }
+});
+</script>
+</body>
+</html>

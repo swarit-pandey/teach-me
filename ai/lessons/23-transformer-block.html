@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The transformer block</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="23">
+<main>
+
+<div class="kicker">Part 6 · Transformers</div>
+<h1>The transformer block</h1>
+<p class="lede">Attention lets tokens talk to each other. A transformer wraps it in a small, repeated unit: normalize, attend, add back; normalize, think (MLP), add back. Stack a dozen of these on top of token and position embeddings, put a linear layer on top, and you have GPT. This lesson builds each piece, explains why it's there, and counts every parameter.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Describe a transformer as a <em>residual stream</em> that attention and MLP layers read from and write to, and explain why residual connections make deep stacks trainable.</li>
+    <li>Explain pre-norm LayerNorm placement and the role of the position-wise MLP.</li>
+    <li>Compare learned, sinusoidal and rotary (RoPE) position information, and prove the relative-position property of the latter two.</li>
+    <li>Draw the full GPT architecture with tensor shapes, and derive its parameter count: $12d^2 + 13d$ per block.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="block">1. One block: communicate, then compute</h2>
+<p>A transformer block takes a sequence of $T$ vectors of width $d$, shape $(T, d)$, and returns a sequence of the same shape. It does two things, each wrapped in the same pattern:</p>
+$$\begin{aligned}
+\mathbf{x} &\leftarrow \mathbf{x} + \operatorname{Attn}(\operatorname{LN}_1(\mathbf{x})) &&\text{communicate: each token reads from earlier tokens}\\
+\mathbf{x} &\leftarrow \mathbf{x} + \operatorname{MLP}(\operatorname{LN}_2(\mathbf{x})) &&\text{compute: each token processes what it has, alone}
+\end{aligned}$$
+<p>That's the whole block. Attention (lesson 22) is the only place where information moves <em>between positions</em>. The MLP is applied to each position independently, with the same weights. LayerNorm (lesson 18) keeps the inputs to each sub-layer well-scaled. The "$\mathbf{x} + \ldots$" is a <b>residual connection</b> (lesson 18). It turns out to be the most important design decision in the architecture, so we start there.</p>
+
+<!-- ============================================================ -->
+<h2 id="residual">2. The residual stream</h2>
+<p>Read the block equations as an <b>accumulator</b>. Each token owns a vector $\mathbf{x}_t$, called its <b>residual stream</b>. Every sub-layer reads a (normalized) copy of the stream, computes something, and <em>adds</em> its result back. Nothing is ever overwritten. After $L$ blocks,</p>
+$$\mathbf{x}^{(L)} = \mathbf{x}^{(0)} + \sum_{\ell=1}^{L}\big(\mathbf{a}^{(\ell)} + \mathbf{m}^{(\ell)}\big),$$
+<p>the embedding plus the sum of every attention output $\mathbf{a}^{(\ell)}$ and MLP output $\mathbf{m}^{(\ell)}$. The stream is a shared workspace, a $d$-dimensional "bus" that layers use to pass information to later layers. Interpretability work reads transformers exactly this way.</p>
+<p><b>Why it makes depth trainable.</b> For one residual layer $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, the Jacobian (lesson 07) is $\partial\mathbf{y}/\partial\mathbf{x} = I + J_f$. Backpropagating through $L$ layers multiplies these:</p>
+$$\frac{\partial \mathbf{x}^{(L)}}{\partial \mathbf{x}^{(0)}} = \prod_{\ell=L}^{1}\big(I + J_\ell\big) = I + \sum_\ell J_\ell + \ldots$$
+<p>Even if every $J_\ell$ is small, the identity term carries the gradient straight from the loss to the first layer. Without residuals the product is $\prod_\ell J_\ell$. If the $J$'s are a bit smaller than 1 in size it vanishes exponentially, and if a bit larger it explodes. That's the problem lesson 18 met in deep MLPs.</p>
+
+<div class="figure">
+  <canvas id="fig-res" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-res"></div>
+  <div class="readout" id="out-res"></div>
+  <div class="caption"><b>Try it:</b> each layer's Jacobian is a random $16\times16$ matrix with typical gain $g$. The plot shows $\log_{10}$ of the gradient norm after backpropagating through 1 to 60 layers. The <span style="color:var(--c4)">plain stack</span> multiplies $J_\ell$'s, the <span style="color:var(--c1)">residual stack</span> multiplies $(I + J_\ell)$'s. Move $g$: the plain stack only survives near $g = 1$ and vanishes or explodes elsewhere. The residual stack stays within a few orders of magnitude for small $g$. Real transformers initialize each branch's output layer small (GPT-2 scales it by $1/\sqrt{2L}$) to sit in that regime.</div>
+</div>
+
+<div class="callout intuition">
+<p>A freshly initialized residual network with small branches is close to the identity function: input embedding in, (almost) same embedding out. Training then grows each layer's contribution from near zero. That's a much easier starting point than a deep random composition.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="layernorm">3. LayerNorm, and where to put it</h2>
+<p><b>LayerNorm</b> (lesson 18) normalizes each token's vector across its $d$ features, then applies a learned scale and shift:</p>
+$$\operatorname{LN}(\mathbf{x}) = \boldsymbol\gamma \odot \frac{\mathbf{x} - \mu}{\sqrt{\sigma^2 + \epsilon}} + \boldsymbol\beta,\qquad \mu = \frac1d\sum_i x_i,\quad \sigma^2 = \frac1d\sum_i (x_i-\mu)^2.$$
+<p>Unlike BatchNorm, it uses statistics of a single token, so it behaves identically at training and inference time and doesn't care about batch size or sequence length. It has $2d$ parameters ($\boldsymbol\gamma$ and $\boldsymbol\beta$).</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-ln-in" width="380" height="280"></canvas></div>
+    <div><canvas id="fig-ln-out" width="380" height="280"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-ln"></div>
+  <div class="readout" id="out-ln"></div>
+  <div class="caption"><b>Try it:</b> drag the tops of the 8 input bars (one token's features). The dashed lines mark the mean and ±1 std. The output (right) always has mean $\beta$ and std $\gamma$, here per-feature parameters set to the same value for simplicity. Shift all bars up together: the output doesn't move. Scale them all: still nothing. LayerNorm only keeps the <em>pattern</em> of the vector, which is why its gradient along "add a constant to every feature" is zero (workbook test).</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>$\mathbf{x} = (1, 2, 3, 6)$, $\boldsymbol\gamma = \mathbf{1}$, $\boldsymbol\beta = \mathbf{0}$, $\epsilon = 0$. Mean $\mu = 12/4 = 3$. Deviations $(-2, -1, 0, 3)$, squared $(4, 1, 0, 9)$, so $\sigma^2 = 14/4 = 3.5$ and $\sigma = 1.8708$. Output: $(-1.069, -0.535, 0, 1.604)$. Check: these sum to 0 and their squares average to 1.</p>
+</div>
+
+<p><b>Pre-norm vs post-norm.</b> The original 2017 transformer used <em>post-norm</em>: $\mathbf{x} \leftarrow \operatorname{LN}(\mathbf{x} + f(\mathbf{x}))$. That puts a LayerNorm <em>on</em> the residual path, so the clean identity path of section 2 is broken at every layer. Post-norm transformers need a careful learning-rate warm-up and are hard to train when deep. GPT-2 and nearly every model since use <em>pre-norm</em>: $\mathbf{x} \leftarrow \mathbf{x} + f(\operatorname{LN}(\mathbf{x}))$. The stream itself is never normalized, so the stream grows over depth, and one final LayerNorm before the output head ($\operatorname{LN}_f$) cleans it up. Many recent models (Llama) use <b>RMSNorm</b>, which skips the mean subtraction and $\boldsymbol\beta$: $\boldsymbol\gamma\odot\mathbf{x}/\sqrt{\operatorname{mean}(x_i^2)+\epsilon}$. It's slightly cheaper and works as well.</p>
+
+<!-- ============================================================ -->
+<h2 id="mlp">4. The MLP: where most parameters live</h2>
+<p>After attention has gathered information into each token's stream, the <b>MLP</b> (feed-forward network) processes each position independently:</p>
+$$\operatorname{MLP}(\mathbf{x}) = W_2\,\operatorname{GELU}(W_1\mathbf{x} + \mathbf{b}_1) + \mathbf{b}_2, \qquad W_1 \in \mathbb{R}^{4d\times d},\ W_2\in\mathbb{R}^{d\times 4d}.$$
+<p>It widens to $4d$ hidden units, applies a nonlinearity, and projects back. GELU, $x\,\Phi(x)$ with $\Phi$ the standard normal CDF (lesson 09), is a smooth ReLU. The MLP has $8d^2 + 5d$ parameters, two-thirds of the block. A useful mental model from interpretability: rows of $W_1$ act like <em>pattern detectors</em> ("this stream looks like a French noun"), and the matching columns of $W_2$ are what gets <em>written</em> to the stream when the pattern fires. Much of a model's factual knowledge appears to be stored in these key–value-like MLP weights. Modern variants (SwiGLU in Llama) use a gated version with three matrices.</p>
+
+<div class="callout key">
+<p>Attention mixes across positions, with weights that depend on the data. The MLP mixes across features, with fixed weights, one position at a time. Alternating them, with residual additions, gives a network that can both <em>route</em> information and <em>transform</em> it.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="position">5. Positional information</h2>
+<p>Lesson 22 proved that attention is permutation-equivariant: without extra information, "dog bites man" and "man bites dog" look the same up to reordering. The causal mask breaks the symmetry a little, but models need explicit positions. There are three standard answers.</p>
+
+<h3>Learned absolute positions (GPT-2, and your tiny GPT)</h3>
+<p>Keep a second embedding table $P \in \mathbb{R}^{T_{\max}\times d}$ and add row $t$ to the token embedding at position $t$: $\mathbf{x}^{(0)}_t = E[\text{token}_t] + P[t]$. Simple and effective, but the model can't handle positions beyond $T_{\max}$, because those rows were never trained.</p>
+
+<h3>Sinusoidal (the original transformer)</h3>
+<p>A fixed table with pairs of sinusoids at geometrically spaced frequencies $\omega_i = 10000^{-2i/d}$:</p>
+$$PE[p, 2i] = \sin(\omega_i p),\qquad PE[p, 2i+1] = \cos(\omega_i p).$$
+<p>Each pair is a point on a unit circle rotating at its own speed. Low dimensions spin fast (fine position), high dimensions slowly (coarse position), like the hands of a clock. Because $(\sin(\omega(p+k)), \cos(\omega(p+k)))$ is a <em>rotation</em> of $(\sin\omega p, \cos\omega p)$ by angle $\omega k$, the dot product between two positions depends only on their offset (problem 4):</p>
+$$PE[p]\cdot PE[p+k] = \sum_{i}\cos(\omega_i k).$$
+
+<div class="figure">
+  <canvas id="fig-pe" width="680" height="250"></canvas>
+  <canvas id="fig-pe-sim" width="680" height="190" style="margin-top:8px"></canvas>
+  <div class="controls" id="ctl-pe"></div>
+  <div class="caption"><b>Try it:</b> top, the sinusoidal table for 96 positions (x-axis) and $d = 32$ dimensions (y-axis: the 16 sine dimensions, then the 16 cosine dimensions, fastest frequency at the top of each half), coloured from −1 (pink) to +1 (blue). Bottom, the similarity $PE[p]\cdot PE[q] / (d/2)$ of the selected position $p$ to every $q$. Slide $p$: the curve slides along but keeps <em>exactly</em> the same shape. Similarity depends only on $q - p$.</div>
+</div>
+
+<h3>Rotary position embedding (RoPE: Llama, most modern LLMs)</h3>
+<p>Instead of adding positions to the stream, RoPE <em>rotates</em> the query and key vectors inside every attention layer. Split $\mathbf{q}$ into pairs of coordinates and rotate pair $i$ at position $m$ by angle $m\theta_i$ (block-diagonal rotation matrix $R_m$). Do the same to keys. Rotations satisfy $R_m^\top R_n = R_{n-m}$, so</p>
+$$(R_m\mathbf{q})\cdot(R_n\mathbf{k}) = \mathbf{q}^\top R_m^\top R_n\,\mathbf{k} = \mathbf{q}^\top R_{n-m}\,\mathbf{k}.$$
+<p>The attention score depends on the content of $\mathbf{q}$ and $\mathbf{k}$ <em>and only on their relative position</em> $n - m$. No position vectors ever enter the residual stream.</p>
+
+<div class="figure">
+  <canvas id="fig-rope" width="680" height="300"></canvas>
+  <div class="controls" id="ctl-rope"></div>
+  <div class="readout" id="out-rope"></div>
+  <div class="caption"><b>Try it:</b> one 2-D pair of a query (orange) and key (blue), shown as originally computed (faint) and after rotation by their positions $m$ and $n$ (solid). Change $m$ and $n$ by the same amount, using the "shift both" slider: the two arrows rotate together, and the score $(R_m\mathbf{q})\cdot(R_n\mathbf{k})$ in the readout doesn't change. Only the offset $n - m$ matters.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="gpt">6. The full GPT</h2>
+<p>Now stack everything. The input is a batch of token ids, shape $(B, T)$. The output is a distribution over the next token at <em>every</em> position, shape $(B, T, V)$:</p>
+
+<div class="figure">
+  <canvas id="fig-gpt" width="680" height="620"></canvas>
+  <div class="readout" id="out-gpt"></div>
+  <div class="caption"><b>Try it:</b> click any box to see its input/output shapes, parameter count and role. The thick vertical line is the residual stream, and the ⊕ nodes are where branches add back into it. Everything inside the dashed frame repeats $L$ times with separate weights. Shapes use $B$ = batch, $T$ = sequence length, $d$ = width, $V$ = vocabulary, $h$ = heads.</div>
+</div>
+
+<p>Because of the causal mask, the logits at position $t$ depend only on tokens $1..t$. A single forward pass on a length-$T$ sequence therefore produces $T$ next-token predictions, one per prefix, and the training loss averages the cross-entropy (lesson 11) over all of them. That parallelism is why transformers train so much faster than RNNs. The workbook tests causality directly: changing a future token must never change an earlier position's logits.</p>
+
+<!-- ============================================================ -->
+<h2 id="params">7. Counting parameters</h2>
+<p>Go through one block, writing biases separately:</p>
+<table>
+  <tr><th>Piece</th><th>Weights</th><th>Biases / gains</th></tr>
+  <tr><td>LN₁, LN₂</td><td>—</td><td>$2d + 2d$</td></tr>
+  <tr><td>Attention $W_{QKV}$ ($d \to 3d$)</td><td>$3d^2$</td><td>$3d$</td></tr>
+  <tr><td>Attention output $W_O$ ($d\to d$)</td><td>$d^2$</td><td>$d$</td></tr>
+  <tr><td>MLP $W_1$ ($d\to 4d$)</td><td>$4d^2$</td><td>$4d$</td></tr>
+  <tr><td>MLP $W_2$ ($4d \to d$)</td><td>$4d^2$</td><td>$d$</td></tr>
+  <tr><th>Block total</th><th>$12d^2$</th><th>$13d$</th></tr>
+</table>
+<p>Then the whole model adds token embeddings $Vd$, position embeddings $T_{\max} d$, the final LayerNorm $2d$, and the output head $dV$ (zero extra if tied to the token embedding):</p>
+$$N = \underbrace{Vd + T_{\max}d}_{\text{embeddings}} + L\,(12d^2 + 13d) + 2d\;\big[+\,dV \text{ if untied}\big].$$
+<p>For large models the $12Ld^2$ term dominates, so a handy rule of thumb is $N \approx 12 L d^2$ non-embedding parameters. Lesson 25 uses $N$ in the scaling laws.</p>
+
+<div class="figure">
+  <canvas id="fig-params" width="680" height="200"></canvas>
+  <div class="controls" id="ctl-params"></div>
+  <div class="readout" id="out-params"></div>
+  <div class="caption"><b>Try it:</b> load the GPT-2 presets (tied head, $V$ = 50,257, $T_{\max}$ = 1024) and check the totals against the published 124M / 355M / 774M / 1.5B. Then load "tiny GPT", the character-level model you'll train in lesson 24: there the embeddings are negligible and $12Ld^2$ is almost everything. For GPT-2 small, by contrast, the embeddings are almost a third of the model.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example: GPT-2 small</div>
+  <p>$V = 50{,}257$, $T_{\max} = 1024$, $d = 768$, $L = 12$, tied head. Embeddings: $50{,}257\cdot768 + 1024\cdot768 = 38{,}597{,}376 + 786{,}432 = 39{,}383{,}808$. One block: $12\cdot768^2 + 13\cdot768 = 7{,}077{,}888 + 9{,}984 = 7{,}087{,}872$, times 12 is $85{,}054{,}464$. Final LN: $1{,}536$. Total: $124{,}439{,}808$, the famous "124M". The rule of thumb $12Ld^2 = 84{,}934{,}656$ captures the blocks almost exactly.</p>
+</div>
+
+<div class="callout ml">
+<p>You now have the complete architecture of GPT-2, and with RoPE, RMSNorm and SwiGLU swapped in, of Llama. Lesson 24 trains one on Shakespeare. Lessons 28–29 fine-tune exactly this architecture with RL: the "policy" there is this network's next-token softmax.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>Apply LayerNorm ($\boldsymbol\gamma = \mathbf 1$, $\boldsymbol\beta = \mathbf 0$, $\epsilon = 0$) to $\mathbf{x} = (2, 4, 6, 12)$. Enter the first and last outputs.</p>
+<div class="numcheck" data-answer="-1.069045,1.603567" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>This is $2\times$ the worked example $(1,2,3,6)$. LayerNorm is invariant to scaling the input (for $\epsilon = 0$), so the answer is the same: $(-1.069, -0.535, 0, 1.604)$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>How many parameters does one transformer block with $d = 512$ have (biases included)?</p>
+<div class="numcheck" data-answer="3152384"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$12\cdot512^2 + 13\cdot512 = 3{,}145{,}728 + 6{,}656 = 3{,}152{,}384$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>A scalar caricature of depth. 20 layers each have derivative $0.5$. (a) What is the derivative of the whole stack? (b) Now each layer is residual, $y = x + f(x)$ with $f' = 0.05$. What is the derivative of the stack?</p>
+<p>Enter both, comma-separated:</p>
+<div class="numcheck" data-answer="9.5367e-7,2.6533" data-tol="1e-3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $0.5^{20} \approx 9.54\times10^{-7}$: the first layer gets a millionth of the gradient. (b) $(1 + 0.05)^{20} \approx 2.65$: healthy. Even with tiny branch derivatives, the identity path keeps the product near 1.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core · proof</span>
+<p>Prove that for the sinusoidal encoding, $PE[p]\cdot PE[p+k] = \sum_{i=0}^{d/2-1}\cos(\omega_i k)$, independent of $p$. Deduce $\|PE[p]\|^2 = d/2$.</p>
+<details class="hint"><summary>Hint</summary><p>Group the coordinates in pairs; use $\sin a\sin b + \cos a\cos b = \cos(a - b)$.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>Pair $i$ contributes $\sin(\omega_i p)\sin(\omega_i(p+k)) + \cos(\omega_i p)\cos(\omega_i(p+k)) = \cos(\omega_i p - \omega_i(p+k)) = \cos(\omega_i k)$. Summing over the $d/2$ pairs gives the claim, with no $p$ anywhere. At $k = 0$ each cosine is 1, so $\|PE[p]\|^2 = d/2$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core · proof</span>
+<p>Let $R(\alpha) = \begin{bmatrix}\cos\alpha & -\sin\alpha\\ \sin\alpha & \cos\alpha\end{bmatrix}$. Show $R(\alpha)^\top R(\beta) = R(\beta - \alpha)$, and conclude that in 2-D RoPE the score $(R(m\theta)\mathbf{q})\cdot(R(n\theta)\mathbf{k})$ depends on $m,n$ only through $n - m$.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$R(\alpha)^\top = R(-\alpha)$ (rotating back), and rotations compose by adding angles: $R(-\alpha)R(\beta) = R(\beta-\alpha)$. You can check this by multiplying out and using the angle-addition formulas. Then $(R(m\theta)\mathbf q)^\top R(n\theta)\mathbf k = \mathbf q^\top R(m\theta)^\top R(n\theta)\mathbf k = \mathbf q^\top R((n-m)\theta)\mathbf k$. In $d$ dimensions RoPE uses a block-diagonal matrix of such rotations, so the same argument applies block by block.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core</span>
+<p>Compute the parameter count of GPT-2 medium: $V = 50{,}257$, $T_{\max} = 1024$, $d = 1024$, $L = 24$, tied head.</p>
+<div class="numcheck" data-answer="354823168"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Embeddings $50{,}257\cdot1024 + 1024\cdot1024 = 51{,}463{,}168 + 1{,}048{,}576 = 52{,}511{,}744$. Blocks: $24\cdot(12\cdot1024^2 + 13\cdot1024) = 24\cdot12{,}595{,}200 = 302{,}284{,}800$. Final LN: $2{,}048$. Total $354{,}823{,}168$, the "355M" model.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">stretch</span>
+<p>Ignoring biases, what fraction of a block's parameters are in the MLP? If you replaced the MLP by a SwiGLU with three $d\times h$ matrices, what hidden width $h$ keeps the parameter count the same as the $4d$ GELU MLP? Enter the fraction and $h/d$.</p>
+<div class="numcheck" data-answer="0.666667,2.666667" data-tol="1e-4"></div>
+<details class="solution"><summary>Solution</summary>
+<p>MLP: $8d^2$ of $12d^2$, so $2/3$. SwiGLU uses $3dh$ parameters; setting $3dh = 8d^2$ gives $h = \tfrac83 d \approx 2.67d$. That's why Llama's MLP hidden size is about $\tfrac83 d$ rather than $4d$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">stretch · conceptual</span>
+<p>(a) A GPT with learned absolute positions is trained with $T_{\max} = 256$. What goes wrong if you feed it 300 tokens? (b) Why does RoPE degrade more gracefully? (c) Why might a model without any position encoding, using only a causal mask, still learn some positional information?</p>
+<details class="solution"><summary>Solution</summary>
+<p>(a) Row 256+ of the position table doesn't exist (an index error), or if you enlarge the table, those rows are untrained random vectors. (b) RoPE has no table. Any position gives a valid rotation, and scores depend on relative offsets, which mostly fall in the trained range for nearby tokens. Very long offsets still use unseen rotation angles, which is why "context extension" methods rescale $\theta$. (c) With a causal mask, token $t$ averages over exactly $t$ tokens. Statistics such as how "diluted" a uniform attention output is reveal $t$, so the network can infer position from them. Such "NoPE" models do learn something, but explicit positions work better.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">In a GPT block, which component moves information <em>between</em> different token positions?</div>
+  <div class="opts">
+    <button data-k="a">The MLP</button>
+    <button data-k="b">LayerNorm</button>
+    <button data-k="c">Self-attention</button>
+    <button data-k="d">The residual connection</button>
+  </div>
+  <div class="explain">The MLP and LayerNorm act on each position separately, and the residual adds a token's own vector to itself. Only attention mixes positions.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">What is the main advantage of pre-norm ($\mathbf x + f(\operatorname{LN}(\mathbf x))$) over post-norm ($\operatorname{LN}(\mathbf x + f(\mathbf x))$)?</div>
+  <div class="opts">
+    <button data-k="a">It uses fewer parameters.</button>
+    <button data-k="b">The residual path from output to input is a pure identity, so gradients flow through deep stacks without passing through any normalization.</button>
+    <button data-k="c">It makes the model permutation-invariant.</button>
+    <button data-k="d">It removes the need for a final LayerNorm.</button>
+  </div>
+  <div class="explain">Pre-norm keeps the "I" in $\prod(I + J_\ell)$ untouched. It actually <em>adds</em> the need for a final LayerNorm ($\operatorname{LN}_f$), because the stream is never normalized.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Doubling the width $d$ of a large transformer (same $L$, ignoring embeddings) multiplies its parameter count by about:</div>
+  <div class="opts">
+    <button data-k="a">2</button>
+    <button data-k="b">√2</button>
+    <button data-k="c">8</button>
+    <button data-k="d">4</button>
+  </div>
+  <div class="explain">$N \approx 12Ld^2$ is quadratic in $d$. Doubling depth $L$ instead only doubles $N$.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">With RoPE, what does the attention score between a query at position 10 and a key at position 7 depend on?</div>
+  <div class="opts">
+    <button data-k="a">The query and key contents and the offset 3, but not the absolute positions.</button>
+    <button data-k="b">Only the absolute positions 10 and 7.</button>
+    <button data-k="c">Only the contents. Position is added to the residual stream instead.</button>
+    <button data-k="d">The position embedding row for position 10.</button>
+  </div>
+  <div class="explain">$(R_m\mathbf q)\cdot(R_n \mathbf k) = \mathbf q^\top R_{n-m}\mathbf k$: content and relative offset only.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Piece</th><th>Formula</th><th>Role</th></tr>
+  <tr><td>Block</td><td>$\mathbf x \mathrel{+}= \operatorname{Attn}(\operatorname{LN}\mathbf x);\ \mathbf x \mathrel{+}= \operatorname{MLP}(\operatorname{LN}\mathbf x)$</td><td>communicate, then compute</td></tr>
+  <tr><td>Residual stream</td><td>$\mathbf x^{(L)} = \mathbf x^{(0)} + \sum_\ell (\mathbf a^{(\ell)} + \mathbf m^{(\ell)})$</td><td>shared workspace; identity gradient path</td></tr>
+  <tr><td>LayerNorm</td><td>$\boldsymbol\gamma\odot(\mathbf x-\mu)/\sigma + \boldsymbol\beta$</td><td>per-token scale control; pre-norm placement</td></tr>
+  <tr><td>MLP</td><td>$W_2\,\operatorname{GELU}(W_1\mathbf x)$, width $4d$</td><td>per-token processing; 2/3 of the parameters</td></tr>
+  <tr><td>Positions</td><td>learned $P[t]$; sinusoidal; RoPE $R_m$</td><td>break permutation symmetry; RoPE is relative</td></tr>
+  <tr><td>Parameters</td><td>$Vd + T_{\max}d + L(12d^2+13d) + 2d$</td><td>$\approx 12Ld^2$ for big models</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 23: build the block</h3>
+  <p>Open <code>workbooks/23_transformer_block/exercises.py</code>. You'll implement <code>LayerNorm</code>, <code>MLP</code>, <code>CausalSelfAttention</code>, <code>Block</code> and <code>GPT</code> as PyTorch modules, then the closed-form <code>block_param_count</code>/<code>gpt_param_count</code>, <code>sinusoidal_positions</code> and <code>apply_rope</code>. The tests check you against <code>F.layer_norm</code> and <code>nn.MultiheadAttention</code> (with your weights copied in). They also verify causality (editing future tokens never changes past logits), that your GPT actually uses positions, that your formula matches <code>sum(p.numel())</code>, and the RoPE relative-offset property.</p>
+  <pre><code>./course check 23</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Vaswani et al. (2017), <em>Attention Is All You Need</em>: sections 3.1, 3.3, 3.5.</li>
+  <li>Radford et al. (2019), <em>Language Models are Unsupervised Multitask Learners</em> (GPT-2): the pre-norm changes, section 2.3.</li>
+  <li>Xiong et al. (2020), <em>On Layer Normalization in the Transformer Architecture</em>: pre- vs post-norm.</li>
+  <li>Su et al. (2021), <em>RoFormer: Enhanced Transformer with Rotary Position Embedding</em>.</li>
+  <li>Elhage et al. (2021), <em>A Mathematical Framework for Transformer Circuits</em>: the residual-stream view.</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, LA, fmt, withAlpha } = Course;
+  const mono = getComputedStyle(document.documentElement).getPropertyValue("--mono");
+
+  // ---------- fig: residual vs plain gradient through depth ----------
+  {
+    const D = 16, Lmax = 60;
+    const R = Course.rng(11);
+    const Ws = Array.from({ length: Lmax }, () => Array.from({ length: D }, () => Array.from({ length: D }, () => R.normal() / Math.sqrt(D))));
+    const u0 = Array.from({ length: D }, () => R.normal()); const n0 = LA.norm(u0);
+    let g = 0.5;
+    const p = new Plot("#fig-res", { xmin: -4, xmax: 63, ymin: -12, ymax: 12 });
+    const out = document.getElementById("out-res");
+    slider("#ctl-res", { label: "branch gain g ", min: 0.05, max: 2, step: 0.05, value: g }, v => { g = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 10, stepY: 2 });
+      p.line(0, -12, 0, 12, { color: "axis", width: 1 }); p.line(0, 0, 63, 0, { color: "axis", width: 1 });
+      for (let y = -10; y <= 10; y += 5) p.label(0, y, y === 0 ? "1" : "1e" + y, { align: "right", dx: -4, color: "muted", font: "11px " + mono });
+      for (let x = 10; x <= 60; x += 10) p.label(x, -12, String(x), { align: "center", dy: -9, color: "muted", font: "11px sans-serif" });
+      let a = u0.map(v => v / n0), b = a.slice();
+      const pa = [[0, 0]], pb = [[0, 0]], ra = [1], rb = [1];
+      for (let l = 0; l < Lmax; l++) {
+        const M = Ws[l];
+        a = LA.matvec(M, a).map(v => v * g);
+        const Jb = LA.matvec(M, b).map(v => v * g); b = b.map((v, i) => v + Jb[i]);
+        ra.push(LA.norm(a)); rb.push(LA.norm(b));
+        pa.push([l + 1, Math.max(-12, Math.min(12, Math.log10(LA.norm(a) + 1e-300)))]);
+        pb.push([l + 1, Math.max(-12, Math.min(12, Math.log10(LA.norm(b))))]);
+      }
+      p.path(pa, { color: "c4", width: 2.5 }); p.path(pb, { color: "c1", width: 2.5 });
+      const cl = y => Math.max(-10.6, Math.min(10.6, y)), up = pa[Lmax][1] > pb[Lmax][1];
+      p.label(pa[Lmax][0], cl(pa[Lmax][1] + (up ? 1 : -1)), "plain ∏ J" + (Math.abs(pa[Lmax][1]) >= 12 ? " (off the chart)" : ""), { color: "c4", align: "right", bg: true });
+      p.label(pb[Lmax][0], cl(pb[Lmax][1] + (up ? -1 : 1)), "residual ∏ (I + J)", { color: "c1", align: "right", bg: true });
+      p.label(1, 11, "log₁₀ ‖gradient‖", { color: "muted", font: "12px sans-serif" });
+      p.label(62, -9, "layers →", { color: "muted", align: "right", font: "12px sans-serif" });
+      out.textContent = `gradient norm after 12 layers: plain ${ra[12].toExponential(2)}, residual ${rb[12].toExponential(2)}\nafter 60 layers: plain ${ra[60].toExponential(2)}, residual ${rb[60].toExponential(2)}`;
+    });
+  }
+
+  // ---------- fig: LayerNorm ----------
+  {
+    const xs = [1.2, -0.4, 2.1, 0.6, 3.0, -1.1, 0.9, 1.7].map((y, i) => ({ x: i + 0.5, y, color: "c1", constrain: (x, yy) => [i + 0.5, Math.max(-4.5, Math.min(4.5, yy))] }));
+    let gam = 1, bet = 0;
+    const pin = new Plot("#fig-ln-in", { xmin: -0.3, xmax: 8.3, ymin: -5, ymax: 5 });
+    const pout = new Plot("#fig-ln-out", { xmin: -0.3, xmax: 8.3, ymin: -5, ymax: 5 });
+    const out = document.getElementById("out-ln");
+    slider("#ctl-ln", { label: "γ ", min: 0.2, max: 2.5, step: 0.05, value: 1 }, v => { gam = v; pin.render(); });
+    slider("#ctl-ln", { label: "β ", min: -2, max: 2, step: 0.05, value: 0 }, v => { bet = v; pin.render(); });
+    button("#ctl-ln", "shift all +1", () => { xs.forEach(h => h.y = Math.min(4.5, h.y + 1)); pin.render(); });
+    button("#ctl-ln", "scale all ×1.5", () => { xs.forEach(h => h.y = Math.max(-4.5, Math.min(4.5, h.y * 1.5))); pin.render(); });
+    const stats = v => { const m = v.reduce((a, b) => a + b, 0) / v.length, s = Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length); return [m, s]; };
+    const frame = (p, title) => { p.line(-0.3, 0, 8.3, 0, { color: "axis", width: 1 }); for (let y = -4; y <= 4; y += 2) p.label(-0.3, y, String(y), { dx: 2, color: "muted", font: "10px " + mono }); p.label(0.2, 4.6, title, { color: "muted", font: "12px sans-serif" }); };
+    pin.draggable(xs).render(p => {
+      frame(p, "input x (drag)");
+      const v = xs.map(h => h.y), [m, s] = stats(v);
+      v.forEach((y, i) => p.rect(i + 0.15, 0, i + 0.85, y, { fill: "c1", fillAlpha: .5, color: "c1", width: 1 }));
+      p.line(-0.3, m, 8.3, m, { color: "c2", dash: [5, 4], width: 1.5 }); p.line(-0.3, m + s, 8.3, m + s, { color: "c2", dash: [2, 4], width: 1 }); p.line(-0.3, m - s, 8.3, m - s, { color: "c2", dash: [2, 4], width: 1 });
+      p.drawHandles();
+      pout.render();
+      const y = v.map(x => gam * (x - m) / Math.sqrt(s * s + 1e-5) + bet), [m2, s2] = stats(y);
+      out.textContent = `input:  mean ${m.toFixed(2)}  std ${s.toFixed(2)}\noutput: mean ${m2.toFixed(2)}  std ${s2.toFixed(2)}   (= β, γ)`;
+    });
+    pout.render(p => {
+      frame(p, "LN(x) = γ (x − μ)/σ + β");
+      const v = xs.map(h => h.y), [m, s] = stats(v), y = v.map(x => gam * (x - m) / Math.sqrt(s * s + 1e-5) + bet);
+      y.forEach((t, i) => p.rect(i + 0.15, 0, i + 0.85, t, { fill: "c3", fillAlpha: .55, color: "c3", width: 1 }));
+      p.line(-0.3, bet, 8.3, bet, { color: "c2", dash: [5, 4], width: 1.5 }); p.line(-0.3, bet + gam, 8.3, bet + gam, { color: "c2", dash: [2, 4], width: 1 }); p.line(-0.3, bet - gam, 8.3, bet - gam, { color: "c2", dash: [2, 4], width: 1 });
+    });
+  }
+
+  // ---------- fig: sinusoidal PE ----------
+  {
+    const T = 96, d = 32;
+    const PE = Array.from({ length: T }, (_, p) => Array.from({ length: d }, (_, j) => { const w = Math.pow(10000, -(2 * Math.floor(j / 2)) / d); return j % 2 ? Math.cos(w * p) : Math.sin(w * p); }));
+    const order = [...Array.from({ length: d / 2 }, (_, i) => 2 * i), ...Array.from({ length: d / 2 }, (_, i) => 2 * i + 1)];
+    const M = order.map(j => PE.map(r => r[j]));  // rows = dims (sin dims first, then cos dims), cols = positions
+    let pos = 20;
+    const ph = new Plot("#fig-pe", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const ps = new Plot("#fig-pe-sim", { xmin: -6, xmax: T + 2, ymin: -0.45, ymax: 1.25 });
+    slider("#ctl-pe", { label: "position p ", min: 0, max: T - 1, step: 1, value: pos, digits: 0 }, v => { pos = v; ph.render(); });
+    const X0 = 0.07, X1 = 0.99, Y0 = 0.1, Y1 = 0.96;
+    ph.render(p => {
+      p.heatmap(M, { x0: X0, x1: X1, y0: Y0, y1: Y1, cmap: "div", vmin: -1, vmax: 1 });
+      const cw = (X1 - X0) / T;
+      p.rect(X0 + pos * cw, Y0, X0 + (pos + 1) * cw, Y1, { color: "c2", width: 2, fill: "c2", fillAlpha: 0 });
+      p.label(X0, Y1 - (Y1 - Y0) / 4, "sin", { align: "right", dx: -6, color: "muted", font: "11px sans-serif" });
+      p.label(X0, Y0 + (Y1 - Y0) / 4, "cos", { align: "right", dx: -6, color: "muted", font: "11px sans-serif" });
+      p.line(X0 - 0.01, (Y0 + Y1) / 2, X1, (Y0 + Y1) / 2, { color: "bg", width: 2 });
+      [0, 20, 40, 60, 80].forEach(t => p.label(X0 + (t + .5) * cw, Y0, String(t), { align: "center", dy: 10, color: "muted", font: "10px sans-serif" }));
+      p.label(X1, 0.03, "position →", { align: "right", color: "muted", font: "11px sans-serif" });
+      ps.render();
+    });
+    ps.render(p => {
+      p.line(0, 0, T, 0, { color: "axis", width: 1 });
+      [0, 0.5, 1].forEach(y => p.label(0, y, String(y), { align: "right", dx: -4, color: "muted", font: "10px " + mono }));
+      const sim = PE.map(r => LA.dot(r, PE[pos]) / (d / 2));
+      p.path(sim.map((s, q) => [q, s]), { color: "c1", width: 2 });
+      p.line(pos, -0.45, pos, 1.25, { color: "c2", dash: [4, 4], width: 1.2 });
+      p.point(pos, 1, { color: "c2", r: 5 });
+      p.label(T, 1.15, `similarity PE[p]·PE[q]/(d/2) as a function of q   (p = ${pos})`, { align: "right", color: "muted", font: "12px sans-serif" });
+    });
+  }
+
+  // ---------- fig: RoPE ----------
+  {
+    const q0 = [1.6, 0.5], k0 = [1.2, 1.3], th = 0.35;
+    let m = 2, n = 5;
+    const p = new Plot("#fig-rope", { xmin: -2.6, xmax: 2.6, ymin: -2.1, ymax: 2.1, equal: true });
+    const out = document.getElementById("out-rope");
+    const rot = (v, a) => [v[0] * Math.cos(a) - v[1] * Math.sin(a), v[0] * Math.sin(a) + v[1] * Math.cos(a)];
+    const sm = slider("#ctl-rope", { label: "query position m ", min: 0, max: 20, step: 1, value: m, digits: 0 }, v => { m = v; p.render(); });
+    const sn = slider("#ctl-rope", { label: "key position n ", min: 0, max: 20, step: 1, value: n, digits: 0 }, v => { n = v; p.render(); });
+    let base = [m, n];
+    slider("#ctl-rope", { label: "shift both ", min: 0, max: 15, step: 1, value: 0, digits: 0 }, v => { m = Math.min(20, base[0] + v); n = Math.min(20, base[1] + v); sm.set(m); sn.set(n); p.render(); });
+    sm.addEventListener("input", () => { base = [m, n]; }); sn.addEventListener("input", () => { base = [m, n]; });
+    p.render(p => {
+      p.grid({ step: 1 }).axes({ step: 1 });
+      p.circle(0, 0, Math.hypot(...q0), { color: "c2", width: 1, dash: [3, 4], alpha: .5 });
+      p.circle(0, 0, Math.hypot(...k0), { color: "c1", width: 1, dash: [3, 4], alpha: .5 });
+      p.arrow(0, 0, q0[0], q0[1], { color: "c2", width: 1.5, alpha: .3 });
+      p.arrow(0, 0, k0[0], k0[1], { color: "c1", width: 1.5, alpha: .3 });
+      const q = rot(q0, m * th), k = rot(k0, n * th);
+      p.arrow(0, 0, q[0], q[1], { color: "c2", width: 3, label: `R_m q (m=${m})` });
+      p.arrow(0, 0, k[0], k[1], { color: "c1", width: 3, label: `R_n k (n=${n})` });
+      out.textContent = `score (R_m q)·(R_n k) = ${LA.dot(q, k).toFixed(4)}     offset n − m = ${n - m}     (unrotated q·k = ${LA.dot(q0, k0).toFixed(4)}; θ = ${th} rad per position)`;
+    });
+  }
+
+  // ---------- fig: GPT architecture ----------
+  {
+    const p = new Plot("#fig-gpt", { xmin: 0, xmax: 680, ymin: 620, ymax: 0 });
+    const out = document.getElementById("out-gpt");
+    const SX = 230; // residual stream x
+    const boxes = [
+      { id: "in", x: SX - 90, y: 14, w: 180, h: 30, t: "token ids  (B, T)", c: "muted", info: "Input: integers in [0, V). Shape (B, T). No parameters." },
+      { id: "tok", x: SX - 210, y: 70, w: 170, h: 34, t: "token embedding", c: "c5", info: "nn.Embedding(V, d): row lookup, (B, T) → (B, T, d). Parameters: V·d. Lesson 20." },
+      { id: "pos", x: SX + 40, y: 70, w: 170, h: 34, t: "position embedding", c: "c5", info: "nn.Embedding(T_max, d) indexed by 0..T−1, (T,) → (T, d), broadcast over the batch. Parameters: T_max·d. Section 5." },
+      { id: "ln1", x: SX + 90, y: 176, w: 120, h: 30, t: "LayerNorm₁", c: "c6", info: "LayerNorm over d: (B, T, d) → (B, T, d). Parameters: 2d (γ, β). Pre-norm: the stream itself is not normalized." },
+      { id: "att", x: SX + 60, y: 224, w: 180, h: 40, t: "causal self-attention", c: "c1", info: "qkv: Linear(d, 3d) → split into h heads (B, h, T, d/h) → softmax(QKᵀ/√(d/h) + mask)V → merge → Linear(d, d). (B, T, d) → (B, T, d). Parameters 4d² + 4d. Lesson 22." },
+      { id: "ln2", x: SX + 90, y: 320, w: 120, h: 30, t: "LayerNorm₂", c: "c6", info: "LayerNorm over d, 2d parameters." },
+      { id: "mlp", x: SX + 60, y: 368, w: 180, h: 40, t: "MLP  d → 4d → d", c: "c3", info: "Linear(d, 4d) → GELU → Linear(4d, d), applied to each position independently. (B, T, d) → (B, T, d). Parameters 8d² + 5d. Section 4." },
+      { id: "lnf", x: SX - 70, y: 480, w: 140, h: 30, t: "final LayerNorm", c: "c6", info: "LN_f: normalizes the stream once before the head (needed with pre-norm). 2d parameters." },
+      { id: "head", x: SX - 90, y: 528, w: 180, h: 32, t: "linear head  d → V", c: "c2", info: "Linear(d, V, bias=False): (B, T, d) → logits (B, T, V). Parameters d·V, or 0 extra if tied to the token embedding (GPT-2 ties them)." },
+      { id: "out", x: SX - 110, y: 580, w: 220, h: 30, t: "softmax → p(next token)", c: "muted", info: "Softmax over V at each of the T positions. Training: cross-entropy against the input shifted by one (lesson 24). Generation: sample from the last position (lesson 25)." },
+    ];
+    const plus = [{ x: SX, y: 130, id: "add0", info: "x⁽⁰⁾ = token embedding + position embedding. The residual stream starts here: (B, T, d)." },
+      { x: SX, y: 290, id: "add1", info: "Residual add: x ← x + Attn(LN₁(x)). The attention output is written into the stream." },
+      { x: SX, y: 434, id: "add2", info: "Residual add: x ← x + MLP(LN₂(x))." }];
+    let sel = "att";
+    const C = p.ctx;
+    function arrowPx(x0, y0, x1, y1, col, w = 1.6) { p.arrow(x0, y0, x1, y1, { color: col, width: w, head: 8 }); }
+    p.onClick = (x, y) => {
+      const b = boxes.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+      const a = plus.find(a => Math.hypot(a.x - x, a.y - y) < 16);
+      if (b) sel = b.id; else if (a) sel = a.id; else if (x > SX - 160 && x < SX + 300 && y > 150 && y < 460) sel = "block";
+      p.render();
+    };
+    p.render(p => {
+      // residual stream
+      p.line(SX, 104, SX, 480, { color: "muted", width: 7, alpha: .35 });
+      p.line(SX, 44, SX, 70, { color: "muted", width: 1.5 });
+      arrowPx(SX - 90, 44, SX - 125, 70, "muted"); arrowPx(SX + 90, 44, SX + 125, 70, "muted");
+      arrowPx(SX - 125, 104, SX - 12, 128, "c5"); arrowPx(SX + 125, 104, SX + 12, 128, "c5");
+      // block frame
+      p.rect(SX - 150, 152, SX + 290, 458, { color: sel === "block" ? "c2" : "muted", width: 1.5, dash: [6, 5], fill: "c2", fillAlpha: 0 });
+      p.label(SX - 140, 168, "× L blocks", { color: "muted", font: "600 13px sans-serif" });
+      p.label(SX - 140, 440, "(separate weights each)", { color: "muted", font: "11px sans-serif" });
+      // branches
+      const branch = (yTop, lnBox, fBox, yAdd) => {
+        p.line(SX, yTop, SX + 150, yTop, { color: "muted", width: 1.5 }); arrowPx(SX + 150, yTop, SX + 150, lnBox.y, "muted");
+        arrowPx(SX + 150, lnBox.y + lnBox.h, SX + 150, fBox.y, "muted");
+        p.line(SX + 150, fBox.y + fBox.h, SX + 150, yAdd, { color: "muted", width: 1.5 }); arrowPx(SX + 150, yAdd, SX + 13, yAdd, "muted");
+      };
+      const B = Object.fromEntries(boxes.map(b => [b.id, b]));
+      branch(160, B.ln1, B.att, 290); branch(304, B.ln2, B.mlp, 434);
+      arrowPx(SX, 450, SX, 480, "muted"); arrowPx(SX, 510, SX, 528, "muted"); arrowPx(SX, 560, SX, 580, "muted");
+      boxes.forEach(b => {
+        const on = sel === b.id;
+        p.rect(b.x, b.y, b.x + b.w, b.y + b.h, { fill: b.c, fillAlpha: on ? .45 : .2, color: on ? "c2" : b.c, width: on ? 2.5 : 1.2 });
+        p.label(b.x + b.w / 2, b.y + b.h / 2, b.t, { align: "center", color: "fg", font: "600 12px sans-serif" });
+      });
+      plus.forEach(a => { p.circle(a.x, a.y, 12, { color: sel === a.id ? "c2" : "fg", width: 2, fill: "bg", fillAlpha: 1 }); p.label(a.x, a.y + 1, "+", { align: "center", font: "700 16px sans-serif" }); });
+      p.label(SX - 16, 230, "residual", { align: "right", color: "muted", font: "11px sans-serif" });
+      p.label(SX - 16, 246, "stream (B, T, d)", { align: "right", color: "muted", font: "11px sans-serif" });
+      const info = sel === "block" ? "One transformer block, repeated L times: x ← x + Attn(LN₁ x); x ← x + MLP(LN₂ x). Shape in = shape out = (B, T, d). Parameters 12d² + 13d." :
+        (boxes.find(b => b.id === sel) || plus.find(a => a.id === sel)).info;
+      out.textContent = info;
+    });
+  }
+
+  // ---------- fig: parameter calculator ----------
+  {
+    let cfg = { d: 768, L: 12, V: 50257, T: 1024, tied: true };
+    const p = new Plot("#fig-params", { xmin: 0, xmax: 1, ymin: 0, ymax: 1 });
+    const out = document.getElementById("out-params");
+    const sl = {};
+    sl.d = slider("#ctl-params", { label: "d ", min: 32, max: 2048, step: 32, value: cfg.d, digits: 0 }, v => { cfg.d = v; p.render(); });
+    sl.L = slider("#ctl-params", { label: "L ", min: 1, max: 48, step: 1, value: cfg.L, digits: 0 }, v => { cfg.L = v; p.render(); });
+    const presets = { "GPT-2 S": [768, 12, 50257, 1024, true], "GPT-2 M": [1024, 24, 50257, 1024, true], "GPT-2 L": [1280, 36, 50257, 1024, true], "GPT-2 XL": [1600, 48, 50257, 1024, true], "tiny GPT (lesson 24)": [128, 4, 65, 128, false] };
+    Object.entries(presets).forEach(([k, [d, L, V, T, tied]]) => button("#ctl-params", k, () => { cfg = { d, L, V, T, tied }; sl.d.set(d); sl.L.set(L); p.render(); }));
+    const n = x => x.toLocaleString();
+    p.render(p => {
+      const { d, L, V, T, tied } = cfg;
+      const parts = [["token emb V·d", V * d, "c5"], ["pos emb T·d", T * d, "c4"], ["attention L(4d²+4d)", L * (4 * d * d + 4 * d), "c1"], ["MLP L(8d²+5d)", L * (8 * d * d + 5 * d), "c3"], ["LayerNorms", L * 4 * d + 2 * d, "c6"], ["head d·V", tied ? 0 : d * V, "c2"]];
+      const tot = parts.reduce((a, b) => a + b[1], 0);
+      let x = 0.02; const W = 0.96;
+      parts.forEach(([name, v, c], i) => {
+        const w = W * v / tot; if (w <= 0) return;
+        p.rect(x, 0.55, x + w, 0.8, { fill: c, fillAlpha: .6, color: c, width: 1 });
+        if (w > 0.07) p.label(x + w / 2, 0.675, `${(100 * v / tot).toFixed(0)}%`, { align: "center", font: "600 12px sans-serif" });
+        x += w;
+      });
+      let lx = 0.02;
+      parts.forEach(([name, v, c]) => { if (!v) return; p.rect(lx, 0.27, lx + 0.018, 0.37, { fill: c, fillAlpha: .7, color: c, width: 1 }); p.label(lx + 0.024, 0.32, name, { color: "muted", font: "11px sans-serif" }); lx += 0.024 + name.length * 0.0095 + 0.03; });
+      p.label(0.02, 0.92, `total ${n(tot)} parameters  (${(tot / 1e6).toFixed(1)}M)`, { font: "600 14px sans-serif" });
+      p.label(0.02, 0.1, `V = ${n(V)}, T_max = ${n(T)}, ${tied ? "tied" : "untied"} head`, { color: "muted", font: "11px sans-serif" });
+      out.textContent = `per block 12d²+13d = ${n(12 * d * d + 13 * d)}    rule of thumb 12Ld² = ${n(12 * L * d * d)}    embeddings = ${n(V * d + T * d)}`;
+    });
+  }
+});
+</script>
+</body>
+</html>

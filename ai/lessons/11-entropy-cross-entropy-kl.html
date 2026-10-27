@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entropy, cross-entropy & KL</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/manifest.js"></script>
+<script src="../assets/course.js"></script>
+</head>
+<body data-lesson="11">
+<main>
+
+<div class="kicker">Part 3 · Probability &amp; statistics</div>
+<h1>Entropy, cross-entropy &amp; KL</h1>
+<p class="lede">Every language model you will train in this course minimizes one number: the cross-entropy between the text and the model's predictions. This lesson builds that number from one idea, "how surprised am I?". From it come entropy, cross-entropy, KL divergence and perplexity. Along the way you'll see why the KL penalty in RLHF behaves the way it does.</p>
+
+<div class="objectives">
+  <h4>By the end you can</h4>
+  <ul>
+    <li>Define surprise $-\log p$ and explain why the logarithm is the only sensible choice.</li>
+    <li>Compute entropy, and read it as the shortest possible average code length.</li>
+    <li>Compute cross-entropy and KL divergence, prove $\mathrm{KL}\ge 0$, and explain why cross-entropy is the language-model loss.</li>
+    <li>Predict what forward and reverse KL do when the model is too simple (mode-covering vs mode-seeking).</li>
+    <li>Convert a loss into perplexity, and compute log-softmax without overflow.</li>
+  </ul>
+</div>
+<nav><ul class="toc"></ul></nav>
+
+<!-- ============================================================ -->
+<h2 id="surprise">1. Surprise: −log p</h2>
+<p>Start with a single event of probability $p$. We want a number $s(p)$ that measures how surprised we should be when it happens. Three requirements pin it down:</p>
+<ul>
+  <li>A certain event is no surprise: $s(1) = 0$.</li>
+  <li>Rarer means more surprising: $s$ decreases as $p$ grows.</li>
+  <li>Surprises of <b>independent</b> events add. Seeing two independent events (probability $p\,q$, lesson 08) should be exactly as surprising as seeing one and then the other: $s(pq) = s(p) + s(q)$.</li>
+</ul>
+<p>The third rule turns products into sums, and that is precisely what logarithms do. Up to the choice of base, the only continuous solution is</p>
+$$s(p) = -\log p = \log\frac{1}{p}.$$
+<p>The base only sets the unit. With $\log_2$ the unit is the <b>bit</b>: an event with $p = 1/2$ (a fair coin landing heads) carries exactly 1 bit of surprise, and $p = 1/8$ carries 3 bits, as much as three heads in a row. With the natural log the unit is the <b>nat</b>. ML code uses nats because <code>log</code> is <code>ln</code>. Converting is a constant factor: $1\text{ nat} = 1/\ln 2 \approx 1.443$ bits.</p>
+
+<div class="figure">
+  <canvas id="fig-surp" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-surp"></div>
+  <div class="readout" id="out-surp"></div>
+  <div class="caption"><b>Try it:</b> slide $p$. Every time you halve $p$, the surprise grows by exactly one bit: the curve is linear in "number of halvings". Push $p$ toward 0 and the surprise heads to infinity. A model that gives the true answer probability 0 is infinitely wrong. Remember that when we reach the loss function.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="entropy">2. Entropy: average surprise</h2>
+<p>A random variable $X$ with distribution $p$ (lesson 08) produces outcomes with different surprises. Its <b>entropy</b> is the <em>expected</em> surprise (expectation from lesson 09):</p>
+$$H(p) = \mathbb{E}_{x\sim p}\big[-\log p(x)\big] = -\sum_x p(x)\log p(x).$$
+<p>We use the convention $0\log 0 = 0$: outcomes that never happen contribute nothing. (This is the limit $\lim_{p\to0} p\log p = 0$: the surprise grows, but its weight shrinks faster.)</p>
+<p>Entropy measures <b>how unpredictable</b> a distribution is. Two extremes make this concrete:</p>
+<ul>
+  <li>A certain outcome ($p = (1, 0, \dots, 0)$) has $H = 0$. Nothing to learn.</li>
+  <li>The uniform distribution over $K$ outcomes has $H = \sum_x \frac1K \log K = \log K$. That's the maximum possible (problem 6 proves it).</li>
+</ul>
+<p>The simplest case is a coin with $P(\text{heads}) = p$:</p>
+$$H(p) = -p\log_2 p - (1-p)\log_2(1-p) \quad\text{bits}.$$
+
+<div class="figure">
+  <canvas id="fig-coin" width="680" height="340"></canvas>
+  <div class="controls" id="ctl-coin"></div>
+  <div class="readout" id="out-coin"></div>
+  <div class="caption"><b>Try it:</b> slide the coin's bias $p$. The thick curve is the entropy; the dashed curves are its two terms, heads' share $p\cdot(-\log_2 p)$ and tails' share. The peak is the fair coin at exactly 1 bit. At $p = 0.9$ a flip carries only about 0.47 bits: heads is so expected that it tells you little.</div>
+</div>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>A fair six-sided die: $H = -6\cdot\frac16\log_2\frac16 = \log_2 6 \approx 2.585$ bits.</p>
+  <p>A loaded die with $p = (\frac12, \frac1{10}, \frac1{10}, \frac1{10}, \frac1{10}, \frac1{10})$: $H = \frac12\log_2 2 + 5\cdot\frac1{10}\log_2 10 = 0.5 + 0.5\times3.322 \approx 2.161$ bits. Loading the die made it more predictable, so the entropy dropped.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="coding">3. Entropy is the best possible average code length</h2>
+<p>Entropy isn't just a definition. Shannon proved it has an operational meaning. Suppose you must send a long stream of symbols drawn from $p$ over a wire as bits, using a <b>prefix code</b> (no codeword is the start of another, so the stream decodes without separators). Then:</p>
+<div class="callout key">
+<p><b>Source coding theorem.</b> No prefix code can use fewer than $H(p)$ bits per symbol on average. And there is always a code using fewer than $H(p) + 1$. The ideal length for symbol $x$ is its surprise, $-\log_2 p(x)$ bits: common symbols get short codewords, rare ones long codewords.</p>
+</div>
+<p><b>Huffman's algorithm</b> builds an optimal code greedily. Put every symbol in a pile. Repeatedly take the two least likely items, join them under a new node whose probability is their sum, and label the two branches 0 and 1. When one tree remains, each symbol's codeword is the path from the root.</p>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Symbols A, B, C, D with $p = (\frac12, \frac14, \frac18, \frac18)$.</p>
+  <p>Merge the two smallest, C and D, into a node of weight $\frac14$. Now the smallest are B ($\frac14$) and CD ($\frac14$): merge into BCD ($\frac12$). Finally merge A with BCD. Reading paths: A = <code>0</code>, B = <code>10</code>, C = <code>110</code>, D = <code>111</code>.</p>
+  <p>Average length: $\frac12\cdot1 + \frac14\cdot2 + \frac18\cdot3 + \frac18\cdot3 = 1.75$ bits. Entropy: $\frac12\cdot1 + \frac14\cdot2 + \frac18\cdot3 + \frac18\cdot3 = 1.75$ bits. They're equal because every probability is a power of $\frac12$, so every ideal length $-\log_2 p$ is a whole number. A naive 2-bits-per-symbol code wastes 0.25 bits per symbol.</p>
+</div>
+
+<div class="figure">
+  <canvas id="fig-code" width="680" height="360"></canvas>
+  <div class="controls" id="ctl-code"></div>
+  <div class="readout" id="out-code"></div>
+  <div class="caption"><b>Try it:</b> pick a distribution. For each symbol, the blue bar is its ideal length $-\log_2 p$ (its surprise) and the orange bar is the length of its Huffman codeword (printed underneath). Huffman lengths are whole bits, so they can only approximate the ideal. Check the readout: the average code length always lands in $[H, H+1)$.</div>
+</div>
+
+<div class="callout intuition">
+<p>This gives entropy a tangible meaning: <b>the number of yes/no questions you need, on average, to pin down the outcome</b> if you ask cleverly. It's also why a good predictor is a good compressor. A model that predicts the next token well can encode text in few bits. Language modeling and compression are the same problem.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cross-entropy">4. Cross-entropy: paying for the wrong model</h2>
+<p>Now suppose the data comes from $p$, but you <em>believe</em> it comes from $q$. You build your code (or your predictions) from $q$, so symbol $x$ costs you $-\log q(x)$. Your average cost is the <b>cross-entropy</b>:</p>
+$$H(p, q) = \mathbb{E}_{x\sim p}\big[-\log q(x)\big] = -\sum_x p(x)\log q(x).$$
+<p>Read it as: outcomes arrive at the rate $p$, and each is scored by the surprise $q$ assigns to it. If $q = p$ you pay exactly $H(p)$. Section 5 shows you can never do better than that.</p>
+
+<h3>Why this is the language-model loss</h3>
+<p>A language model reads a context and outputs a distribution $q_\theta(\cdot\mid\text{context})$ over the vocabulary. Training text gives, for each context, the token that actually came next. Think of that token as a sample from the true distribution $p$ of next tokens. The loss on one position is the surprise of the true token:</p>
+$$\ell = -\log q_\theta(x_{\text{true}} \mid \text{context}).$$
+<p>That's the cross-entropy between a <b>one-hot</b> target ($p$ puts all its mass on $x_{\text{true}}$) and the model's prediction. Averaged over millions of positions, it's a Monte Carlo estimate (lesson 08) of $H(p_{\text{data}}, q_\theta)$. It's also the <b>negative log-likelihood</b> of the data, so minimizing it is maximum-likelihood estimation (lesson 10). Three names, one number.</p>
+
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>Context: "the cat sat on the". Over a 5-word vocabulary, the model predicts $q = (\text{mat } 0.6,\ \text{rug } 0.2,\ \text{floor } 0.1,\ \text{cat } 0.05,\ \text{moon } 0.05)$.</p>
+  <p>If the true next word is "mat": loss $= -\ln 0.6 \approx 0.511$ nats. If it's "moon": loss $= -\ln 0.05 = \ln 20 \approx 2.996$ nats. Only the probability on the correct token enters the loss. But the probabilities must sum to 1, so pushing up "mat" pulls everything else down. That's why the gradient touches every logit (problem 9).</p>
+  <p>A model that hasn't learned anything predicts uniformly over GPT-2's 50,257 tokens and pays $\ln 50257 \approx 10.82$ nats on every token. When you train your tiny GPT in lesson 24, the loss starts near $\ln(\text{vocab size})$. Now you know why.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="kl">5. KL divergence: the extra cost of being wrong</h2>
+<p>How much does believing $q$ cost you <em>beyond</em> the unavoidable $H(p)$? That excess is the <b>Kullback–Leibler divergence</b>:</p>
+$$\mathrm{KL}(p\,\|\,q) = H(p, q) - H(p) = \sum_x p(x)\log\frac{p(x)}{q(x)}.$$
+<p>Equivalently, $\mathrm{KL}(p\|q) = \mathbb{E}_{x\sim p}\!\big[\log p(x) - \log q(x)\big]$: the average gap in log-probability, measured where $p$ puts its mass.</p>
+
+<h3>KL is never negative (Gibbs' inequality)</h3>
+<p>The proof uses one fact: $\ln t \le t - 1$ for all $t > 0$, with equality only at $t = 1$. (The line $t-1$ is the tangent to $\ln t$ at $t=1$, and $\ln$ is concave, so it lies below every tangent.) Sum over the $x$ with $p(x) > 0$:</p>
+$$-\mathrm{KL}(p\|q) = \sum_x p(x)\ln\frac{q(x)}{p(x)} \;\le\; \sum_x p(x)\Big(\frac{q(x)}{p(x)} - 1\Big) = \sum_{x:\,p(x)>0} q(x) \;-\; 1 \;\le\; 0.$$
+<p>So $\mathrm{KL}(p\|q) \ge 0$. Equality requires $q(x)/p(x) = 1$ everywhere, so it holds only when $q = p$. $\blacksquare$</p>
+
+<div class="callout key">
+<p>Since $H(p,q) = H(p) + \mathrm{KL}(p\|q)$ and $H(p)$ doesn't depend on the model, <b>minimizing cross-entropy over $q$ is the same as minimizing $\mathrm{KL}(p\|q)$</b>. The best achievable loss is the entropy of the data itself. A language model's loss can never reach 0 on real text, because real text is genuinely unpredictable.</p>
+</div>
+
+<h3>KL is not a distance</h3>
+<p>KL is zero only when $p = q$, but it is <b>asymmetric</b>: in general $\mathrm{KL}(p\|q) \ne \mathrm{KL}(q\|p)$. Take $p = (0.5, 0.5)$ and $q = (0.9, 0.1)$:</p>
+$$\begin{aligned}\mathrm{KL}(p\|q) &= 0.5\ln\tfrac{0.5}{0.9} + 0.5\ln\tfrac{0.5}{0.1} \approx 0.511 \text{ nats},\\ \mathrm{KL}(q\|p) &= 0.9\ln\tfrac{0.9}{0.5} + 0.1\ln\tfrac{0.1}{0.5} \approx 0.368 \text{ nats}.\end{aligned}$$
+<p>The asymmetry comes from <em>whose</em> probabilities do the averaging. $\mathrm{KL}(p\|q)$ blows up when $q(x) \approx 0$ where $p(x) > 0$: the model calls something impossible that actually happens. $\mathrm{KL}(q\|p)$ blows up in the opposite case.</p>
+
+<div class="figure">
+  <div class="row">
+    <div><canvas id="fig-kl" width="400" height="360"></canvas></div>
+    <div><canvas id="fig-kl-bars" width="400" height="360"></canvas></div>
+  </div>
+  <div class="controls" id="ctl-kl"></div>
+  <div class="readout" id="out-kl"></div>
+  <div class="caption"><b>Try it:</b> drag the bar tops. <span style="color:var(--c1)">Blue</span> is the true distribution $p$ and <span style="color:var(--c2)">orange</span> is the model $q$; the other bars rescale so each still sums to 1. The right panel shows the split $H(p,q) = H(p) + \mathrm{KL}(p\|q)$. Press "q = p" and watch both KLs hit 0. Now drag one orange bar down to almost nothing where blue is large: $\mathrm{KL}(p\|q)$ explodes while $\mathrm{KL}(q\|p)$ barely moves.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="forward-reverse">6. Forward vs reverse KL: covering vs seeking</h2>
+<p>The asymmetry matters most when the model family is <b>too simple</b> to match the target exactly. Then you have to choose which mistakes to accept, and the KL direction decides it. Classic setup: the target $p$ is bimodal (two bumps), and $q$ must be a single Gaussian $\mathcal{N}(\mu, \sigma^2)$ (lesson 09).</p>
+<ul>
+  <li><b>Forward KL</b>, $\mathrm{KL}(p\|q) = \mathbb{E}_{p}[\log p - \log q]$, is averaged where the <em>data</em> lives. Wherever $p$ has mass, $q$ must not be tiny, or $-\log q$ explodes. So $q$ stretches to <b>cover both modes</b>, putting a lot of mass in the empty gap between them. This is <b>mode-covering</b> (or "mean-seeking"). For a Gaussian $q$, the optimum exactly matches $p$'s mean and variance (problem 10).</li>
+  <li><b>Reverse KL</b>, $\mathrm{KL}(q\|p) = \mathbb{E}_{q}[\log q - \log p]$, is averaged where the <em>model</em> lives. $q$ is punished for putting mass where $p$ is tiny, like the gap, and not punished at all for ignoring regions it doesn't visit. So $q$ <b>picks one mode</b> and fits it tightly. This is <b>mode-seeking</b>.</li>
+</ul>
+
+<div class="figure">
+  <canvas id="fig-fr" width="680" height="320"></canvas>
+  <canvas id="fig-fr-land" width="680" height="300" style="margin-top:10px"></canvas>
+  <div class="controls" id="ctl-fr"></div>
+  <div class="readout" id="out-fr"></div>
+  <div class="caption"><b>Try it:</b> top, the bimodal target $p$ (green) and a Gaussian $q$ (purple). Bottom, the loss landscape over $(\mu,\sigma)$ for the chosen direction (darker = lower KL); drag the dot to move $q$. Press "descend forward KL": $q$ settles at $\mu = 0$ with a wide $\sigma \approx 2.09$, straddling the gap. Reset, then press "descend reverse KL": $q$ snaps onto one bump with $\sigma \approx 0.6$, and $\mathrm{KL}(q\|p) \approx \ln 2$ (it misses half the mass). Switch the landscape to reverse. It has <em>two</em> deep valleys (one per mode) and a shallow trap near $\mu=0$: start from $\mu = 0, \sigma = 2$ and descent gets stuck there.</div>
+</div>
+
+<div class="callout ml">
+<p>Pretraining minimizes cross-entropy on data, which is <b>forward</b> KL from the data to the model. That makes base models mode-covering: they hedge, spread probability over every plausible continuation, and stay diverse. RLHF (lesson 28) fine-tunes a policy $\pi$ to maximize reward minus a penalty $\beta\,\mathrm{KL}(\pi\|\pi_{\text{ref}})$. That's a <b>reverse</b> KL, estimated from the policy's own samples. It strongly punishes $\pi$ for producing text the reference model finds implausible, which keeps outputs fluent and on-distribution. But it barely punishes dropping modes the reference had. The result is mode-seeking behavior: RLHF-tuned models are more confident, less diverse, and tend to converge on a few favored answers. DPO (lesson 29) inherits the same KL-regularized objective.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="perplexity">7. Perplexity and the numerically stable loss</h2>
+<p>Cross-entropy in nats is hard to feel. <b>Perplexity</b> undoes the log:</p>
+$$\mathrm{PPL} = \exp\!\Big(\frac1T\sum_{t=1}^T -\ln q(x_t\mid x_{\lt t})\Big) = e^{\text{CE}} \quad(\text{or } 2^{\text{CE in bits}}).$$
+<p>It's the <b>effective branching factor</b>. A model that spreads probability uniformly over $k$ tokens has CE $= \ln k$ and perplexity exactly $k$. So "perplexity 20" means the model is, on average, as unsure as if it were choosing uniformly among 20 tokens. Lower is better. 1 is perfect, and the vocabulary size is the score of a model that learned nothing.</p>
+<div class="example">
+  <div class="label">Worked example</div>
+  <p>A model assigns probabilities $0.5, 0.25, 0.125, 0.5$ to the four actual tokens of a text. In bits the surprises are $1, 2, 3, 1$, with mean $1.75$ bits. Perplexity $= 2^{1.75} \approx 3.364$. The same answer in nats: mean surprise $1.75\ln2 \approx 1.213$, and $e^{1.213} \approx 3.364$.</p>
+</div>
+
+<h3>Computing log-softmax without overflow</h3>
+<p>Models output <b>logits</b> $z$, and probabilities come from softmax: $q_i = e^{z_i}/\sum_j e^{z_j}$. The loss needs $\log q_y = z_y - \log\sum_j e^{z_j}$. Computing this naively breaks easily. $e^{1000}$ overflows to <code>inf</code>, and for very negative logits $e^{z}$ underflows to 0, so $\log 0 = -\infty$. The fix is one line of algebra. For any constant $m$,</p>
+$$\log\sum_j e^{z_j} = \log\Big(e^{m}\sum_j e^{z_j - m}\Big) = m + \log\sum_j e^{z_j - m}.$$
+<p>Choose $m = \max_j z_j$. Now the largest exponent is $e^0 = 1$, nothing overflows, and the sum is at least 1, so its log is finite. This is the <b>log-sum-exp trick</b>, and $\text{log\_softmax}(z) = z - \text{logsumexp}(z)$ is how every framework computes the cross-entropy loss. For example, with $z = (1000, 1001, 1002)$: $m = 1002$, and $\log q_3 = -\ln(e^{-2} + e^{-1} + 1) \approx -0.408$, with no overflow anywhere.</p>
+<div class="callout warning">
+<p>Never compute <code>log(softmax(z))</code> in two steps. When a probability underflows to 0 you get $-\infty$, and its gradient becomes NaN, which silently poisons training. Use a fused <code>log_softmax</code> or <code>cross_entropy(logits, target)</code>. In PyTorch (lesson 19), <code>F.cross_entropy</code> takes <em>logits</em>, not probabilities, for exactly this reason.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="problems">8. Problems</h2>
+<p>Do these with pencil and paper before opening the solutions.</p>
+
+<div class="problem"><div class="label">Problem 1</div><span class="difficulty">warm-up</span>
+<p>An event has probability $1/8$. What is its surprise in bits? In nats?</p>
+<p>Enter the surprise in bits:</p><div class="numcheck" data-answer="3"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$-\log_2(1/8) = 3$ bits. In nats, $\ln 8 \approx 2.079$, which is $3 \times \ln 2$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 2</div><span class="difficulty">warm-up</span>
+<p>What is the entropy, in bits, of a coin with $P(\text{heads}) = 0.9$?</p>
+<div class="numcheck" data-answer="0.469" data-tol="0.002"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$H = -0.9\log_2 0.9 - 0.1\log_2 0.1 = 0.9(0.152) + 0.1(3.322) \approx 0.137 + 0.332 = 0.469$ bits. Compare with 1 bit for a fair coin.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 3</div><span class="difficulty">core</span>
+<p>Five symbols have probabilities $(0.4, 0.2, 0.2, 0.1, 0.1)$. Build a Huffman code by hand and compute its average length in bits. Compare with the entropy.</p>
+<p>Average length:</p><div class="numcheck" data-answer="2.2"></div>
+<details class="hint"><summary>Hint</summary><p>Merge 0.1 + 0.1 first, then the two smallest of {0.4, 0.2, 0.2, 0.2}. When there are ties, any choice gives the same average length (but possibly different individual lengths).</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>One valid tree: merge 0.1+0.1 → 0.2, merge 0.2+0.2 → 0.4, merge 0.2+0.4 → 0.6, merge 0.4+0.6 → 1. Lengths: $(1, 2, 3, 4, 4)$, average $0.4 + 0.4 + 0.6 + 0.4 + 0.4 = 2.2$ bits. (Another tie-breaking gives lengths $(2,2,2,3,3)$, also average $2.2$.) Entropy: $H \approx 2.122$ bits. So $H \le 2.2 \lt H + 1$, as the theorem promises. The gap exists because these probabilities aren't powers of $\frac12$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 4</div><span class="difficulty">core</span>
+<p>For $p = (0.5, 0.5)$ and $q = (0.9, 0.1)$, compute $\mathrm{KL}(p\|q)$ and $\mathrm{KL}(q\|p)$ in nats. Which one is bigger, and why does that make sense?</p>
+<div class="numcheck" data-answer="0.511,0.368" data-tol="0.002"></div>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathrm{KL}(p\|q) = 0.5\ln(0.5/0.9) + 0.5\ln(0.5/0.1) = 0.5(-0.588) + 0.5(1.609) \approx 0.511$. $\mathrm{KL}(q\|p) = 0.9\ln1.8 + 0.1\ln0.2 = 0.529 - 0.161 \approx 0.368$. The first is larger because $p$ sends half its samples to the second outcome, where $q$ gives only 0.1 (surprise $\ln 10$). In the reverse direction, $q$ rarely visits that outcome, so the mismatch there carries little weight.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 5</div><span class="difficulty">core</span>
+<p>A freshly initialized language model with a 50,257-token vocabulary outputs almost exactly uniform predictions. What cross-entropy loss (nats per token) do you expect at step 0? What perplexity?</p>
+<p>Loss in nats:</p><div class="numcheck" data-answer="10.825" data-tol="0.001"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Every token gets $q = 1/50257$, so the loss is $-\ln(1/50257) = \ln 50257 \approx 10.825$ nats, and perplexity is $e^{10.825} = 50257$. If your loss at initialization is far above $\ln V$, the initial logits are too large and the model is confidently wrong. That's a standard sanity check (lesson 18).</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 6</div><span class="difficulty">core · proof</span>
+<p>Let $u$ be the uniform distribution over $K$ outcomes. Show that $\mathrm{KL}(p\|u) = \log K - H(p)$. Conclude that the uniform distribution has the maximum entropy among all distributions on $K$ outcomes.</p>
+<details class="solution"><summary>Solution</summary>
+<p>$\mathrm{KL}(p\|u) = \sum_x p(x)\log\frac{p(x)}{1/K} = \sum_x p(x)\log p(x) + \log K\sum_x p(x) = -H(p) + \log K$. By Gibbs, $\mathrm{KL}\ge 0$, so $H(p) \le \log K$, with equality exactly when $p = u$. Entropy measures how far $p$ is from "knowing nothing".</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 7</div><span class="difficulty">core</span>
+<p>A model assigns probabilities $0.5, 0.25, 0.125, 0.5$ to the four true tokens of a text. What is its perplexity?</p>
+<div class="numcheck" data-answer="3.3636" data-tol="0.001"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Mean surprise in bits is $(1 + 2 + 3 + 1)/4 = 1.75$, so $\mathrm{PPL} = 2^{1.75} \approx 3.364$. Note that perplexity is the <em>geometric</em> mean of $1/q$: $(2\cdot4\cdot8\cdot2)^{1/4} = 128^{1/4} \approx 3.364$.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 8</div><span class="difficulty">core</span>
+<p>Compute $\text{log\_softmax}(z)_3$ for logits $z = (1000, 1001, 1002)$. What does the naive formula $\ln\big(e^{z_3} / \sum_j e^{z_j}\big)$ give in float64?</p>
+<div class="numcheck" data-answer="-0.4076" data-tol="0.001"></div>
+<details class="solution"><summary>Solution</summary>
+<p>Subtract the max: $z - 1002 = (-2, -1, 0)$, so $\log q_3 = 0 - \ln(e^{-2} + e^{-1} + 1) = -\ln 1.5032 \approx -0.4076$. Naively, $e^{1000}$ overflows to <code>inf</code> (float64 tops out near $e^{709}$), so you get $\inf/\inf = $ NaN. Softmax only depends on <em>differences</em> of logits, and the trick exploits exactly that.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 9</div><span class="difficulty">core · derivation</span>
+<p>Let $\ell(z) = -\log \text{softmax}(z)_y$ for logits $z\in\mathbb{R}^K$ and true class $y$. Show that $\dfrac{\partial \ell}{\partial z_k} = q_k - [k = y]$, where $q = \text{softmax}(z)$. Interpret the result.</p>
+<details class="hint"><summary>Hint</summary><p>Write $\ell = -z_y + \log\sum_j e^{z_j}$ first. The derivative of logsumexp is softmax.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>$\ell = -z_y + \log\sum_j e^{z_j}$. The first term has derivative $-[k=y]$. The second: $\frac{\partial}{\partial z_k}\log\sum_j e^{z_j} = \frac{e^{z_k}}{\sum_j e^{z_j}} = q_k$. So $\nabla_z \ell = q - \text{onehot}(y)$. Interpretation: the gradient is "prediction minus truth". It pushes the true logit up by $1 - q_y$ and every other logit down by its probability. It's zero only when the model puts probability 1 on the right answer. This clean form is why softmax and cross-entropy are always paired. You'll implement it in lesson 14 and see it fall out of backprop in lesson 17.</p></details>
+</div>
+
+<div class="problem"><div class="label">Problem 10</div><span class="difficulty">stretch</span>
+<p>(a) Show that minimizing forward KL $\mathrm{KL}(p\|q)$ over Gaussians $q = \mathcal{N}(\mu,\sigma^2)$ gives $\mu = \mathbb{E}_p[x]$ and $\sigma^2 = \mathrm{Var}_p[x]$ (moment matching). (b) For $p = \frac12\mathcal{N}(-2, 0.5^2) + \frac12\mathcal{N}(2, 0.5^2)$, what $\sigma$ does forward KL choose?</p>
+<div class="numcheck" data-answer="2.0616" data-tol="0.001"></div>
+<details class="hint"><summary>Hint</summary><p>Only the cross-entropy term depends on $q$: minimize $\mathbb{E}_p[-\log q(x)] = \mathbb{E}_p\big[\frac{(x-\mu)^2}{2\sigma^2}\big] + \log\sigma + \text{const}$. Set the derivatives in $\mu$ and $\sigma$ to zero. For (b), the variance of a mixture is the average within-component variance plus the variance of the component means.</p></details>
+<details class="solution"><summary>Solution</summary>
+<p>(a) $\partial/\partial\mu$: $-\mathbb{E}_p[x-\mu]/\sigma^2 = 0 \Rightarrow \mu = \mathbb{E}_p[x]$. $\partial/\partial\sigma$: $-\mathbb{E}_p[(x-\mu)^2]/\sigma^3 + 1/\sigma = 0 \Rightarrow \sigma^2 = \mathbb{E}_p[(x-\mu)^2]$. This is the same calculation as the Gaussian MLE in lesson 10, with the data average replaced by $\mathbb{E}_p$.</p>
+<p>(b) Mean $0$. Variance $= 0.25 + \frac12(4) + \frac12(4) = 4.25$, so $\sigma = \sqrt{4.25} \approx 2.062$. That's far wider than either bump, and most of $q$'s mass sits in the gap where $p$ is nearly zero. That's mode-covering.</p></details>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="check">9. Quick check</h2>
+<div class="quiz" data-answer="c">
+  <div class="q">A language model's validation loss is 2.0 nats per token. What is its perplexity?</div>
+  <div class="opts">
+    <button data-k="a">2.0</button>
+    <button data-k="b">4.0, because $2^2$</button>
+    <button data-k="c">About 7.39</button>
+    <button data-k="d">About 0.135</button>
+  </div>
+  <div class="explain">Perplexity is $e^{\text{CE}}$ when CE is in nats: $e^{2} \approx 7.39$. $2^2$ would be right only if the loss were measured in bits.</div>
+</div>
+<div class="quiz" data-answer="b">
+  <div class="q">During training, your model assigns probability exactly 0 to a token that appears in a training example. What happens to the cross-entropy loss?</div>
+  <div class="opts">
+    <button data-k="a">Nothing much: one token among millions barely moves the average.</button>
+    <button data-k="b">It becomes infinite (NaN downstream), because the surprise $-\log 0$ is infinite.</button>
+    <button data-k="c">It becomes 0 for that token, since $0\log 0 = 0$.</button>
+    <button data-k="d">It equals the entropy of the data.</button>
+  </div>
+  <div class="explain">The $0\log0=0$ convention applies to outcomes the <em>data</em> never produces. Here the data produced it and the model called it impossible: $-\log q = \infty$. Softmax outputs are never exactly 0 in exact arithmetic, which is one reason we compute in log space.</div>
+</div>
+<div class="quiz" data-answer="d">
+  <div class="q">Why is minimizing cross-entropy $H(p_{\text{data}}, q_\theta)$ equivalent to minimizing $\mathrm{KL}(p_{\text{data}}\|q_\theta)$?</div>
+  <div class="opts">
+    <button data-k="a">Because KL is symmetric.</button>
+    <button data-k="b">Because cross-entropy and KL are the same quantity.</button>
+    <button data-k="c">Because the entropy $H(p_{\text{data}})$ is always zero for text.</button>
+    <button data-k="d">Because they differ by $H(p_{\text{data}})$, which doesn't depend on $\theta$.</button>
+  </div>
+  <div class="explain">$H(p,q) = H(p) + \mathrm{KL}(p\|q)$. A constant offset doesn't change where the minimum is. It does mean the CE loss bottoms out at $H(p_{\text{data}}) \gt 0$, not at zero.</div>
+</div>
+<div class="quiz" data-answer="a">
+  <div class="q">You fit a single Gaussian $q$ to a two-peaked target $p$. Which objective yields a $q$ that sits tightly on one peak and ignores the other?</div>
+  <div class="opts">
+    <button data-k="a">Reverse KL, $\mathrm{KL}(q\|p)$</button>
+    <button data-k="b">Forward KL, $\mathrm{KL}(p\|q)$</button>
+    <button data-k="c">Either: KL is symmetric, so both give the same fit.</button>
+    <button data-k="d">Cross-entropy $H(p,q)$</button>
+  </div>
+  <div class="explain">Reverse KL averages over $q$'s own samples, so it only cares that wherever $q$ goes, $p$ is high. Covering a single peak satisfies that. Forward KL (and therefore cross-entropy) averages over $p$'s samples, so it forces $q$ to cover both peaks.</div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="summary">10. Summary</h2>
+<table>
+  <tr><th>Concept</th><th>Formula</th><th>Meaning</th></tr>
+  <tr><td>Surprise</td><td>$-\log p(x)$</td><td>information in one outcome; bits with $\log_2$, nats with $\ln$</td></tr>
+  <tr><td>Entropy</td><td>$H(p) = -\sum p\log p$</td><td>average surprise; minimum average code length; $\le \log K$</td></tr>
+  <tr><td>Cross-entropy</td><td>$H(p,q) = -\sum p\log q$</td><td>average cost of coding $p$-data with model $q$; <b>the LM loss</b></td></tr>
+  <tr><td>KL divergence</td><td>$\sum p\log\frac pq = H(p,q) - H(p)$</td><td>excess cost; $\ge 0$, $=0$ iff $p=q$; asymmetric</td></tr>
+  <tr><td>Forward / reverse KL</td><td>$\mathrm{KL}(p\|q)$ / $\mathrm{KL}(q\|p)$</td><td>mode-covering (pretraining) / mode-seeking (RLHF penalty)</td></tr>
+  <tr><td>Perplexity</td><td>$e^{\text{CE}}$</td><td>effective number of equally likely choices</td></tr>
+  <tr><td>Log-sum-exp</td><td>$m + \log\sum e^{z_j - m}$</td><td>overflow-free $\log\sum e^{z}$; gives stable log-softmax</td></tr>
+</table>
+
+<div class="workbook">
+  <h3>🛠 Workbook 11: build it</h3>
+  <p>Open <code>workbooks/11_entropy_cross_entropy_kl/exercises.py</code>. In plain Python you'll implement <code>surprise</code>, <code>entropy</code>, <code>cross_entropy</code>, <code>kl</code> and <code>perplexity</code>. Then in NumPy: a numerically stable <code>logsumexp</code> and <code>log_softmax</code> (tested with logits of ±1000), the batched <code>cross_entropy_from_logits</code> loss and its gradient (checked numerically), and random distributions to test Gibbs' inequality. The stretch part builds Huffman codes and fits a Gaussian to a bimodal target by minimizing KL in each direction, so you can watch mode-covering and mode-seeking in your own code. Grade yourself with:</p>
+  <pre><code>./course check 11</code></pre>
+  <p>Stuck for more than 20 minutes? Read the hint in the docstring, then compare against <code>solutions.py</code>.</p>
+</div>
+
+<h3>Go deeper (optional)</h3>
+<ul>
+  <li>Claude Shannon, "A Mathematical Theory of Communication" (1948). The founding paper, and still readable.</li>
+  <li>Thomas Cover &amp; Joy Thomas, <em>Elements of Information Theory</em>, ch. 2 and 5.</li>
+  <li>David MacKay, <em>Information Theory, Inference, and Learning Algorithms</em>, ch. 1–5 (free online).</li>
+  <li>Christopher Bishop, <em>Pattern Recognition and Machine Learning</em>, §1.6 and §10.1 (forward vs reverse KL figure).</li>
+</ul>
+
+</main>
+
+<script>
+Course.ready(() => {
+  const { Plot, slider, button, select, LA, fmt } = Course;
+  const log2 = Math.log2, LN2 = Math.LN2;
+
+  // ---------- fig: surprise ----------
+  {
+    const p = new Plot("#fig-surp", { xmin: -0.06, xmax: 1.06, ymin: -0.7, ymax: 8.2 });
+    let pr = 0.125; const out = document.getElementById("out-surp");
+    slider("#ctl-surp", { label: "p ", min: 0.005, max: 1, step: 0.005, value: 0.125, digits: 3 }, v => { pr = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 0.1, stepY: 1 }).axes({ step: 0.1, stepY: 1, xlabel: "probability p", ylabel: "surprise −log₂ p (bits)" });
+      [0.5, 0.25, 0.125, 0.0625].forEach((q, i) => {
+        p.line(q, 0, q, i + 1, { color: "muted", dash: [3, 4], width: 1 });
+        p.line(0, i + 1, q, i + 1, { color: "muted", dash: [3, 4], width: 1 });
+        p.label(q, i + 1, ["½", "¼", "⅛", "1/16"][i], { color: "muted", dx: 6, dy: -9, font: "12px sans-serif" });
+      });
+      p.fn(x => -log2(x), { color: "c1", width: 3, xmin: 0.004, xmax: 1, samples: 600 });
+      const s = -log2(pr);
+      p.line(pr, 0, pr, s, { color: "c2", width: 2 });
+      p.point(pr, s, { r: 6, color: "c2" });
+      out.textContent = `p = ${pr.toFixed(3)}    surprise = ${s.toFixed(3)} bits = ${(s * LN2).toFixed(3)} nats` +
+        `    (as surprising as ${s.toFixed(2)} fair coins all landing heads)`;
+    });
+  }
+
+  // ---------- fig: coin entropy ----------
+  {
+    const p = new Plot("#fig-coin", { xmin: -0.06, xmax: 1.06, ymin: -0.1, ymax: 1.15 });
+    let pr = 0.9; const out = document.getElementById("out-coin");
+    const t = x => (x <= 0 || x >= 1) ? 0 : -x * log2(x);
+    const H = x => t(x) + t(1 - x);
+    slider("#ctl-coin", { label: "P(heads) = p ", min: 0, max: 1, step: 0.01, value: 0.9 }, v => { pr = v; p.render(); });
+    p.render(p => {
+      p.grid({ step: 0.1, stepY: 0.1 }).axes({ step: 0.1, stepY: 0.2, xlabel: "p", ylabel: "bits" });
+      p.fn(x => t(x), { color: "c1", width: 1.5, dash: [6, 4], xmin: 0, xmax: 1 });
+      p.fn(x => t(1 - x), { color: "c2", width: 1.5, dash: [6, 4], xmin: 0, xmax: 1 });
+      p.fn(H, { color: "c5", width: 3, xmin: 0, xmax: 1 });
+      p.label(0.2, t(0.2) + 0.05, "heads term", { color: "c1", font: "12px sans-serif", align: "center" });
+      p.label(0.8, t(0.2) + 0.05, "tails term", { color: "c2", font: "12px sans-serif", align: "center" });
+      p.label(0.5, 1.07, "H(p)", { color: "c5", align: "center" });
+      p.line(pr, 0, pr, H(pr), { color: "muted", dash: [3, 3], width: 1 });
+      p.point(pr, H(pr), { r: 6, color: "c5" });
+      const h = H(pr);
+      out.textContent = `p = ${pr.toFixed(2)}:  H = ${t(pr).toFixed(3)} + ${t(1 - pr).toFixed(3)} = ${h.toFixed(3)} bits per flip` +
+        `\n1000 flips of this coin compress to about ${Math.round(1000 * h)} bits (a fair coin needs 1000).`;
+    });
+  }
+
+  // ---------- fig: Huffman code lengths ----------
+  {
+    const dists = {
+      dyadic: { names: ["A", "B", "C", "D"], p: [0.5, 0.25, 0.125, 0.125] },
+      uniform: { names: ["A", "B", "C", "D"], p: [0.25, 0.25, 0.25, 0.25] },
+      five: { names: ["A", "B", "C", "D", "E"], p: [0.4, 0.2, 0.2, 0.1, 0.1] },
+      skewed: { names: ["A", "B", "C", "D", "E"], p: [0.7, 0.1, 0.1, 0.05, 0.05] },
+      letters: { names: ["e", "t", "a", "o", "i", "n", "s", "h"], p: [0.24, 0.17, 0.15, 0.14, 0.12, 0.08, 0.06, 0.04] },
+      extreme: { names: ["A", "B", "C"], p: [0.96, 0.02, 0.02] },
+    };
+    const huffman = probs => {
+      // returns codewords; nodes: {p, kids:[a,b]} or {p, sym}
+      let nodes = probs.map((q, i) => ({ p: q, sym: i, id: i })); let id = probs.length;
+      if (nodes.length === 1) return ["0"];
+      while (nodes.length > 1) {
+        nodes.sort((a, b) => a.p - b.p || a.id - b.id);
+        const [a, b] = nodes.splice(0, 2); nodes.push({ p: a.p + b.p, kids: [a, b], id: id++ });
+      }
+      const codes = []; const walk = (n, s) => { if (n.kids) { walk(n.kids[0], s + "0"); walk(n.kids[1], s + "1"); } else codes[n.sym] = s; };
+      walk(nodes[0], ""); return codes;
+    };
+    let cur = "dyadic"; const out = document.getElementById("out-code");
+    const p = new Plot("#fig-code", { xmin: -0.5, xmax: 8.3, ymin: -1.1, ymax: 6.6 });
+    select("#ctl-code", "distribution ", [["dyadic", "½ ¼ ⅛ ⅛ (dyadic)"], ["uniform", "uniform over 4"], ["five", "0.4 0.2 0.2 0.1 0.1"], ["skewed", "skewed 0.7 …"], ["letters", "8 letters (English-ish)"], ["extreme", "0.96 0.02 0.02"]], v => { cur = v; p.render(); });
+    p.render(p => {
+      const D = dists[cur], n = D.p.length, codes = huffman(D.p);
+      p.setView(-0.6, Math.max(n, 5) + 0.3, -1.1, 6.6);
+      for (let y = 1; y <= 6; y++) { p.line(-0.6, y, n + 0.3, y, { color: "grid", width: 1 }); p.label(-0.15, y, String(y), { color: "muted", align: "right", font: "11px monospace" }); }
+      p.line(-0.1, 0, n + 0.3, 0, { color: "axis", width: 1.2 });
+      p.label(8, 12, "bits per symbol", { px: true, color: "muted", font: "12px sans-serif" });
+      let H = 0, L = 0;
+      D.p.forEach((q, i) => {
+        const ideal = -log2(q), len = codes[i].length; H += q * ideal; L += q * len;
+        p.rect(i + 0.12, 0, i + 0.48, ideal, { fill: "c1", fillAlpha: .7, color: "c1", width: 1 });
+        p.rect(i + 0.52, 0, i + 0.88, len, { fill: "c2", fillAlpha: .7, color: "c2", width: 1 });
+        p.label(i + 0.5, Math.max(ideal, len), `p=${fmt(q)}`, { align: "center", dy: -10, font: "11px monospace", color: "fg" });
+        p.label(i + 0.5, 0, D.names[i], { align: "center", dy: 12, font: "700 13px sans-serif", color: "fg" });
+        p.label(i + 0.5, 0, codes[i], { align: "center", dy: 28, font: "12px monospace", color: "c2" });
+      });
+      const lx = Math.max(n, 5) - 1.6; p.rect(lx, 6.05, lx + 0.2, 6.35, { fill: "c1", fillAlpha: .7, color: "c1", width: 1 }); p.label(lx + 0.25, 6.2, "ideal −log₂ p", { color: "c1", font: "12px sans-serif" });
+      p.rect(lx, 5.55, lx + 0.2, 5.85, { fill: "c2", fillAlpha: .7, color: "c2", width: 1 }); p.label(lx + 0.25, 5.7, "Huffman length", { color: "c2", font: "12px sans-serif" });
+      out.textContent = `entropy H = Σ p·(−log₂ p) = ${H.toFixed(3)} bits     Huffman average L = Σ p·len = ${L.toFixed(3)} bits` +
+        `     naive fixed-length code: ${Math.ceil(log2(n))} bits` + `\nH ≤ L < H + 1 ✓   (waste: ${(L - H).toFixed(3)} bits/symbol)`;
+    });
+  }
+
+  // ---------- fig: two distributions over 5 tokens ----------
+  {
+    const toks = ["mat", "rug", "floor", "cat", "moon"];
+    const P = [0.5, 0.2, 0.15, 0.1, 0.05], Q = [0.3, 0.3, 0.2, 0.1, 0.1];
+    const out = document.getElementById("out-kl");
+    const p = new Plot("#fig-kl", { xmin: -0.5, xmax: 5.05, ymin: -0.1, ymax: 1.1 });
+    const b = new Plot("#fig-kl-bars", { xmin: 0, xmax: 4, ymin: -0.35, ymax: 3 });
+    const clampP = v => Math.max(0.002, Math.min(0.99, v));
+    const mk = (arr, i, off, color) => ({ x: i + off, y: arr[i], color, arr, i, constrain: (x, y) => [i + off, clampP(y)] });
+    const hs = [...P.map((_, i) => mk(P, i, 0.28, "c1")), ...Q.map((_, i) => mk(Q, i, 0.72, "c2"))];
+    const renorm = (arr, i, v) => {
+      const rest = arr.reduce((s, x, j) => s + (j === i ? 0 : x), 0);
+      arr[i] = v;
+      arr.forEach((x, j) => { if (j !== i) arr[j] = rest > 1e-12 ? x * (1 - v) / rest : (1 - v) / (arr.length - 1); });
+    };
+    const sync = () => hs.forEach(h => { h.y = h.arr[h.i]; });
+    const ent = a => -a.reduce((s, x) => s + (x > 0 ? x * Math.log(x) : 0), 0);
+    const ce = (a, c) => -a.reduce((s, x, j) => s + (x > 0 ? x * Math.log(c[j]) : 0), 0);
+    p.draggable(hs, h => { renorm(h.arr, h.i, h.y); sync(); b.render(); });
+    const set = arr => { arr.forEach((v, j) => { Q[j] = v; }); sync(); p.render(); };
+    button("#ctl-kl", "q = p", () => set(P.slice()));
+    button("#ctl-kl", "q uniform", () => set([0.2, 0.2, 0.2, 0.2, 0.2]));
+    button("#ctl-kl", "q confident & wrong", () => set([0.01, 0.02, 0.02, 0.05, 0.9]));
+    button("#ctl-kl", "reset", () => { [0.5, 0.2, 0.15, 0.1, 0.05].forEach((v, j) => { P[j] = v; }); set([0.3, 0.3, 0.2, 0.1, 0.1]); });
+    p.render(p => {
+      p.grid({ step: 1, stepY: 0.1 });
+      p.line(-0.5, 0, 5.05, 0, { color: "axis", width: 1.2 });
+      for (let y = 0.2; y <= 1.001; y += 0.2) p.label(-0.1, y, y.toFixed(1), { color: "muted", align: "right", font: "11px monospace" });
+      toks.forEach((t, i) => {
+        p.rect(i + 0.1, 0, i + 0.46, P[i], { fill: "c1", fillAlpha: .7, color: "c1", width: 1 });
+        p.rect(i + 0.54, 0, i + 0.9, Q[i], { fill: "c2", fillAlpha: .7, color: "c2", width: 1 });
+        p.label(i + 0.5, 0, t, { align: "center", baseline: "top", dy: 4, font: "12px monospace", color: "muted" });
+      });
+      p.label(60, 14, "p (true)", { px: true, color: "c1" }); p.label(140, 14, "q (model)", { px: true, color: "c2" });
+      p.drawHandles();
+      b.render();
+      const H = ent(P), C = ce(P, Q), kpq = C - H, kqp = ce(Q, P) - ent(Q);
+      out.textContent = `p = [${P.map(x => x.toFixed(2)).join(", ")}]   q = [${Q.map(x => x.toFixed(2)).join(", ")}]\n` +
+        `H(p) = ${H.toFixed(3)}   H(p,q) = ${C.toFixed(3)}   KL(p‖q) = ${kpq.toFixed(3)}   KL(q‖p) = ${kqp.toFixed(3)}   nats`;
+    });
+    b.render(b => {
+      const H = ent(P), C = ce(P, Q), kpq = Math.max(0, C - H), kqp = Math.max(0, ce(Q, P) - ent(Q));
+      const top = Math.max(2.5, C, kqp) * 1.12; b.setView(0, 4, -top * 0.12, top);
+      b.line(0, 0, 4, 0, { color: "axis", width: 1.2 });
+      // H(p) bar
+      b.rect(0.15, 0, 0.85, H, { fill: "c1", fillAlpha: .7, color: "c1", width: 1 });
+      // H(p,q) = H(p) + KL stacked
+      b.rect(1.15, 0, 1.85, H, { fill: "c1", fillAlpha: .45, color: "c1", width: 1 });
+      b.rect(1.15, H, 1.85, C, { fill: "c4", fillAlpha: .7, color: "c4", width: 1 });
+      b.rect(2.15, 0, 2.85, kpq, { fill: "c4", fillAlpha: .7, color: "c4", width: 1 });
+      b.rect(3.15, 0, 3.85, kqp, { fill: "c6", fillAlpha: .7, color: "c6", width: 1 });
+      [[0.5, H], [1.5, C], [2.5, kpq], [3.5, kqp]].forEach(([x, v]) => b.label(x, v, v.toFixed(2), { align: "center", dy: -9, font: "11px monospace" }));
+      ["H(p)", "H(p,q)", "KL(p‖q)", "KL(q‖p)"].forEach((s, i) => b.label(i + 0.5, 0, s, { align: "center", baseline: "top", dy: 5, font: "12px sans-serif", color: ["c1", "c5", "c4", "c6"][i] }));
+      if ((C - H) / top > 0.08) b.label(1.5, H + (C - H) / 2, "+KL", { align: "center", font: "11px sans-serif", color: "fg" });
+      b.label(6, 12, "nats", { px: true, color: "muted", font: "12px sans-serif" });
+    });
+  }
+
+  // ---------- fig: forward vs reverse KL ----------
+  {
+    const out = document.getElementById("out-fr");
+    const N = 361, X0 = -9, X1 = 9, dx = (X1 - X0) / (N - 1), xs = Array.from({ length: N }, (_, i) => X0 + i * dx);
+    const s0 = 0.6, LOG2PI = Math.log(2 * Math.PI);
+    let d = 2, mu = 1, sg = 0.8, dir = "forward", logp = [];
+    const logN = (x, m, s) => -0.5 * ((x - m) / s) ** 2 - Math.log(s) - 0.5 * LOG2PI;
+    const makeP = () => { logp = xs.map(x => { const a = logN(x, -d, s0), b = logN(x, d, s0), m = Math.max(a, b); return m + Math.log(Math.exp(a - m) + Math.exp(b - m)) + Math.log(0.5); }); };
+    const kls = (m, s) => {
+      let f = 0, r = 0;
+      for (let i = 0; i < N; i++) { const lq = logN(xs[i], m, s), lp = logp[i], pp = Math.exp(lp), qq = Math.exp(lq); f += pp * (lp - lq); r += qq * (lq - lp); }
+      return [f * dx, r * dx];
+    };
+    makeP();
+    const top = new Plot("#fig-fr", { xmin: -6.4, xmax: 6.4, ymin: -0.05, ymax: 0.75 });
+    const MU = [-4, 4], SG = [0.2, 3.2], NR = 50, NC = 80;
+    const land = new Plot("#fig-fr-land", { xmin: -4.9, xmax: 4.3, ymin: -0.1, ymax: 3.35 });
+    let M = null;
+    const buildLand = () => {
+      M = [];
+      for (let r = 0; r < NR; r++) {
+        const s = SG[1] - (r + 0.5) / NR * (SG[1] - SG[0]), row = [];
+        for (let c = 0; c < NC; c++) { const m = MU[0] + (c + 0.5) / NC * (MU[1] - MU[0]); const k = kls(m, s)[dir === "forward" ? 0 : 1]; row.push(Math.log(Math.max(k, 1e-3))); }
+        M.push(row);
+      }
+    };
+    const handle = { x: mu, y: sg, color: "c4", constrain: (x, y) => [Math.max(MU[0], Math.min(MU[1], x)), Math.max(SG[0], Math.min(SG[1], y))] };
+    const ctl = "#ctl-fr";
+    const sMu = slider(ctl, { label: "μ ", min: -4, max: 4, step: 0.01, value: mu }, v => { mu = v; anim.stop(); redraw(); });
+    const sSg = slider(ctl, { label: "σ ", min: 0.2, max: 3.2, step: 0.01, value: sg }, v => { sg = v; anim.stop(); redraw(); });
+    slider(ctl, { label: "mode separation d ", min: 0.5, max: 3, step: 0.1, value: d }, v => { d = v; makeP(); buildLand(); redraw(); });
+    select(ctl, "landscape ", [["forward", "forward KL(p‖q)"], ["reverse", "reverse KL(q‖p)"]], v => { dir = v; buildLand(); redraw(); });
+    let target = "forward", steps = 0;
+    const anim = Course.animator(() => {
+      let th = [mu, Math.log(sg)], g = [0, 0];
+      const k = (m, ls) => kls(m, Math.exp(ls))[target === "forward" ? 0 : 1];
+      for (let it = 0; it < 6; it++) {
+        const h = 1e-4;
+        g = [(k(th[0] + h, th[1]) - k(th[0] - h, th[1])) / (2 * h), (k(th[0], th[1] + h) - k(th[0], th[1] - h)) / (2 * h)];
+        const cl = v => Math.max(-0.08, Math.min(0.08, v)); th = [th[0] - cl(0.05 * g[0]), th[1] - cl(0.05 * g[1])]; steps++;
+      }
+      mu = Math.max(-4, Math.min(4, th[0])); sg = Math.max(0.2, Math.min(3.2, Math.exp(th[1])));
+      sMu.set(mu); sSg.set(sg); redraw();
+      const more = Math.hypot(g[0], g[1]) > 2e-4 && steps < 3000;
+      if (!more) { anim.stop(); top.render(); }
+      return more;
+    });
+    const go = t => { anim.stop(); target = t; steps = 0; if (dir !== t) { dir = t; dirSel.value = t; buildLand(); } anim.start(); };
+    const dirSel = document.querySelector("#ctl-fr select");
+    button(ctl, "descend forward KL", () => go("forward"));
+    button(ctl, "descend reverse KL", () => go("reverse"));
+    button(ctl, "reset q", () => { anim.stop(); mu = 1; sg = 0.8; sMu.set(mu); sSg.set(sg); redraw(); });
+    land.draggable([handle], h => { anim.stop(); mu = h.x; sg = h.y; sMu.set(mu); sSg.set(sg); top.render(); });
+    const redraw = () => { handle.x = mu; handle.y = sg; top.render(); land.render(); };
+    top.render(p => {
+      p.grid({ step: 1, stepY: 0.1 }).axes({ step: 1, stepY: 0.2, xlabel: "x" });
+      const pp = xs.map((x, i) => [x, Math.exp(logp[i])]).filter(([x]) => x >= -6.5 && x <= 6.5);
+      p.polygon([[pp[0][0], 0], ...pp, [pp[pp.length - 1][0], 0]], { fill: "c3", fillAlpha: .25, color: "c3", width: 2 });
+      p.fn(x => Math.exp(logN(x, mu, sg)), { color: "c5", width: 3, samples: 500 });
+      p.label(-d, Math.exp(logN(-d, -d, s0)) * 0.5 + 0.02, "p", { color: "c3", align: "center", dy: -6 });
+      p.label(mu, Math.min(0.7, Math.exp(logN(mu, mu, sg))), "q", { color: "c5", align: "center", dy: -10 });
+      const [f, r] = kls(mu, sg);
+      out.textContent = `q: μ = ${mu.toFixed(2)}, σ = ${sg.toFixed(2)}     forward KL(p‖q) = ${f.toFixed(3)}     reverse KL(q‖p) = ${r.toFixed(3)} nats` +
+        (anim.running ? `      descending ${target} KL… step ${steps}` : "");
+    });
+    land.render(L => {
+      if (!M) buildLand();
+      L.heatmap(M, { x0: MU[0], x1: MU[1], y0: SG[0], y1: SG[1], cmap: "viridis" });
+      for (let m = -4; m <= 4; m++) L.label(m, SG[0], String(m), { align: "center", baseline: "top", dy: 3, font: "11px monospace", color: "muted" });
+      for (let s = 0.5; s <= 3.01; s += 0.5) L.label(MU[0], s, s.toFixed(1), { align: "right", dx: -5, font: "11px monospace", color: "muted" });
+      L.label(MU[0] - 0.55, 3.27, "σ", { color: "muted", font: "12px sans-serif" });
+      L.label(4.15, SG[0], "μ", { color: "muted", font: "12px sans-serif", baseline: "top", dy: 3 });
+      L.label(MU[0] + 0.1, 3.27, `log ${dir === "forward" ? "KL(p‖q)" : "KL(q‖p)"} over (μ, σ): darker = lower`, { color: "fg", font: "12px sans-serif" });
+      L.drawHandles();
+    });
+  }
+});
+</script>
+</body>
+</html>
